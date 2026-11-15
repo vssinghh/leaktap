@@ -17,7 +17,7 @@ npx leaktap ui
 
 # Watch Claude Code, Codex CLI, or Antigravity CLI live
 npx leaktap tap --inspect-api --scrub-env -- claude
-npx leaktap tap --inspect-api --scrub-env -- agy
+npx leaktap tap --scrub-env -- agy
 ```
 
 Source and docs: https://github.com/vssinghh/leaktap

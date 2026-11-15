@@ -97,14 +97,17 @@ Use `j`/`k` or arrow keys to move, `1`-`3` or `Tab` to switch tabs, and `c` to s
 
 ### Clean leaked keys from old chat logs
 
-Runs a dry-run preview by default. Passing `--apply` writes a `.leaktap.bak` backup and replaces only the secret strings so `.jsonl` files stay valid for `/resume`:
+Runs a dry-run preview by default. Passing `--apply` writes a `.leaktap.bak` backup and replaces only the secret strings so `.jsonl` files stay valid when resuming chats. Add `--no-backup` if you do not want backup copies left on disk:
 
 ```bash
 # Preview what would be cleaned
 leaktap clean
 
-# Apply changes
+# Apply changes and keep .leaktap.bak backups
 leaktap clean --apply
+
+# Apply changes without keeping backup copies
+leaktap clean --apply --no-backup
 ```
 
 ### Watch live CLI sessions
@@ -112,14 +115,17 @@ leaktap clean --apply
 Wraps `claude`, `codex`, `agy`, `gemini`, or an MCP server command:
 
 - `--scrub-env` strips extra secret variables from your shell like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` before starting the command, while keeping the CLI's own API key.
-- `--inspect-api` points `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` at a local port on `localhost` so `leaktap` can check outgoing HTTP headers and prompt bodies before forwarding requests over HTTPS. For Antigravity CLI and Gemini CLI, `--inspect-api` requires `GEMINI_API_KEY` mode rather than browser login so `GOOGLE_GEMINI_BASE_URL` takes effect.
+- `--inspect-api` points `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` at a local port on `localhost` so `leaktap` can check outgoing HTTP headers and prompt bodies before forwarding requests over HTTPS. For Antigravity CLI, Google sign-in skips `GOOGLE_GEMINI_BASE_URL`; pass `--settings '{"modelProvider":"gemini"}'` with `GEMINI_API_KEY` set when using `--inspect-api`.
 - Outbound TCP connections opened by the CLI and its child processes are logged automatically without `sudo`.
 
 ```bash
-# Watch Claude Code, Codex CLI, or Antigravity CLI
+# Watch Claude Code or Codex CLI
 leaktap tap --inspect-api --scrub-env -- claude
 leaktap tap --inspect-api --scrub-env -- codex
-leaktap tap --inspect-api --scrub-env -- agy
+
+# Watch Antigravity CLI with Google sign-in, or inspect API calls with GEMINI_API_KEY
+leaktap tap --scrub-env -- agy
+leaktap tap --inspect-api --scrub-env -- agy --settings '{"modelProvider":"gemini"}'
 
 # Wrap an MCP server in .mcp.json or .agents/mcp_config.json
 leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
