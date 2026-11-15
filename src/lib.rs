@@ -1,11 +1,15 @@
+pub mod api_tap;
 pub mod cleaner;
 pub mod cli;
 pub mod discovery;
+pub mod header_audit;
 pub mod mcp_audit;
+pub mod netwatch;
 pub mod report;
 pub mod rules;
 pub mod scanner;
 pub mod tap;
+pub mod tui;
 
 use crate::cleaner::clean_transcripts;
 use crate::cli::{CleanArgs, Cli, Commands, FailThreshold, OutputFormat, ScanArgs};
@@ -18,12 +22,20 @@ use crate::report::FullScanReport;
 use crate::rules::{RuleEngine, Severity};
 use crate::scanner::scan_transcripts;
 use crate::tap::run_tap;
+use crate::tui::run_ui;
 use std::time::Instant;
 
 pub fn execute(cli: Cli) -> i32 {
     match cli.command.unwrap_or(Commands::Scan(ScanArgs::default())) {
         Commands::Scan(args) => execute_scan(&args),
         Commands::Clean(args) => execute_clean(&args),
+        Commands::Ui(args) => match run_ui(&args) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("leaktap ui error: {err}");
+                2
+            }
+        },
         Commands::Tap(args) => match run_tap(&args) {
             Ok(code) => code,
             Err(err) => {
