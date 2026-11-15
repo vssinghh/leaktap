@@ -6,11 +6,59 @@ use leaktap::run_scan_report;
 use leaktap::tui::{render_snapshot_text, ActiveTab, DashboardApp};
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpListener};
 use std::process::Command;
 use std::thread;
 use tempfile::TempDir;
+
+fn serve_single_mock_http(
+    listener: TcpListener,
+    content_type: &'static str,
+    resp_body: &'static str,
+) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut req_line = String::new();
+        reader.read_line(&mut req_line).unwrap();
+
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).unwrap();
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse::<usize>().unwrap_or(0);
+                }
+            }
+        }
+        if content_len > 0 {
+            let mut req_body = vec![0u8; content_len];
+            reader.read_exact(&mut req_body).unwrap();
+        }
+
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let _ = stream.shutdown(Shutdown::Write);
+        let mut eof_buf = [0u8; 64];
+        while let Ok(n) = reader.read(&mut eof_buf) {
+            if n == 0 {
+                break;
+            }
+        }
+        req_line
+    })
+}
 
 fn build_realistic_fixture() -> TempDir {
     let dir = TempDir::new().expect("tempdir");
@@ -240,26 +288,11 @@ fn inspect_api_catches_user_agent_email_leak_and_prompt_secrets_without_tls_cert
     let mock_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mock_port = mock_listener.local_addr().unwrap().port();
 
-    let server_handle = thread::spawn(move || {
-        let (mut stream, _) = mock_listener.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        loop {
-            let mut line = String::new();
-            let n = reader.read_line(&mut line).unwrap();
-            if n == 0 || line == "\r\n" || line == "\n" {
-                break;
-            }
-        }
-        let body = r#"{"id":"msg_mock_01","type":"message","content":"ok"}"#;
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
-        stream.flush().unwrap();
-    });
+    let server_handle = serve_single_mock_http(
+        mock_listener,
+        "application/json",
+        r#"{"id":"msg_mock_01","type":"message","content":"ok"}"#,
+    );
 
     let bin = env!("CARGO_BIN_EXE_leaktap");
     let tmp = TempDir::new().unwrap();
@@ -392,33 +425,11 @@ fn inspect_api_supports_gemini_cli_and_ignores_x_goog_api_key_auth_header() {
     let mock_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mock_port = mock_listener.local_addr().unwrap().port();
 
-    let server_handle = thread::spawn(move || {
-        let (mut stream, _) = mock_listener.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut req_line = String::new();
-        reader.read_line(&mut req_line).unwrap();
-        assert!(
-            req_line.contains("/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"),
-            "unexpected upstream path: {req_line}"
-        );
-        loop {
-            let mut line = String::new();
-            let n = reader.read_line(&mut line).unwrap();
-            if n == 0 || line == "\r\n" || line == "\n" {
-                break;
-            }
-        }
-        let body =
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini_ok\"}]}}]}\n\n";
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
-        stream.flush().unwrap();
-    });
+    let server_handle = serve_single_mock_http(
+        mock_listener,
+        "text/event-stream",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini_ok\"}]}}]}\n\n",
+    );
 
     let bin = env!("CARGO_BIN_EXE_leaktap");
     let tmp = TempDir::new().unwrap();
@@ -474,7 +485,11 @@ fn inspect_api_supports_gemini_cli_and_ignores_x_goog_api_key_auth_header() {
         .output()
         .expect("run leaktap tap --inspect-api for gemini");
 
-    server_handle.join().unwrap();
+    let req_line = server_handle.join().unwrap();
+    assert!(
+        req_line.contains("/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"),
+        "unexpected upstream path: {req_line}"
+    );
     assert!(
         output.status.success(),
         "stderr: {}",
