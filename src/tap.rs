@@ -1,24 +1,30 @@
+use crate::api_tap::{start_local_api_tap, TapCallback};
 use crate::cli::TapArgs;
+use crate::discovery::home_dir;
+use crate::header_audit::HeaderAuditor;
+use crate::netwatch::spawn_socket_watcher;
 use crate::rules::{is_likely_placeholder, shannon_entropy, RuleCategory, RuleEngine};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Serialize)]
-struct WiretapEvent<'a> {
-    ts_ms: u128,
-    stream: &'a str,
-    kind: &'a str,
-    rule_id: &'a str,
-    severity: &'a str,
-    detail: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WiretapEvent {
+    pub ts_ms: u128,
+    pub stream: String,
+    pub kind: String,
+    pub rule_id: String,
+    pub severity: String,
+    pub detail: String,
 }
 
 const SENSITIVE_ENV_NAMES: &[&str] = &[
@@ -33,23 +39,69 @@ const SENSITIVE_ENV_NAMES: &[&str] = &[
     "MONGODB_URI",
 ];
 
+pub fn default_live_log_path() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".leaktap").join("live.jsonl"))
+}
+
+fn open_private_append_file(path: &PathBuf) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new().create(true).append(true).open(path)
+    }
+}
+
 pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     let program = &args.command[0];
     let cmd_args = &args.command[1..];
 
     let engine = Arc::new(RuleEngine::all_rules());
+    let header_auditor = Arc::new(HeaderAuditor::new());
     let url_regex = Arc::new(
         Regex::new(r#"https?://([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})(?::\d+)?(?:/[^\s"'<>)]*)?"#)
             .expect("valid url regex"),
     );
 
-    let log_writer: Option<Arc<Mutex<std::fs::File>>> = match &args.log {
-        Some(p) => {
-            let f = OpenOptions::new().create(true).append(true).open(p)?;
-            Some(Arc::new(Mutex::new(f)))
+    let mut writers: Vec<File> = Vec::new();
+    if let Some(ref p) = args.log {
+        writers.push(open_private_append_file(p)?);
+    }
+    if !args.no_live_log {
+        if let Some(default_log) = default_live_log_path() {
+            let same_as_explicit = args.log.as_ref().is_some_and(|p| p == &default_log);
+            if !same_as_explicit {
+                if let Ok(f) = open_private_append_file(&default_log) {
+                    writers.push(f);
+                }
+            }
         }
-        None => None,
-    };
+    }
+    let log_writers = Arc::new(Mutex::new(writers));
+
+    let quiet = args.quiet;
+    let writers_for_cb = Arc::clone(&log_writers);
+    let emit_cb: TapCallback = Arc::new(move |stream, kind, rule_id, severity, detail| {
+        emit_alert(
+            quiet,
+            &writers_for_cb,
+            stream,
+            kind,
+            rule_id,
+            severity,
+            detail,
+        );
+    });
 
     let allow_set: HashSet<String> = args
         .allow_env
@@ -80,9 +132,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             for k in &exposed_env_keys {
                 cmd.env_remove(k);
             }
-            emit_alert(
-                args.quiet,
-                &log_writer,
+            emit_cb(
                 "env",
                 "env_scrubbed",
                 "env-inheritance",
@@ -94,9 +144,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
                 ),
             );
         } else {
-            emit_alert(
-                args.quiet,
-                &log_writer,
+            emit_cb(
                 "env",
                 "env_inherited",
                 "env-inheritance",
@@ -110,30 +158,75 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         }
     }
 
+    // Optional zero-cert local loopback API tap (`--inspect-api`)
+    let local_api_tap = if args.inspect_api {
+        let anth_upstream = env::var("LEAKTAP_UPSTREAM_ANTHROPIC_URL")
+            .or_else(|_| env::var("ANTHROPIC_BASE_URL"))
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+        let oai_upstream = env::var("LEAKTAP_UPSTREAM_OPENAI_URL")
+            .or_else(|_| env::var("OPENAI_BASE_URL"))
+            .unwrap_or_else(|_| "https://api.openai.com".to_string());
+
+        let tap = start_local_api_tap(
+            anth_upstream,
+            oai_upstream,
+            Arc::clone(&engine),
+            Arc::clone(&header_auditor),
+            Arc::clone(&emit_cb),
+        )?;
+        cmd.env("ANTHROPIC_BASE_URL", &tap.anthropic_base_url);
+        cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
+        Some(tap)
+    } else {
+        None
+    };
+
     let mut child = cmd.spawn()?;
+    let child_pid = child.id();
     let child_stdin = child.stdin.take().expect("piped stdin");
     let child_stdout = child.stdout.take().expect("piped stdout");
     let child_stderr = child.stderr.take().expect("piped stderr");
+
+    // Zero-root OS socket watcher for outbound TCP connections across child process tree
+    let stop_sockets = Arc::new(AtomicBool::new(false));
+    let socket_handle = if !args.no_net_watch {
+        let emit_sock = Arc::clone(&emit_cb);
+        Some(spawn_socket_watcher(
+            child_pid,
+            Arc::clone(&stop_sockets),
+            move |remote| {
+                emit_sock(
+                    "socket",
+                    "outbound_socket",
+                    "tcp-connection",
+                    "MEDIUM",
+                    format!("Outbound TCP connection opened to {remote}"),
+                );
+            },
+        ))
+    } else {
+        None
+    };
 
     let seen_domains: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // stdin pump (detached so non-closing parent stdin does not hang after child exits)
     {
         let engine = Arc::clone(&engine);
+        let auditor = Arc::clone(&header_auditor);
         let url_re = Arc::clone(&url_regex);
         let domains = Arc::clone(&seen_domains);
-        let log_w = log_writer.clone();
-        let quiet = args.quiet;
+        let emit = Arc::clone(&emit_cb);
         thread::spawn(move || {
             pump_stream(
                 io::stdin(),
                 child_stdin,
                 "stdin",
-                quiet,
                 &engine,
+                &auditor,
                 &url_re,
                 &domains,
-                &log_w,
+                &emit,
             );
         });
     }
@@ -141,20 +234,20 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     // stdout pump — preserves exact raw bytes so MCP JSON-RPC framing is never altered
     let stdout_handle = {
         let engine = Arc::clone(&engine);
+        let auditor = Arc::clone(&header_auditor);
         let url_re = Arc::clone(&url_regex);
         let domains = Arc::clone(&seen_domains);
-        let log_w = log_writer.clone();
-        let quiet = args.quiet;
+        let emit = Arc::clone(&emit_cb);
         thread::spawn(move || {
             pump_stream(
                 child_stdout,
                 io::stdout(),
                 "stdout",
-                quiet,
                 &engine,
+                &auditor,
                 &url_re,
                 &domains,
-                &log_w,
+                &emit,
             );
         })
     };
@@ -162,25 +255,32 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     // stderr pump
     let stderr_handle = {
         let engine = Arc::clone(&engine);
+        let auditor = Arc::clone(&header_auditor);
         let url_re = Arc::clone(&url_regex);
         let domains = Arc::clone(&seen_domains);
-        let log_w = log_writer.clone();
-        let quiet = args.quiet;
+        let emit = Arc::clone(&emit_cb);
         thread::spawn(move || {
             pump_stream(
                 child_stderr,
                 io::stderr(),
                 "stderr",
-                quiet,
                 &engine,
+                &auditor,
                 &url_re,
                 &domains,
-                &log_w,
+                &emit,
             );
         })
     };
 
     let status = child.wait()?;
+    stop_sockets.store(true, Ordering::Relaxed);
+    if let Some(tap) = local_api_tap {
+        tap.stop();
+    }
+    if let Some(h) = socket_handle {
+        let _ = h.join();
+    }
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
 
@@ -192,11 +292,11 @@ fn pump_stream<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
     stream_name: &'static str,
-    quiet: bool,
     engine: &RuleEngine,
+    header_auditor: &HeaderAuditor,
     url_regex: &Regex,
     seen_domains: &Mutex<HashSet<String>>,
-    log_writer: &Option<Arc<Mutex<std::fs::File>>>,
+    emit: &TapCallback,
 ) {
     let mut buf = [0u8; 8192];
     let mut line_acc: Vec<u8> = Vec::with_capacity(4096);
@@ -213,18 +313,17 @@ fn pump_stream<R: Read, W: Write>(
         }
         let _ = writer.flush();
 
-        // Inspect complete lines for secrets and outbound URLs without delaying raw byte forwarding
         for &b in &buf[..n] {
             line_acc.push(b);
             if b == b'\n' || line_acc.len() >= 64 * 1024 {
                 inspect_chunk(
                     &line_acc,
                     stream_name,
-                    quiet,
                     engine,
+                    header_auditor,
                     url_regex,
                     seen_domains,
-                    log_writer,
+                    emit,
                 );
                 line_acc.clear();
             }
@@ -235,11 +334,11 @@ fn pump_stream<R: Read, W: Write>(
         inspect_chunk(
             &line_acc,
             stream_name,
-            quiet,
             engine,
+            header_auditor,
             url_regex,
             seen_domains,
-            log_writer,
+            emit,
         );
     }
 }
@@ -247,22 +346,34 @@ fn pump_stream<R: Read, W: Write>(
 fn inspect_chunk(
     bytes: &[u8],
     stream_name: &'static str,
-    quiet: bool,
     engine: &RuleEngine,
+    header_auditor: &HeaderAuditor,
     url_regex: &Regex,
     seen_domains: &Mutex<HashSet<String>>,
-    log_writer: &Option<Arc<Mutex<std::fs::File>>>,
+    emit: &TapCallback,
 ) {
     let text = String::from_utf8_lossy(bytes);
+
+    // Check if the line looks like an HTTP header dump (`> User-Agent: ...` or `User-Agent: ...`)
+    let trimmed = text.trim_start_matches(['>', '<', ' ', '\t']);
+    if let Some((hdr_k, hdr_v)) = parse_probable_http_header(trimmed) {
+        for hf in header_auditor.inspect_header(hdr_k, hdr_v, engine) {
+            emit(
+                stream_name,
+                "header_leak",
+                hf.rule_id,
+                hf.severity.as_str(),
+                hf.detail,
+            );
+        }
+    }
 
     for m in engine.scan_text(&text) {
         let kind = match m.category {
             RuleCategory::Secret => "secret_in_flight",
             RuleCategory::Pii => "pii_in_flight",
         };
-        emit_alert(
-            quiet,
-            log_writer,
+        emit(
             stream_name,
             kind,
             m.rule_id,
@@ -284,9 +395,7 @@ fn inspect_chunk(
             .map(|mut s| s.insert(host.clone()))
             .unwrap_or(false);
         if is_new {
-            emit_alert(
-                quiet,
-                log_writer,
+            emit(
                 stream_name,
                 "outbound_endpoint",
                 "endpoint-seen",
@@ -297,32 +406,54 @@ fn inspect_chunk(
     }
 }
 
+fn parse_probable_http_header(line: &str) -> Option<(&str, &str)> {
+    let (k, v) = line.split_once(':')?;
+    let key = k.trim();
+    if key.is_empty()
+        || key.len() > 48
+        || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return None;
+    }
+    let lower = key.to_ascii_lowercase();
+    if lower == "user-agent"
+        || lower == "from"
+        || lower == "referer"
+        || lower.starts_with("x-")
+        || lower.starts_with("anthropic-")
+        || lower.starts_with("openai-")
+    {
+        return Some((key, v.trim()));
+    }
+    None
+}
+
 fn emit_alert(
     quiet: bool,
-    log_writer: &Option<Arc<Mutex<std::fs::File>>>,
+    log_writers: &Arc<Mutex<Vec<File>>>,
     stream: &str,
     kind: &str,
     rule_id: &str,
     severity: &str,
     detail: String,
 ) {
-    if let Some(lw) = log_writer {
-        let ts_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let ev = WiretapEvent {
-            ts_ms,
-            stream,
-            kind,
-            rule_id,
-            severity,
-            detail: detail.clone(),
-        };
-        if let Ok(line) = serde_json::to_string(&ev) {
-            if let Ok(mut guard) = lw.lock() {
-                let _ = writeln!(guard, "{line}");
-                let _ = guard.flush();
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let ev = WiretapEvent {
+        ts_ms,
+        stream: stream.to_string(),
+        kind: kind.to_string(),
+        rule_id: rule_id.to_string(),
+        severity: severity.to_string(),
+        detail: detail.clone(),
+    };
+    if let Ok(line) = serde_json::to_string(&ev) {
+        if let Ok(mut guard) = log_writers.lock() {
+            for w in guard.iter_mut() {
+                let _ = writeln!(w, "{line}");
+                let _ = w.flush();
             }
         }
     }
@@ -344,7 +475,6 @@ fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool {
         return true;
     }
     let upper = key.to_ascii_uppercase();
-    // Skip internal proxy / shell vars
     if matches!(
         upper.as_str(),
         "PATH" | "HOME" | "PWD" | "SHELL" | "TERM" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[command(
     name = "leaktap",
     version,
-    about = "See what your AI coding agents actually leak — local secret & MCP auditor + live session wiretap.",
-    long_about = "leaktap audits local AI coding agent transcripts (Claude Code, Codex, Cursor, Gemini CLI)\nand MCP server configs completely offline, cleans exposed credentials from local logs,\nand wiretaps live agent/MCP stdio sessions."
+    about = "See what your AI coding agents actually leak — offline log/MCP scanner, interactive dashboard, and live wiretap.",
+    long_about = "leaktap checks local AI coding logs (Claude Code, Codex, Cursor, Gemini CLI) and MCP configs\ncompletely offline, scrubs leaked keys from old chat logs, opens an interactive terminal dashboard,\nand watches live agent sessions for secret, HTTP header, and outbound connection leaks."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -15,26 +15,29 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Offline audit of local AI agent transcripts and MCP server configurations (default)
+    /// Offline check of local AI agent chat logs and MCP server configs (default)
     Scan(ScanArgs),
 
-    /// Redact exposed secrets from local AI session transcripts (dry-run by default)
+    /// Scrub leaked secrets from local AI chat logs (safe preview by default)
     Clean(CleanArgs),
 
-    /// Wiretap a live AI coding agent or MCP stdio server for secrets, env leaks, and outbound URLs
+    /// Open the interactive terminal dashboard (transcripts, MCP risks, and live wiretap stream)
+    Ui(UiArgs),
+
+    /// Wrap a live coding agent or MCP server to watch secrets, headers, env vars, and sockets
     Tap(TapArgs),
 
-    /// List all built-in secret, PII, and MCP security detection rules
+    /// List all built-in secret, privacy, header, and MCP detection rules
     Rules,
 }
 
 #[derive(Debug, Clone, Parser)]
 pub struct ScanArgs {
-    /// Specific file(s) or directory(ies) to scan (defaults to ~/.claude, ~/.codex, ~/.cursor, ~/.gemini + workspace MCP configs)
+    /// Specific file(s) or folder(s) to scan (defaults to ~/.claude, ~/.codex, ~/.cursor, ~/.gemini + workspace MCP configs)
     #[arg(short, long = "path")]
     pub paths: Vec<PathBuf>,
 
-    /// Output format: terminal receipt, structured JSON, or SARIF 2.1.0 for CI
+    /// Output format: terminal receipt, JSON, or SARIF 2.1.0 for CI
     #[arg(short, long, value_enum, default_value_t = OutputFormat::Terminal)]
     pub format: OutputFormat,
 
@@ -42,11 +45,11 @@ pub struct ScanArgs {
     #[arg(long)]
     pub no_pii: bool,
 
-    /// Skip MCP configuration supply-chain and environment exposure checks
+    /// Skip MCP config checks
     #[arg(long)]
     pub no_mcp: bool,
 
-    /// Exit with code 1 if any finding meets or exceeds this severity (useful in CI / pre-commit)
+    /// Exit with code 1 if any finding meets or exceeds this severity (useful in CI)
     #[arg(long, value_enum, default_value_t = FailThreshold::None)]
     pub fail_on: FailThreshold,
 }
@@ -80,11 +83,11 @@ pub enum FailThreshold {
 
 #[derive(Debug, Clone, Parser)]
 pub struct CleanArgs {
-    /// Specific file(s) or directory(ies) to clean (defaults to auto-discovered agent session directories)
+    /// Specific file(s) or folder(s) to clean (defaults to auto-discovered agent session folders)
     #[arg(short, long = "path")]
     pub paths: Vec<PathBuf>,
 
-    /// Write redacted files to disk (without --apply, runs a safe read-only preview)
+    /// Write scrubbed files to disk (without --apply, runs a safe read-only preview)
     #[arg(long)]
     pub apply: bool,
 
@@ -94,24 +97,51 @@ pub struct CleanArgs {
 }
 
 #[derive(Debug, Clone, Parser)]
-pub struct TapArgs {
-    /// Strip secret-looking environment variables before spawning the child process
-    #[arg(long)]
-    pub scrub_env: bool,
+pub struct UiArgs {
+    /// Specific file(s) or folder(s) to inspect in the dashboard
+    #[arg(short, long = "path")]
+    pub paths: Vec<PathBuf>,
 
-    /// Comma-separated environment variables to preserve when --scrub-env is enabled
-    #[arg(long, value_delimiter = ',')]
-    pub allow_env: Vec<String>,
-
-    /// Write structured JSONL wiretap alerts to a log file (safe for MCP stdio servers)
+    /// Custom live wiretap JSONL file to tail (defaults to ~/.leaktap/live.jsonl)
     #[arg(long)]
     pub log: Option<PathBuf>,
 
-    /// Suppress live stderr alert lines (still writes to --log if configured)
+    /// Render a single dashboard snapshot to stdout and exit (useful for scripts/tests)
+    #[arg(long)]
+    pub once: bool,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct TapArgs {
+    /// Strip secret-looking shell environment variables before starting the child command
+    #[arg(long)]
+    pub scrub_env: bool,
+
+    /// Comma-separated environment variables to keep when --scrub-env is enabled
+    #[arg(long, value_delimiter = ',')]
+    pub allow_env: Vec<String>,
+
+    /// Route ANTHROPIC_BASE_URL / OPENAI_BASE_URL through a local zero-cert loopback tap to inspect outgoing HTTP headers and prompt bodies
+    #[arg(long)]
+    pub inspect_api: bool,
+
+    /// Disable background OS TCP socket polling for the child process tree
+    #[arg(long)]
+    pub no_net_watch: bool,
+
+    /// Do not append events to ~/.leaktap/live.jsonl (used by `leaktap ui`)
+    #[arg(long)]
+    pub no_live_log: bool,
+
+    /// Write JSONL wiretap events to an explicit file path
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+
+    /// Suppress live stderr alert lines
     #[arg(long, short)]
     pub quiet: bool,
 
-    /// Command and arguments to wrap (e.g. `leaktap tap -- claude`)
+    /// Command and arguments to wrap (e.g. `leaktap tap --inspect-api --scrub-env -- claude`)
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
 }

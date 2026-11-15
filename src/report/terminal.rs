@@ -222,11 +222,13 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         ));
     } else {
         out.push_str(&format!("{}\n", st.bold("Next steps:")));
+        out.push_str("  • Open interactive dashboard:    leaktap ui\n");
         if !report.transcripts.secret_findings.is_empty() {
-            out.push_str("  • Preview local log redaction:   leaktap clean\n");
-            out.push_str("  • Apply redaction with backup:   leaktap clean --apply\n");
+            out.push_str("  • Preview & scrub local logs:    leaktap clean --apply\n");
         }
-        out.push_str("  • Wiretap a live agent session:  leaktap tap --scrub-env -- claude\n");
+        out.push_str(
+            "  • Watch live headers & prompts:  leaktap tap --inspect-api --scrub-env -- claude\n",
+        );
     }
 
     out
@@ -339,6 +341,41 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         ),
     ];
     for (sev, id, desc) in mcp_rules {
+        out.push_str(&format!("  {sev:<9} {id:<24} {}\n", st.dim(desc)));
+    }
+
+    out.push_str(&format!(
+        "\n{}\n\n",
+        st.bold("Built-in Live HTTP Header & Socket Wiretap Rules (`tap`)")
+    ));
+    let live_rules = [
+        (
+            "CRITICAL",
+            "header-secret-leak",
+            "API key or token sent inside a non-auth HTTP header.",
+        ),
+        (
+            "HIGH",
+            "header-email-leak",
+            "Developer email address embedded inside `User-Agent` or custom HTTP headers.",
+        ),
+        (
+            "MEDIUM",
+            "header-os-username",
+            "Local OS username exposed inside outgoing HTTP headers.",
+        ),
+        (
+            "MEDIUM",
+            "header-machine-hostname",
+            "Local machine hostname exposed inside outgoing HTTP headers.",
+        ),
+        (
+            "MEDIUM",
+            "tcp-connection",
+            "Outbound TCP connection opened by the wrapped agent or child MCP process.",
+        ),
+    ];
+    for (sev, id, desc) in live_rules {
         out.push_str(&format!("  {sev:<9} {id:<24} {}\n", st.dim(desc)));
     }
     out

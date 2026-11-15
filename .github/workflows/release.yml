@@ -76,3 +76,31 @@ jobs:
             -R "${{ github.repository }}" \
             --title "leaktap ${{ github.ref_name }}" \
             --generate-notes
+
+  publish-npm:
+    needs: publish-github-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Stage multi-platform npm packages
+        run: python3 scripts/stage_npm_packages.py "${{ github.ref_name }}" artifacts npm-dist
+      - name: Publish to npm (when NPM_TOKEN secret is configured)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN secret not configured yet — staged npm packages verified cleanly; skipping npm publish."
+            exit 0
+          fi
+          for dir in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 leaktap; do
+            echo "Publishing ${dir}..."
+            npm publish "./npm-dist/${dir}" --access public
+          done
