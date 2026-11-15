@@ -606,4 +606,39 @@ fn scan_and_tap_support_antigravity_cli_paths_and_env_preservation() {
         );
         assert!(!stdout.contains(&fake_stripe));
     }
+
+    // 4. Markdown-wrapped DB URIs (`postgres://...`) hash identically to raw `.env` URIs,
+    //    do not trigger false-positive pii-email on `user:pass@host`, and marketplace caches are ignored.
+    let cache_dir = fake_home
+        .path()
+        .join(".gemini/antigravity-cli/cache/marketplaces");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(
+        cache_dir.join("marketplace.json"),
+        r#"{"vendor_contact":"devrel@grafana.com"}"#,
+    )
+    .unwrap();
+
+    let db_uri = "postgres://app_admin:Pr0dDbPass_987654321@pg-primary.corp.internal:5432/orders";
+    fs::write(
+        agy_logs.join("transcript_full.jsonl"),
+        format!(
+            "{{\"content\":\"DATABASE_URL={db_uri}\"}}\n{{\"content\":\"- `DATABASE_URL`: `{db_uri}`\"}}\n"
+        ),
+    )
+    .unwrap();
+
+    let scan_out2 = Command::new(bin)
+        .current_dir(fake_workspace.path())
+        .args(["scan", "--format", "json"])
+        .env("HOME", fake_home.path())
+        .env("USERPROFILE", fake_home.path())
+        .output()
+        .expect("run scan with markdown db uri and marketplace cache");
+    assert!(scan_out2.status.success());
+    let report2: serde_json::Value = serde_json::from_slice(&scan_out2.stdout).unwrap();
+    // 1 AWS key + 1 deduplicated Database URI = 2 unique secrets (not 3)
+    assert_eq!(report2["summary"]["unique_secrets"], 2);
+    // 0 metadata exposures (neither marketplace.json nor user:pass@host/hostname inside database-uri should match)
+    assert_eq!(report2["summary"]["metadata_exposures"], 0);
 }

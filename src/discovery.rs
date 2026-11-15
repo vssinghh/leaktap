@@ -20,8 +20,15 @@ const IGNORED_DIRS: &[&str] = &[
     "venv",
     "__pycache__",
     "Cache",
+    "cache",
+    "caches",
     "GPUCache",
     "Code Cache",
+    "builtin",
+    "marketplaces",
+    "plugins",
+    "extensions",
+    "crashes",
 ];
 
 pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> DiscoveredTargets {
@@ -211,10 +218,22 @@ fn is_mcp_config_filename(path: &Path, file_name: &str) -> bool {
 }
 
 fn is_transcript_filename(file_name: &str) -> bool {
-    // Skip package metadata & lockfiles when scanning custom directories
+    // Skip package metadata, lockfiles, and CLI OAuth/login state files
     if matches!(
         file_name,
-        "package.json" | "package-lock.json" | "tsconfig.json" | "Cargo.lock" | "Cargo.toml"
+        "package.json"
+            | "package-lock.json"
+            | "tsconfig.json"
+            | "Cargo.lock"
+            | "Cargo.toml"
+            | "oauth_creds.json"
+            | "google_accounts.json"
+            | ".credentials.json"
+            | "credentials.json"
+            | "auth.json"
+            | "plugin-secrets.json"
+            | "keybindings.json"
+            | "onboarding.json"
     ) {
         return false;
     }

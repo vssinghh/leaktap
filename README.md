@@ -34,7 +34,7 @@ Prebuilt binaries for macOS, Linux, and Windows are on [GitHub Releases](https:/
 ```text
 $ leaktap scan
 
-leaktap v0.2.3 — local offline audit (0 network requests)
+leaktap v0.2.4 — local offline audit (0 network requests)
 Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.gemini
 
 CRITICAL  3 unique secret(s) found in local agent transcripts

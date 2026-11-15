@@ -268,7 +268,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "rediss://",
             "amqp://",
         ],
-        pattern: r#"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?|amqp)://[^\s"':/@\\]+:[^\s"'/@\\]{6,}@[^\s"'<>\\]+)"#,
+        pattern: r#"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?|amqp)://[^\s"':/@\\`]+:[^\s"'/@\\`]{6,}@[^\s"'<>\\`()\[\]{},;]+)"#,
         secret_group: 1,
         min_entropy: 3.2,
     },
@@ -439,16 +439,19 @@ impl RuleEngine {
             }
         }
 
-        // Sort by byte offset and drop overlapping weaker matches on the exact same span
+        // Sort by byte offset, then highest severity, then longest span
         matches.sort_by(|a, b| {
             a.start
                 .cmp(&b.start)
                 .then_with(|| b.severity.cmp(&a.severity))
+                .then_with(|| b.end.cmp(&a.end))
         });
         let mut deduped: Vec<RawMatch> = Vec::with_capacity(matches.len());
         for m in matches {
             if let Some(prev) = deduped.last() {
-                if m.start < prev.end && m.category == prev.category {
+                if m.start < prev.end
+                    && (m.category == prev.category || m.severity <= prev.severity)
+                {
                     continue;
                 }
             }
@@ -506,10 +509,10 @@ fn passes_post_filter(rule: &CompiledRule, full_text: &str, match_start: usize, 
         }
         "pii-email" => {
             let lower = val.to_ascii_lowercase();
-            // Exclude git SSH prefixes (`git@github.com`), npm scopes, noreply addresses, and dummy domains
+            // Exclude git SSH prefixes (`git@github.com`), npm scopes, URL `user:pass@host` auth, and dummy domains
             if match_start > 0 {
                 let prev_byte = full_text.as_bytes()[match_start - 1];
-                if prev_byte == b'/' || prev_byte == b'@' {
+                if prev_byte == b'/' || prev_byte == b'@' || prev_byte == b':' {
                     return false;
                 }
             }

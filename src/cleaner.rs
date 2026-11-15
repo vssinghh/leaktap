@@ -103,7 +103,7 @@ fn process_file(
             let mut bak_os = path.as_os_str().to_os_string();
             bak_os.push(".leaktap.bak");
             let bak_path = PathBuf::from(bak_os);
-            fs::copy(path, &bak_path)?;
+            copy_file_best_effort_perms(path, &bak_path)?;
             backup_display = Some(shorten_home(&bak_path));
         }
 
@@ -121,7 +121,11 @@ fn process_file(
             writer.flush()?;
         }
 
-        fs::rename(&tmp_path, path)?;
+        if fs::rename(&tmp_path, path).is_err() {
+            let write_res = fs::write(path, &transformed);
+            let _ = fs::remove_file(&tmp_path);
+            write_res?;
+        }
     }
 
     Ok(Some(CleanedFileSummary {
@@ -129,4 +133,16 @@ fn process_file(
         secrets_redacted: redactions,
         backup_file: backup_display,
     }))
+}
+
+fn copy_file_best_effort_perms(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut reader = BufReader::new(File::open(src)?);
+    let dst_file = File::create(dst)?;
+    if let Ok(meta) = fs::metadata(src) {
+        // Ignore EPERM on virtual/shared mounts (9p, virtiofs, WSL, Docker volumes)
+        let _ = dst_file.set_permissions(meta.permissions());
+    }
+    let mut writer = BufWriter::new(dst_file);
+    std::io::copy(&mut reader, &mut writer)?;
+    writer.flush()
 }

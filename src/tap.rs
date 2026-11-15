@@ -187,6 +187,9 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
         cmd.env("GOOGLE_GEMINI_BASE_URL", &tap.gemini_base_url);
         cmd.env("GEMINI_API_BASE_URL", &tap.gemini_base_url);
+        let no_proxy = build_loopback_no_proxy();
+        cmd.env("NO_PROXY", &no_proxy);
+        cmd.env("no_proxy", &no_proxy);
         Some(tap)
     } else {
         None
@@ -512,10 +515,31 @@ fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool {
     if matches!(
         upper.as_str(),
         "PATH" | "HOME" | "PWD" | "SHELL" | "TERM" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"
-    ) {
+    ) || upper.ends_with("_FILE")
+        || upper.ends_with("_PATH")
+        || upper.ends_with("_DIR")
+        || upper.ends_with("_SOCK")
+    {
         return false;
     }
     SENSITIVE_ENV_NAMES.iter().any(|kw| upper.contains(kw)) && shannon_entropy(val) >= 3.5
+}
+
+fn build_loopback_no_proxy() -> String {
+    let existing = env::var("NO_PROXY")
+        .or_else(|_| env::var("no_proxy"))
+        .unwrap_or_default();
+    let mut parts: Vec<String> = existing
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for host in ["localhost", "127.0.0.1", "::1"] {
+        if !parts.iter().any(|p| p.eq_ignore_ascii_case(host)) {
+            parts.push(host.to_string());
+        }
+    }
+    parts.join(",")
 }
 
 fn summarize_list(items: &[String], max_show: usize) -> String {
