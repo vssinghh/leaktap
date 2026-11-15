@@ -386,3 +386,116 @@ fn tui_dashboard_renders_all_tabs_and_scrubs_selected_file() {
     app.scrub_selected_secret_file();
     assert_eq!(app.report.transcripts.secret_findings.len(), 0);
 }
+
+#[test]
+fn inspect_api_supports_gemini_cli_and_ignores_x_goog_api_key_auth_header() {
+    let mock_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mock_port = mock_listener.local_addr().unwrap().port();
+
+    let server_handle = thread::spawn(move || {
+        let (mut stream, _) = mock_listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut req_line = String::new();
+        reader.read_line(&mut req_line).unwrap();
+        assert!(
+            req_line.contains("/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"),
+            "unexpected upstream path: {req_line}"
+        );
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).unwrap();
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+        let body =
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini_ok\"}]}}]}\n\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let bin = env!("CARGO_BIN_EXE_leaktap");
+    let tmp = TempDir::new().unwrap();
+    let wiretap_log = tmp.path().join("gemini_tap.jsonl");
+    let fake_gemini_auth = format!("AIza{}", "SyDa9B8c7D6e5F4g3H2j1K0lMnOpQrStUvWx");
+    let fake_aws = format!("AKIA{}", "9F28Q7M4K1L8Z3P6");
+
+    let payload = format!(
+        r#"{{"contents":[{{"role":"user","parts":[{{"text":"deploy key {fake_aws}"}}]}}]}}"#
+    );
+    let payload_file = tmp.path().join("gemini_payload.json");
+    fs::write(&payload_file, &payload).unwrap();
+
+    #[cfg(unix)]
+    let child_cmd: Vec<String> = vec![
+        "sh".into(),
+        "-c".into(),
+        format!(
+            "curl -sS --noproxy '*' -X POST \"$GOOGLE_GEMINI_BASE_URL/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse\" -H 'x-goog-api-key: {fake_gemini_auth}' -H 'User-Agent: GeminiCLI/0.45 (dev@corp-internal.io)' -H 'Content-Type: application/json' --data-binary @{}",
+            payload_file.display()
+        ),
+    ];
+
+    #[cfg(windows)]
+    let child_cmd: Vec<String> = vec![
+        "powershell".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        format!(
+            "curl.exe -sS --noproxy '*' -X POST \"$env:GOOGLE_GEMINI_BASE_URL/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse\" -H \"x-goog-api-key: {fake_gemini_auth}\" -H \"User-Agent: GeminiCLI/0.45 (dev@corp-internal.io)\" -H \"Content-Type: application/json\" --data-binary \"@{}\"",
+            payload_file.display()
+        ),
+    ];
+
+    let mut args: Vec<String> = vec![
+        "tap".into(),
+        "--inspect-api".into(),
+        "--no-net-watch".into(),
+        "--no-live-log".into(),
+        "--quiet".into(),
+        "--log".into(),
+        wiretap_log.to_string_lossy().into_owned(),
+        "--".into(),
+    ];
+    args.extend(child_cmd);
+
+    let output = Command::new(bin)
+        .args(&args)
+        .env(
+            "LEAKTAP_UPSTREAM_GEMINI_URL",
+            format!("http://127.0.0.1:{mock_port}"),
+        )
+        .output()
+        .expect("run leaktap tap --inspect-api for gemini");
+
+    server_handle.join().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("gemini_ok"),
+        "unexpected SSE stdout: {stdout}"
+    );
+
+    let log_content = fs::read_to_string(&wiretap_log).unwrap();
+    assert!(log_content.contains("API POST -> gemini"));
+    assert!(log_content.contains("header-email-leak"));
+    assert!(log_content.contains("secret_in_prompt"));
+    // x-goog-api-key is Gemini's standard auth header, so it must NOT trigger header-secret-leak
+    assert!(
+        !log_content.contains("header-secret-leak"),
+        "unexpected false positive on x-goog-api-key:\n{log_content}"
+    );
+    assert!(!log_content.contains(&fake_aws));
+    assert!(!log_content.contains(&fake_gemini_auth));
+}

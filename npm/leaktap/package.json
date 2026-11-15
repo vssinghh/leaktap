@@ -1,7 +1,7 @@
 {
   "name": "leaktap",
-  "version": "0.2.1",
-  "description": "See what your AI coding agents leak. Offline secret & MCP auditor, interactive terminal dashboard, and live outbound wiretap.",
+  "version": "0.2.2",
+  "description": "See what your AI coding CLIs leak. Offline secret & MCP auditor, interactive terminal dashboard, and live CLI wiretap.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -11,8 +11,8 @@
   "keywords": [
     "ai-agents",
     "claude-code",
-    "cursor",
     "codex",
+    "gemini-cli",
     "mcp",
     "secret-scanner",
     "security",
@@ -28,10 +28,10 @@
     "node": ">=18.0.0"
   },
   "optionalDependencies": {
-    "@leaktap/darwin-arm64": "0.2.1",
-    "@leaktap/darwin-x64": "0.2.1",
-    "@leaktap/linux-x64": "0.2.1",
-    "@leaktap/linux-arm64": "0.2.1",
-    "@leaktap/win32-x64": "0.2.1"
+    "@leaktap/darwin-arm64": "0.2.2",
+    "@leaktap/darwin-x64": "0.2.2",
+    "@leaktap/linux-x64": "0.2.2",
+    "@leaktap/linux-arm64": "0.2.2",
+    "@leaktap/win32-x64": "0.2.2"
   }
 }

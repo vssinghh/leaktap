@@ -10,6 +10,7 @@ use std::time::Duration;
 pub struct LocalApiTap {
     pub anthropic_base_url: String,
     pub openai_base_url: String,
+    pub gemini_base_url: String,
     stop: Arc<AtomicBool>,
 }
 
@@ -21,35 +22,33 @@ impl LocalApiTap {
 
 pub type TapCallback = Arc<dyn Fn(&str, &str, &str, &str, String) + Send + Sync + 'static>;
 
-pub fn start_local_api_tap(
-    anthropic_upstream: String,
-    openai_upstream: String,
+#[derive(Clone)]
+struct UpstreamTargets {
+    anthropic: String,
+    openai: String,
+    gemini: String,
+}
+
+fn spawn_accept_loop(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    upstreams: UpstreamTargets,
     engine: Arc<RuleEngine>,
     header_auditor: Arc<HeaderAuditor>,
     emit: TapCallback,
-) -> io::Result<LocalApiTap> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    listener.set_nonblocking(true)?;
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = Arc::clone(&stop);
-
-    let anth_base = anthropic_upstream.trim_end_matches('/').to_string();
-    let oai_base = openai_upstream.trim_end_matches('/').to_string();
-
+) {
+    let _ = listener.set_nonblocking(true);
     thread::spawn(move || {
-        while !stop_clone.load(Ordering::Relaxed) {
+        while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _addr)) => {
                     let _ = stream.set_nonblocking(false);
                     let engine = Arc::clone(&engine);
                     let auditor = Arc::clone(&header_auditor);
                     let emit = Arc::clone(&emit);
-                    let anth = anth_base.clone();
-                    let oai = oai_base.clone();
+                    let targets = upstreams.clone();
                     thread::spawn(move || {
-                        let _ = handle_client(stream, &anth, &oai, &engine, &auditor, &emit);
+                        let _ = handle_client(stream, &targets, &engine, &auditor, &emit);
                     });
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -59,18 +58,59 @@ pub fn start_local_api_tap(
             }
         }
     });
+}
+
+pub fn start_local_api_tap(
+    anthropic_upstream: String,
+    openai_upstream: String,
+    gemini_upstream: String,
+    engine: Arc<RuleEngine>,
+    header_auditor: Arc<HeaderAuditor>,
+    emit: TapCallback,
+) -> io::Result<LocalApiTap> {
+    let v4_listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = v4_listener.local_addr()?.port();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let upstreams = UpstreamTargets {
+        anthropic: anthropic_upstream.trim_end_matches('/').to_string(),
+        openai: openai_upstream.trim_end_matches('/').to_string(),
+        gemini: gemini_upstream.trim_end_matches('/').to_string(),
+    };
+
+    spawn_accept_loop(
+        v4_listener,
+        Arc::clone(&stop),
+        upstreams.clone(),
+        Arc::clone(&engine),
+        Arc::clone(&header_auditor),
+        Arc::clone(&emit),
+    );
+
+    // Also bind IPv6 loopback `[::1]:port` when available so `http://localhost:<port>`
+    // (required by Gemini CLI for plain HTTP) connects immediately on IPv6-first systems.
+    if let Ok(v6_listener) = TcpListener::bind(("[::1]", port)) {
+        spawn_accept_loop(
+            v6_listener,
+            Arc::clone(&stop),
+            upstreams,
+            engine,
+            header_auditor,
+            emit,
+        );
+    }
 
     Ok(LocalApiTap {
         anthropic_base_url: format!("http://127.0.0.1:{port}/_anthropic"),
         openai_base_url: format!("http://127.0.0.1:{port}/_openai"),
+        gemini_base_url: format!("http://localhost:{port}/_gemini"),
         stop,
     })
 }
 
 fn handle_client(
     mut client: TcpStream,
-    anthropic_upstream: &str,
-    openai_upstream: &str,
+    upstreams: &UpstreamTargets,
     engine: &RuleEngine,
     auditor: &HeaderAuditor,
     emit: &TapCallback,
@@ -125,20 +165,23 @@ fn handle_client(
         Vec::new()
     };
 
-    // Route prefix (`/_anthropic/...` or `/_openai/...`)
+    // Route prefix (`/_anthropic/...`, `/_openai/...`, or `/_gemini/...`)
     let (provider, target_url) = if let Some(rest) = raw_path.strip_prefix("/_anthropic") {
         let suffix = if rest.is_empty() { "/" } else { rest };
-        ("anthropic", format!("{anthropic_upstream}{suffix}"))
+        ("anthropic", format!("{}{suffix}", upstreams.anthropic))
     } else if let Some(rest) = raw_path.strip_prefix("/_openai") {
         let suffix = if rest.is_empty() { "/" } else { rest };
-        ("openai", format!("{openai_upstream}{suffix}"))
+        ("openai", format!("{}{suffix}", upstreams.openai))
+    } else if let Some(rest) = raw_path.strip_prefix("/_gemini") {
+        let suffix = if rest.is_empty() { "/" } else { rest };
+        ("gemini", format!("{}{suffix}", upstreams.gemini))
     } else {
         let suffix = if raw_path.starts_with('/') {
             raw_path.as_str()
         } else {
             "/"
         };
-        ("anthropic", format!("{anthropic_upstream}{suffix}"))
+        ("anthropic", format!("{}{suffix}", upstreams.anthropic))
     };
 
     emit(

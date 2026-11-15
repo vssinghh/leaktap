@@ -76,7 +76,7 @@ impl HeaderAuditor {
         // unless someone stuffed an email or unrelated secret inside a non-auth header.
         let is_standard_auth_header = matches!(
             lower_name.as_str(),
-            "authorization" | "x-api-key" | "anthropic-api-key" | "api-key"
+            "authorization" | "x-api-key" | "anthropic-api-key" | "api-key" | "x-goog-api-key"
         );
 
         for m in engine.scan_text(trimmed_val) {
