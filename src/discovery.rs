@@ -29,6 +29,7 @@ const IGNORED_DIRS: &[&str] = &[
     "plugins",
     "extensions",
     "crashes",
+    "backups",
 ];
 
 pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> DiscoveredTargets {

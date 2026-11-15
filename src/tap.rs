@@ -456,7 +456,11 @@ fn default_provider_env_keys(program: &str) -> &'static [&'static str] {
         .unwrap_or(&base);
 
     match stem {
-        "claude" | "claude-code" => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+        "claude" | "claude-code" => &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ],
         "codex" => &["OPENAI_API_KEY"],
         "agy" | "antigravity" | "antigravity-cli" | "gemini" | "gemini-cli" => {
             &["GEMINI_API_KEY", "GOOGLE_API_KEY"]
