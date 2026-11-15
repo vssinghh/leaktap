@@ -7,9 +7,9 @@ See what your AI coding CLIs actually leak.
 
 `leaktap` scans your local AI chat logs and MCP configs for leaked API keys, database URLs, and personal info, scrubs old logs, and watches live CLI sessions for leaked secrets, HTTP headers, and network connections.
 
-Currently supports **Claude Code** (`claude`), **Codex CLI** (`codex`), **Gemini CLI** (`gemini`), and local **MCP servers**. Desktop and IDE apps aren't supported for live watching yet, though `leaktap scan` will still check any local logs and MCP configs they leave on disk.
+Currently supports **Claude Code**, **Codex CLI**, **Antigravity CLI**, and local **MCP servers**. Desktop and IDE apps aren't supported for live watching yet, though `leaktap scan` will still check any local logs and MCP configs they leave on disk.
 
-> **2026 MCP Audit ([full write-up](docs/mcp-top-50-audit.md)):** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry.
+> **2026 MCP Audit:** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry. [Read the full write-up →](docs/mcp-top-50-audit.md)
 
 ## Install
 
@@ -27,14 +27,14 @@ npx leaktap scan
 cargo install --git https://github.com/vssinghh/leaktap
 ```
 
-Prebuilt binaries for macOS (`arm64`, `x64`), Linux (`x64`, `arm64`), and Windows (`x64`) are on [GitHub Releases](https://github.com/vssinghh/leaktap/releases).
+Prebuilt binaries for macOS, Linux, and Windows are on [GitHub Releases](https://github.com/vssinghh/leaktap/releases).
 
 ## Example output
 
 ```text
 $ leaktap scan
 
-leaktap v0.2.2 — local offline audit (0 network requests)
+leaktap v0.2.3 — local offline audit (0 network requests)
 Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.gemini
 
 CRITICAL  3 unique secret(s) found in local agent transcripts
@@ -61,17 +61,17 @@ Next steps:
 
 ## Why I built this
 
-When you run `claude`, `codex`, or `gemini` inside a project, it reads files like `.env` while debugging code. Those keys and database URLs get saved in plain text inside `~/.claude`, `~/.codex`, or `~/.gemini` chat logs, sent out in prompts, and exposed to MCP servers through inherited shell variables. Outgoing HTTP headers like `User-Agent` can also carry your email or machine hostname.
+When you run `claude`, `codex`, or `agy` inside a project, it reads files like `.env` while debugging code. Those keys and database URLs get saved in plain text inside `~/.claude`, `~/.codex`, or `~/.gemini` chat logs, sent out in prompts, and exposed to MCP servers through inherited shell variables. Outgoing HTTP headers like `User-Agent` can also carry your email or machine hostname.
 
-OS file sandboxes (`sandbox-exec`, `bubblewrap`) are good at blocking folders outside your repo like `~/.ssh`, which helps, but the CLI still needs read access to your repo and internet access to work. Once network access is open, file sandboxes can't see what goes out in prompts or headers. Full HTTPS proxies go too far the other way: they need Docker and a custom root certificate, and replacing keys with `[REDACTED]` breaks `git apply` when a patch comes back.
+OS file sandboxes like `sandbox-exec` and `bubblewrap` are good at blocking folders outside your repo like `~/.ssh`, which helps, but the CLI still needs read access to your repo and internet access to work. Once network access is open, file sandboxes can't see what goes out in prompts or headers. Full HTTPS proxies go too far the other way: they need Docker and a custom root certificate, and replacing keys with `[REDACTED]` breaks `git apply` when a patch comes back.
 
-`leaktap` is a single binary with no setup. It checks what already leaked on your machine in ~120ms offline, gives you a terminal UI to browse and clean findings, and can wrap `claude`, `codex`, or `gemini` to inspect live calls without installing root certificates.
+`leaktap` is a single binary with no setup. It checks what already leaked on your machine in ~120ms offline, gives you a terminal UI to browse and clean findings, and can wrap `claude`, `codex`, or `agy` to inspect live calls without installing root certificates.
 
 ## Usage
 
-### Scan local logs and MCP configs (`scan`)
+### Scan local logs and MCP configs
 
-Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini` (plus `~/.cursor` if present) and MCP config files in your current directory:
+Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`, and MCP config files like `.mcp.json` and `.agents/mcp_config.json` in your current directory:
 
 ```bash
 # Default scan
@@ -85,7 +85,7 @@ leaktap scan --path . --format json
 leaktap scan --path . --format sarif --fail-on high > leaktap.sarif
 ```
 
-### Terminal UI (`ui`)
+### Terminal UI
 
 Opens an interactive terminal view with three tabs: `Transcript Leaks`, `MCP Config Risks`, and `Live Wiretap`.
 
@@ -93,9 +93,9 @@ Opens an interactive terminal view with three tabs: `Transcript Leaks`, `MCP Con
 leaktap ui
 ```
 
-Use `j`/`k` or arrow keys to move, `1`-`3` or `Tab` to switch tabs, and `c` to scrub the selected log file in place (saves a `.leaktap.bak` copy first).
+Use `j`/`k` or arrow keys to move, `1`-`3` or `Tab` to switch tabs, and `c` to scrub the selected log file in place after saving a `.leaktap.bak` backup.
 
-### Clean leaked keys from old chat logs (`clean`)
+### Clean leaked keys from old chat logs
 
 Runs a dry-run preview by default. Passing `--apply` writes a `.leaktap.bak` backup and replaces only the secret strings so `.jsonl` files stay valid for `/resume`:
 
@@ -107,25 +107,25 @@ leaktap clean
 leaktap clean --apply
 ```
 
-### Watch live CLI sessions (`tap`)
+### Watch live CLI sessions
 
-Wraps `claude`, `codex`, `gemini`, or an MCP server command:
+Wraps `claude`, `codex`, `agy`, `gemini`, or an MCP server command:
 
-- `--scrub-env` strips extra secret variables from your shell (like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY`) before starting the command, while keeping the CLI's own API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`).
-- `--inspect-api` points `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` at a local port on `localhost` so `leaktap` can check outgoing HTTP headers and prompt bodies before forwarding requests upstream over HTTPS. (For Gemini CLI, use `GEMINI_API_KEY` auth rather than browser login so `GOOGLE_GEMINI_BASE_URL` takes effect.)
-- Also watches new outbound TCP connections opened by the CLI and its child processes without needing `sudo`.
+- `--scrub-env` strips extra secret variables from your shell like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` before starting the command, while keeping the CLI's own API key.
+- `--inspect-api` points `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` at a local port on `localhost` so `leaktap` can check outgoing HTTP headers and prompt bodies before forwarding requests over HTTPS. For Antigravity CLI and Gemini CLI, `--inspect-api` requires `GEMINI_API_KEY` mode rather than browser login so `GOOGLE_GEMINI_BASE_URL` takes effect.
+- Outbound TCP connections opened by the CLI and its child processes are logged automatically without `sudo`.
 
 ```bash
-# Watch Claude Code, Codex CLI, or Gemini CLI
+# Watch Claude Code, Codex CLI, or Antigravity CLI
 leaktap tap --inspect-api --scrub-env -- claude
 leaktap tap --inspect-api --scrub-env -- codex
-leaktap tap --inspect-api --scrub-env -- gemini
+leaktap tap --inspect-api --scrub-env -- agy
 
-# Wrap an MCP server in .mcp.json (quiet mode keeps stdout clean for JSON-RPC)
+# Wrap an MCP server in .mcp.json or .agents/mcp_config.json
 leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
 ```
 
-### List built-in checks (`rules`)
+### List built-in checks
 
 ```bash
 leaktap rules
@@ -135,7 +135,7 @@ leaktap rules
 
 - `leaktap scan` and `leaktap clean` make zero network requests.
 - No telemetry, analytics, or accounts.
-- Matched secrets are always masked (`sk_live_9f...4c21`) in terminal, UI, JSON, SARIF, and log output.
+- Matched secrets are always masked like `sk_live_9f...4c21` in terminal, UI, JSON, SARIF, and log output.
 
 ## License
 

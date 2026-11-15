@@ -514,3 +514,96 @@ fn inspect_api_supports_gemini_cli_and_ignores_x_goog_api_key_auth_header() {
     assert!(!log_content.contains(&fake_aws));
     assert!(!log_content.contains(&fake_gemini_auth));
 }
+
+#[test]
+fn scan_and_tap_support_antigravity_cli_paths_and_env_preservation() {
+    let bin = env!("CARGO_BIN_EXE_leaktap");
+    let fake_home = TempDir::new().unwrap();
+    let fake_workspace = TempDir::new().unwrap();
+
+    // 1. Antigravity CLI transcript inside ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/
+    let agy_logs = fake_home
+        .path()
+        .join(".gemini/antigravity-cli/brain/conv-123/.system_generated/logs");
+    fs::create_dir_all(&agy_logs).unwrap();
+    let fake_aws = format!("AKIA{}", "7Q29M4K8L1Z3P6R2");
+    fs::write(
+        agy_logs.join("transcript.jsonl"),
+        format!(r#"{{"type":"USER_INPUT","content":"aws key is {fake_aws}"}}"#),
+    )
+    .unwrap();
+
+    // 2. Antigravity CLI workspace MCP config at .agents/mcp_config.json
+    let agents_dir = fake_workspace.path().join(".agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::write(
+        agents_dir.join("mcp_config.json"),
+        r#"{"mcpServers":{"agy-db":{"command":"npx","args":["-y","@org/db-mcp"]}}}"#,
+    )
+    .unwrap();
+
+    let scan_out = Command::new(bin)
+        .current_dir(fake_workspace.path())
+        .args(["scan", "--format", "json"])
+        .env("HOME", fake_home.path())
+        .env("USERPROFILE", fake_home.path())
+        .output()
+        .expect("run default leaktap scan for Antigravity CLI");
+
+    assert!(
+        scan_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&scan_out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&scan_out.stdout).unwrap();
+    assert_eq!(report["summary"]["unique_secrets"], 1);
+    assert_eq!(report["summary"]["mcp_risks"], 1);
+
+    // 3. `leaktap tap --scrub-env -- agy` preserves GEMINI_API_KEY while scrubbing unrelated secrets
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = TempDir::new().unwrap();
+        let mock_agy = bin_dir.path().join("agy");
+        fs::write(
+            &mock_agy,
+            "#!/bin/sh\nprintf 'GEMINI=%s|STRIPE=%s\\n' \"$GEMINI_API_KEY\" \"$STRIPE_SECRET_KEY\"\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&mock_agy).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&mock_agy, perms).unwrap();
+
+        let fake_gemini = format!("AIza{}", "SyDa9B8c7D6e5F4g3H2j1K0lMnOpQrStUvWx");
+        let fake_stripe = format!("sk_live_{}", "9f8e7d6c5b4a392817263544");
+        let new_path = format!(
+            "{}:{}",
+            bin_dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let tap_out = Command::new(bin)
+            .args([
+                "tap",
+                "--scrub-env",
+                "--no-net-watch",
+                "--no-live-log",
+                "--quiet",
+                "--",
+                mock_agy.to_str().unwrap(),
+            ])
+            .env("PATH", new_path)
+            .env("GEMINI_API_KEY", &fake_gemini)
+            .env("STRIPE_SECRET_KEY", &fake_stripe)
+            .output()
+            .expect("run leaktap tap --scrub-env -- agy");
+
+        assert!(tap_out.status.success());
+        let stdout = String::from_utf8(tap_out.stdout).unwrap();
+        assert!(
+            stdout.contains(&format!("GEMINI={fake_gemini}|STRIPE=")),
+            "expected GEMINI_API_KEY preserved and STRIPE_SECRET_KEY scrubbed, got: {stdout}"
+        );
+        assert!(!stdout.contains(&fake_stripe));
+    }
+}
