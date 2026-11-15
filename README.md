@@ -5,12 +5,14 @@
 
 **See what your AI coding agents actually leak.**
 
-`leaktap` is a small, fast command-line tool (single Rust binary, zero tracking) that checks your local AI coding logs and MCP server configs for leaked API keys, passwords, and private info—and watches live agent sessions for secret, HTTP header, and network connection leaks without needing Docker or custom HTTPS certificates.
+`leaktap` is a small, fast command-line tool (single Rust binary, zero tracking) that checks your local AI coding logs and tool-plugin configs for leaked API keys, passwords, and private info—and watches live agent sessions for secret, HTTP header, and network connection leaks without needing Docker or custom HTTPS certificates.
 
-Works with **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** · **Windsurf** · **MCP Servers**
+Works with **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** — plus any **MCP tool plugins** they run.
+
+*(What is an **MCP server**? **MCP [Model Context Protocol]** is the standard plugin system for AI coding tools. Despite the word "server," most MCP servers are small helper programs your agent starts right on your laptop—often via `npx` or `uvx`—to connect to Postgres, GitHub, Figma, Slack, or a browser, which means they can access your local files, shell secrets, and network.)*
 
 > [!NOTE]
-> **2026 MCP Audit ([read full report](docs/mcp-top-50-audit.md)):** Across the Top 50 open-source MCP servers on GitHub, **70%** recommend unpinned `npx -y` / `uvx` auto-installs, **24%** guide users to paste plain-text API keys into JSON config files, and **24%** include built-in telemetry or analytics SDKs.
+> **2026 MCP Plugin Audit ([read full report](docs/mcp-top-50-audit.md)):** Across the Top 50 open-source MCP servers on GitHub, **70%** recommend unpinned `npx -y` / `uvx` auto-installs, **24%** guide users to paste plain-text API keys into JSON config files, and **24%** include built-in telemetry or analytics SDKs.
 
 ---
 
@@ -85,7 +87,7 @@ Next steps:
 
 ### 1. Check Local Logs and MCP Configs (`scan`)
 
-Runs 100% offline. Checks `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini`, `~/.codeium`, and any MCP config files in your current project:
+Runs 100% offline. Checks `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini`, and any MCP config files (`.mcp.json`, `claude_desktop_config.json`, `.cursor/mcp.json`) in your current project:
 
 ```bash
 # Default scan across your local coding agents

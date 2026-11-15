@@ -2,9 +2,9 @@
 
 **See what your AI coding agents actually leak.**
 
-Fast command-line tool that checks your local AI coding logs and MCP configs for leaked API keys, passwords, and private data—with an interactive terminal dashboard (`leaktap ui`) and live HTTP header/socket watching (`leaktap tap`).
+Fast command-line tool that checks your local AI coding logs and MCP plugin configs for leaked API keys, passwords, and private data—with an interactive terminal dashboard (`leaktap ui`) and live HTTP header/socket watching (`leaktap tap`).
 
-Works with **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** · **Windsurf** · **MCP Servers**
+Works with **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** (plus the local **MCP tool plugins** they run)
 
 ## Quickstart
 

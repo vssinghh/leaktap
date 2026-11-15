@@ -69,7 +69,7 @@ fn audit_single_mcp_file(path: &Path, engine: &RuleEngine, out: &mut Vec<McpFind
 
     let display = shorten_home(path);
 
-    // 1. Top-level `mcpServers` (Claude Desktop, Cursor, .mcp.json, Gemini settings.json, Windsurf)
+    // 1. Top-level `mcpServers` (Claude Desktop, Cursor, .mcp.json, Gemini settings.json)
     if let Some(servers) = json.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, spec) in servers {
             inspect_server(name, spec, path, &display, engine, out);
