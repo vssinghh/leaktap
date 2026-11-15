@@ -25,11 +25,11 @@ jobs:
             artifact: leaktap-darwin-x64
             bin: leaktap
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             artifact: leaktap-linux-x64
             bin: leaktap
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             artifact: leaktap-linux-arm64
             bin: leaktap
           - os: windows-latest
@@ -38,6 +38,9 @@ jobs:
             bin: leaktap.exe
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl-tools on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
