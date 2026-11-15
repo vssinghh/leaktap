@@ -5,26 +5,29 @@
 
 **See what your AI coding agents actually leak.**
 
-`leaktap` is a fast, zero-telemetry Rust CLI (`2.6 MB` single binary) that audits local AI coding sessions and MCP server configs for leaked secrets, personal metadata, and supply-chain risks—and wiretaps live agent or MCP `stdio` sessions without Docker or custom TLS root certificates.
+`leaktap` is a small, fast command-line tool (`2.6 MB` single binary, written in Rust) that checks your local AI coding logs and MCP server configs for leaked API keys, passwords, and private info—and watches live agent sessions without needing Docker or custom HTTPS certificates.
 
-Works across **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** · **Windsurf** · **MCP Servers**
+Works with **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** · **Windsurf** · **MCP Servers**
 
----
-
-## Why `leaktap` Exists
-
-Suppose you ask a coding agent to fix a payment bug in your repository:
-
-1. **Silent file read:** While grepping the codebase, the agent reads `.env.local` (`STRIPE_SECRET_KEY=sk_live_9f8a...` and `DATABASE_URL=postgres://...`) plus your git email and internal service URLs.
-2. **Plaintext logs + outbound payloads:** Those raw credentials are saved in plaintext inside `~/.claude/` or `~/.codex/` session logs, sent out in model prompts, and passed into third-party MCP tools or shell commands.
-3. **Why OS file sandboxes miss it:** Tools like macOS `sandbox-exec` and Linux `bubblewrap` are great at blocking `~/.ssh`, **until** you grant access to your project folder and outbound HTTPS so the agent can do its job. Once HTTPS is open, OS file sandboxes cannot see what leaves inside headers, prompt bodies, or MCP tool calls.
-4. **Why heavy proxies break coding:** Traditional DLP proxies require Docker Desktop, custom TLS root certificates, and naive `[REDACTED]` text replacement—which breaks OAuth logins and causes `git apply` to fail when the model echoes `[REDACTED]` back in a diff.
-
-`leaktap` takes an **audit-first, zero-Docker** approach: see what already leaked on your machine in milliseconds offline, scrub local logs safely, and wrap live sessions when you want active protection.
+> [!NOTE]
+> **2026 MCP Audit ([read full report](docs/mcp-top-50-audit.md)):** Across the Top 50 open-source MCP servers on GitHub, **70%** recommend unpinned `npx -y` / `uvx` auto-installs, **24%** guide users to paste plain-text API keys into JSON config files, and **24%** include built-in telemetry or analytics SDKs.
 
 ---
 
-## Example Output (`leaktap scan`)
+## The Problem (One Simple Example)
+
+Say you ask Claude Code or Cursor to fix a Stripe checkout bug in your repo:
+
+1. **The agent reads your `.env` file:** While searching your code, the agent opens `.env.local` and reads `STRIPE_SECRET_KEY=sk_live_9f8a...` and `DATABASE_URL=postgres://...`, along with your work email and internal company URLs.
+2. **Your live keys get saved in plain text and sent out:** Those raw keys are written straight to local chat logs (`~/.claude/` or `~/.codex/`), included in model prompts, and passed into third-party MCP servers or shell commands.
+3. **Why OS file sandboxes don't stop this:** File sandboxes (`sandbox-exec` on macOS, `bubblewrap` on Linux) are great at blocking folders outside your project like `~/.ssh`. **But** the agent needs read access to your project folder and internet access to work. Once internet access is on, OS file sandboxes cannot see what is inside outgoing requests or MCP tool calls.
+4. **Why heavy network proxies get in your way:** Classic security proxies ask you to run Docker, trust a custom root certificate, and replace secrets with `[REDACTED]`. That often breaks OAuth logins—and makes `git apply` fail when the model sends `[REDACTED]` back inside a code patch.
+
+`leaktap` keeps things simple: **audit what already leaked on your laptop in under a second offline**, clean old chat logs safely, and wrap live commands when you want real-time protection.
+
+---
+
+## What `leaktap scan` Looks Like
 
 ```text
 $ leaktap scan
@@ -56,15 +59,19 @@ Next steps:
 
 ---
 
-## Installation
+## Install
 
-### From GitHub (Rust 1.75+)
+### Download a Prebuilt Binary
+
+Grab the latest binary for **macOS (`arm64` / `x64`)**, **Linux (`x64` / `arm64`)**, or **Windows (`x64`)** from **[GitHub Releases](https://github.com/vssinghh/leaktap/releases)**.
+
+### Or Install with Cargo (Rust 1.75+)
 
 ```bash
 cargo install --git https://github.com/vssinghh/leaktap
 ```
 
-### Build from Source
+### Or Build from Source
 
 ```bash
 git clone https://github.com/vssinghh/leaktap.git
@@ -73,51 +80,51 @@ cargo build --release
 ./target/release/leaktap scan
 ```
 
-*(Prebuilt macOS, Linux, and Windows binaries via GitHub Releases, `crates.io`, and `npx leaktap` are wired up in [`.github/workflows/release.yml`](.github/workflows/release.yml) and [`npm/leaktap`](npm/leaktap) for tagged releases.)*
-
 ---
 
-## Usage
+## Commands
 
-### 1. Offline Transcript & MCP Audit (`scan`)
+### 1. Check Local Logs and MCP Configs (`scan`)
+
+Runs 100% offline. Checks `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini`, `~/.codeium`, and any MCP config files in your current project:
 
 ```bash
-# Scan ~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.codeium + workspace MCP configs
+# Default scan across your local coding agents
 leaktap
 
-# Scan a specific project or transcript directory
+# Scan one specific folder or file
 leaktap scan --path ./my-project
 
-# Export machine-readable JSON or SARIF 2.1.0 (for GitHub Code Scanning / CI)
+# Output JSON or SARIF (for GitHub Actions / CI checks)
 leaktap scan --path . --format json
 leaktap scan --path . --format sarif --fail-on high > leaktap.sarif
 ```
 
-### 2. Redact Leaked Secrets from Local Session Logs (`clean`)
+### 2. Scrub Leaked Keys from Old Chat Logs (`clean`)
 
-`leaktap clean` runs in **read-only dry-run mode by default**, preserves valid JSONL syntax on every line so `/resume` history never breaks, and writes `.leaktap.bak` backups before modifying files:
+By default, `leaktap clean` runs a **safe preview** without touching any files. When you pass `--apply`, it saves a `.leaktap.bak` backup first and replaces only the secret values so your `.jsonl` chat history still opens cleanly in `/resume`:
 
 ```bash
-# Preview how many exposed secrets would be redacted
+# Preview how many secrets would be scrubbed
 leaktap clean
 
-# Write redactions atomically (creates <file>.leaktap.bak backups)
+# Scrub secrets and keep .leaktap.bak backups
 leaktap clean --apply
 ```
 
-### 3. Wiretap Live Agent or MCP `stdio` Sessions (`tap`)
+### 3. Watch a Live Session and Strip Extra Env Vars (`tap`)
 
-`leaktap tap` wraps any agent CLI or MCP `stdio` server, strips sensitive shell environment variables (`--scrub-env`) before child processes inherit them, and inspects `stdin`/`stdout`/`stderr` in flight **without altering `stdout` JSON-RPC framing**:
+Wraps any agent CLI or MCP server. With `--scrub-env`, `leaktap` removes unrelated secret environment variables (like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` sitting in your shell) before starting the child process, and prints live alerts to `stderr` or a log file without breaking MCP tool responses on `stdout`:
 
 ```bash
-# Wrap Claude Code and strip unrelated cloud secrets from inherited shell env
+# Run Claude Code while stripping unrelated shell secrets
 leaktap tap --scrub-env --allow-env ANTHROPIC_API_KEY -- claude
 
-# Wrap a third-party MCP server inside .mcp.json and log wiretap events to JSONL
+# Wrap an MCP server inside .mcp.json and save alerts to a log file
 leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
 ```
 
-### 4. Inspect Built-in Detection Rules (`rules`)
+### 4. List All Built-in Checks (`rules`)
 
 ```bash
 leaktap rules
@@ -125,29 +132,28 @@ leaktap rules
 
 ---
 
-## Under the Hood
+## How It Stays Fast and Low-Noise
 
-- **Linear-time `O(n)` scanning at ~400 MB/s:** Uses SIMD `aho-corasick` anchor prefiltering in front of Rust's finite-automaton `regex` engine + `rayon` multi-core parallelism. Giant 20 MB minified `.jsonl` tool-output lines never trigger regex backtracking freezes.
-- **JSONL escape-aware matching:** Correctly detects credentials preceded or terminated by JSON string escapes (`\n`, `\r`, `\t`) inside `.jsonl` transcripts while preserving exact byte offsets for atomic redaction.
-- **False-positive suppression:** Combines Shannon entropy thresholds with context filters so placeholder keys (`AKIAIOSFODNN7EXAMPLE`, `your_api_key`), local dev URIs (`postgres://postgres:postgres@localhost`), `git@github.com`, and `@scope/pkg` names don't flood you with noise.
-- **SHA-256 deduplication:** Identical secrets repeated across dozens of conversation turns are grouped by hash so each unique credential is reported once with an occurrence count.
+- **Scans ~400 MB/s without freezing on huge log lines:** AI logs often contain giant 20 MB single-line JSON outputs from build tools. `leaktap` checks quick text prefixes first and uses Rust's non-backtracking regex engine across all CPU cores, scanning 50 MB (110,000 turns) in ~120ms.
+- **Catches keys inside escaped `.jsonl` strings:** Properly finds secrets sitting right next to `\n`, `\r`, or `\t` escapes inside JSON log lines.
+- **Skips dummy values and local test noise:** Checks how random a secret looks so real keys get flagged while dummy strings (`AKIAIOSFODNN7EXAMPLE`, `your_api_key`), local test DBs (`localhost`), `git@github.com`, and npm `@scope/pkg` names are ignored.
+- **Groups duplicate hits:** If the same Stripe key shows up 15 times in one chat, `leaktap` hashes it in memory and lists it once (`(15x)`) instead of flooding your terminal.
 
 ---
 
-## Privacy & Trust Model
+## Privacy Promise
 
-- **Offline by default:** `leaktap scan` and `leaktap clean` make **zero** outbound network connections.
-- **Zero telemetry:** No analytics, no crash reporting, no cloud accounts.
-- **Always masked:** Matched secrets are truncated (`sk_live_9f...4c21`) in terminal, JSON, SARIF, and wiretap log outputs so `leaktap` never writes raw credentials into your scrollback or CI artifacts.
+- **Offline by default:** `leaktap scan` and `leaktap clean` make **zero** internet requests.
+- **Zero tracking:** No analytics, no telemetry, no accounts.
+- **Always masked:** Secrets are always shortened (`sk_live_9f...4c21`) in terminal, JSON, SARIF, and wiretap outputs so `leaktap` never dumps raw credentials onto your screen or CI logs.
 
 ---
 
 ## Roadmap
 
-- [x] **`v0.1` — Core Rust Engine (`scan`, `clean`, `tap`, `rules`):** Multi-agent transcript scanner (`~400 MB/s`), MCP config supply-chain/secret/telemetry auditor, JSONL-safe cleaner, `stdio`/env wiretap, and JSON/SARIF CI outputs.
-- [ ] **`v0.2` — Interactive Terminal Dashboard & Socket Monitor:** Live TUI view + OS-level per-process outbound domain/header monitor (`User-Agent` / `X-*` identity leak alerts).
-- [ ] **`v0.3` — Lossless Format-Preserving Token Swap:** Deterministic fake-token substitution before prompts leave your machine so `git apply` diffs keep working without exposing real keys.
-- [ ] **`v0.4` — Public MCP Leak Benchmark:** Reproducible audit dataset across top open-source MCP servers and skills.
+- [x] **`v0.1` — Core CLI (`scan`, `clean`, `tap`, `rules`):** Fast offline log scanner, MCP config checker, safe `.jsonl` cleaner, live `stdio`/env wrapper, and JSON/SARIF output.
+- [ ] **`v0.2` — Live Terminal View & Header Watch:** Interactive terminal dashboard + per-process outbound domain and HTTP header leak alerts.
+- [ ] **`v0.3` — Safe Placeholder Swap:** Swap real secrets with same-format placeholders before prompts leave your machine, then swap the real value back locally so `git apply` patches still work.
 
 ---
 
