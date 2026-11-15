@@ -1,13 +1,13 @@
 # leaktap
 
+[![CI](https://github.com/vssinghh/leaktap/actions/workflows/ci.yml/badge.svg)](https://github.com/vssinghh/leaktap/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **See what your AI coding agents actually leak.**
 
-`leaktap` audits your local AI coding sessions and installed MCP servers for leaked secrets, personal data, and hidden outbound calls—and wiretaps live agent sessions without Docker, cloud accounts, or broken code patches.
+`leaktap` is a fast, zero-telemetry Rust CLI (`2.6 MB` single binary) that audits local AI coding sessions and MCP server configs for leaked secrets, personal metadata, and supply-chain risks—and wiretaps live agent or MCP `stdio` sessions without Docker or custom TLS root certificates.
 
-Works across **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** · **MCP Servers**
-
-> [!IMPORTANT]
-> **Status:** Early active development (`v0.1.0` CLI in progress). Star or watch the repo to follow the initial release.
+Works across **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** · **Windsurf** · **MCP Servers**
 
 ---
 
@@ -20,87 +20,137 @@ Suppose you ask a coding agent to fix a payment bug in your repository:
 3. **Why OS file sandboxes miss it:** Tools like macOS `sandbox-exec` and Linux `bubblewrap` are great at blocking `~/.ssh`, **until** you grant access to your project folder and outbound HTTPS so the agent can do its job. Once HTTPS is open, OS file sandboxes cannot see what leaves inside headers, prompt bodies, or MCP tool calls.
 4. **Why heavy proxies break coding:** Traditional DLP proxies require Docker Desktop, custom TLS root certificates, and naive `[REDACTED]` text replacement—which breaks OAuth logins and causes `git apply` to fail when the model echoes `[REDACTED]` back in a diff.
 
-`leaktap` takes an **audit-first, zero-Docker** approach: see what already leaked on your machine in 5 seconds offline, then wrap live sessions when you want active protection.
+`leaktap` takes an **audit-first, zero-Docker** approach: see what already leaked on your machine in milliseconds offline, scrub local logs safely, and wrap live sessions when you want active protection.
 
 ---
 
-## Preview: The 5-Second Offline Audit (`leaktap scan`)
+## Example Output (`leaktap scan`)
 
 ```text
-$ npx leaktap scan
+$ leaktap scan
 
 leaktap v0.1.0 — local offline audit (0 network requests)
-Scanned 142 sessions across ~/.claude, ~/.codex, ~/.cursor, ~/.gemini
+Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.cursor
 
-CRITICAL  4 live secrets found in local agent transcripts
-  ├─ Stripe Live Key   sk_live_9f...4c21   ~/.claude/projects/app/08fa.jsonl:184
-  ├─ AWS Access Key    AKIA5F29...7Q2M     ~/.claude/projects/infra/91bc.jsonl:42
-  ├─ Postgres URI      postgres://...prod  ~/.codex/sessions/2026-11-12.jsonl:309
-  └─ GitHub PAT        ghp_x82K...91aB     ~/.cursor/chats/auth-fix/chat.json:77
+CRITICAL  3 unique secret(s) found in local agent transcripts
+  ├─ Database URI          postgres://***@db.prod.acme.io  ~/.claude/projects/app/08fa.jsonl:184
+  ├─ AWS Access Key        AKIA5F29Q...7Q2M                ~/.claude/projects/infra/91bc.jsonl:42
+  └─ Stripe Live Key       sk_live_9f...4c21 (2x)          ~/.claude/projects/app/08fa.jsonl:184
 
-HIGH      2 risky MCP server configs detected
+HIGH      3 MCP configuration risk(s) detected
   ├─ @community/db-mcp (.mcp.json)
-  │    Passes full shell env (29 vars incl. AWS_SECRET_ACCESS_KEY) + unpinned npx -y
-  └─ docs-helper-mcp (claude_desktop_config.json)
-       Known outbound telemetry endpoint: events.docs-helper.io
+  │    Runs unpinned `npx -y @community/db-mcp` — pulls latest remote code on start with local file/env access
+  ├─ @community/db-mcp (.mcp.json)
+  │    Grants broad filesystem access (`/`) instead of scoping to one workspace folder
+  └─ @community/db-mcp (.mcp.json)
+       References outbound analytics/telemetry endpoint (`events.posthog.com`)
 
 MEDIUM    Identity & internal metadata in outbound context
-  └─ Work email + 3 internal *.corp hostnames appeared in 19 prompts
+  └─ 1 email address(es) + 1 internal hostname(s) appeared across 2 transcript hit(s)
 
 Next steps:
-  • Redact leaked secrets from local logs:   npx leaktap clean --dry-run
-  • Wiretap a live coding session:           npx leaktap tap -- claude
+  • Preview local log redaction:   leaktap clean
+  • Apply redaction with backup:   leaktap clean --apply
+  • Wiretap a live agent session:  leaktap tap --scrub-env -- claude
 ```
 
 ---
 
-## Core Capabilities
+## Installation
 
-### 1. Offline Transcript & Config Audit (`leaktap scan`)
-- **Zero setup, 100% offline:** Scans existing local session histories (`.jsonl` / SQLite / JSON) for Claude Code, Codex CLI, Cursor, and Gemini CLI without making a single network call.
-- **High-precision secret detection:** Catches cloud keys (AWS, GCP, Azure), API tokens (Stripe, GitHub, Slack, OpenAI, Anthropic), private keys, JWTs, and database URLs—while ignoring placeholder test values (`EXAMPLE`, `xxxx`, dummy fixtures).
-- **MCP config & supply-chain check:** Inspects `.mcp.json`, `claude_desktop_config.json`, and `.cursor/mcp.json` for full environment-variable inheritance, unpinned `npx -y` execution, unrestricted filesystem/shell access, and silent analytics endpoints.
-- **Safe local cleanup (`leaktap clean`):** Scrubs exposed credentials out of local `.jsonl` session transcripts in place (with backup + `--dry-run` preview) so old chats stop sitting on disk as a plaintext credential vault.
+### From GitHub (Rust 1.75+)
 
-### 2. Live Session Wiretap (`leaktap tap -- <agent>`)
-- **MCP `stdio` & subprocess wiretap:** Sits transparently between your coding agent and its MCP servers / child commands to log every tool call, file read, and outbound destination in real time.
-- **Header & telemetry watch:** Flags unexpected outbound domains and identity leaks in HTTP headers (such as emails or hostnames embedded in `User-Agent` or custom `X-*` headers).
-- **Lossless fake-token swap *(planned `v0.3`)*:** Replaces a real secret like `sk_live_9f8a...` with a same-format placeholder (`sk_live_LEAKTAP_0001...`) before it leaves your machine, and swaps the real value back locally if referenced—so secrets stay local while code edits and `git apply` keep working.
+```bash
+cargo install --git https://github.com/vssinghh/leaktap
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/vssinghh/leaktap.git
+cd leaktap
+cargo build --release
+./target/release/leaktap scan
+```
+
+*(Prebuilt macOS, Linux, and Windows binaries via GitHub Releases, `crates.io`, and `npx leaktap` are wired up in [`.github/workflows/release.yml`](.github/workflows/release.yml) and [`npm/leaktap`](npm/leaktap) for tagged releases.)*
 
 ---
 
-## How `leaktap` Fits With Existing Tools
+## Usage
 
-| Approach | Catches secrets inside current repo `.env`? | Sees MCP payloads & outbound leaks? | Requires Docker or TLS Root CA? | Keeps `git apply` & OAuth intact? |
-| :--- | :---: | :---: | :---: | :---: |
-| **OS File Sandboxes** (`sandbox-exec`, `safehouse`) | No *(agent needs repo read access)* | No | No | Yes |
-| **Docker MITM Proxies** (`codegate`, corp DLP) | Partial | Yes | **Yes (heavy)** | Often breaks |
-| **MCP-Only Sniffers** (`mcpsnoop`) | No *(misses transcripts & configs)* | MCP `stdio` only | No | Yes |
-| **`leaktap`** | **Yes** | **Yes** | **No** | **Yes** |
+### 1. Offline Transcript & MCP Audit (`scan`)
 
-> **Tip:** `leaktap` pairs cleanly with OS sandboxes. Use an OS sandbox to block `~/.ssh` and `~/.aws` outside your workspace, and use `leaktap` to catch `.env` secrets, transcript leaks, and MCP/network behavior inside your workspace.
+```bash
+# Scan ~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.codeium + workspace MCP configs
+leaktap
+
+# Scan a specific project or transcript directory
+leaktap scan --path ./my-project
+
+# Export machine-readable JSON or SARIF 2.1.0 (for GitHub Code Scanning / CI)
+leaktap scan --path . --format json
+leaktap scan --path . --format sarif --fail-on high > leaktap.sarif
+```
+
+### 2. Redact Leaked Secrets from Local Session Logs (`clean`)
+
+`leaktap clean` runs in **read-only dry-run mode by default**, preserves valid JSONL syntax on every line so `/resume` history never breaks, and writes `.leaktap.bak` backups before modifying files:
+
+```bash
+# Preview how many exposed secrets would be redacted
+leaktap clean
+
+# Write redactions atomically (creates <file>.leaktap.bak backups)
+leaktap clean --apply
+```
+
+### 3. Wiretap Live Agent or MCP `stdio` Sessions (`tap`)
+
+`leaktap tap` wraps any agent CLI or MCP `stdio` server, strips sensitive shell environment variables (`--scrub-env`) before child processes inherit them, and inspects `stdin`/`stdout`/`stderr` in flight **without altering `stdout` JSON-RPC framing**:
+
+```bash
+# Wrap Claude Code and strip unrelated cloud secrets from inherited shell env
+leaktap tap --scrub-env --allow-env ANTHROPIC_API_KEY -- claude
+
+# Wrap a third-party MCP server inside .mcp.json and log wiretap events to JSONL
+leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
+```
+
+### 4. Inspect Built-in Detection Rules (`rules`)
+
+```bash
+leaktap rules
+```
+
+---
+
+## Under the Hood
+
+- **Linear-time `O(n)` scanning at ~400 MB/s:** Uses SIMD `aho-corasick` anchor prefiltering in front of Rust's finite-automaton `regex` engine + `rayon` multi-core parallelism. Giant 20 MB minified `.jsonl` tool-output lines never trigger regex backtracking freezes.
+- **JSONL escape-aware matching:** Correctly detects credentials preceded or terminated by JSON string escapes (`\n`, `\r`, `\t`) inside `.jsonl` transcripts while preserving exact byte offsets for atomic redaction.
+- **False-positive suppression:** Combines Shannon entropy thresholds with context filters so placeholder keys (`AKIAIOSFODNN7EXAMPLE`, `your_api_key`), local dev URIs (`postgres://postgres:postgres@localhost`), `git@github.com`, and `@scope/pkg` names don't flood you with noise.
+- **SHA-256 deduplication:** Identical secrets repeated across dozens of conversation turns are grouped by hash so each unique credential is reported once with an occurrence count.
 
 ---
 
 ## Privacy & Trust Model
 
-Security tools should never become a new data risk:
-
-- **Offline by default:** `leaktap scan` and `leaktap clean` run strictly on your machine and make **zero** outbound network connections.
-- **Zero telemetry:** No analytics, no crash reporting, no account sign-up.
-- **Always masked:** Matched secrets are truncated by default (`sk_live_9f...4c21`) so running `leaktap` never dumps raw credentials into your terminal scrollback or CI logs.
+- **Offline by default:** `leaktap scan` and `leaktap clean` make **zero** outbound network connections.
+- **Zero telemetry:** No analytics, no crash reporting, no cloud accounts.
+- **Always masked:** Matched secrets are truncated (`sk_live_9f...4c21`) in terminal, JSON, SARIF, and wiretap log outputs so `leaktap` never writes raw credentials into your scrollback or CI artifacts.
 
 ---
 
 ## Roadmap
 
-- [ ] **`v0.1` — Offline Scanner & Cleaner (`scan`, `clean`):** Scan Claude Code, Codex, Cursor, and Gemini CLI transcripts + audit MCP configs + export JSON/SARIF reports for CI.
-- [ ] **`v0.2` — Live Wiretap (`tap`):** Wrap MCP `stdio` servers and agent subprocesses with live outbound domain, tool-argument, and header leak alerts.
-- [ ] **`v0.3` — Lossless Secret Guard:** Deterministic format-preserving token substitution before prompts or tool outputs leave your machine.
-- [ ] **`v0.4` — Public MCP Leak Benchmark:** Automated reproducible audit methodology for popular open-source MCP servers and skills.
+- [x] **`v0.1` — Core Rust Engine (`scan`, `clean`, `tap`, `rules`):** Multi-agent transcript scanner (`~400 MB/s`), MCP config supply-chain/secret/telemetry auditor, JSONL-safe cleaner, `stdio`/env wiretap, and JSON/SARIF CI outputs.
+- [ ] **`v0.2` — Interactive Terminal Dashboard & Socket Monitor:** Live TUI view + OS-level per-process outbound domain/header monitor (`User-Agent` / `X-*` identity leak alerts).
+- [ ] **`v0.3` — Lossless Format-Preserving Token Swap:** Deterministic fake-token substitution before prompts leave your machine so `git apply` diffs keep working without exposing real keys.
+- [ ] **`v0.4` — Public MCP Leak Benchmark:** Reproducible audit dataset across top open-source MCP servers and skills.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)

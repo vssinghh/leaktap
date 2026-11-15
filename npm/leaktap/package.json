@@ -1,0 +1,37 @@
+{
+  "name": "leaktap",
+  "version": "0.1.0",
+  "description": "See what your AI coding agents leak. Local secret & telemetry scanner + live outbound wiretap for Claude Code, Cursor, Codex & MCP.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vssinghh/leaktap.git"
+  },
+  "homepage": "https://github.com/vssinghh/leaktap",
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "cursor",
+    "codex",
+    "mcp",
+    "secret-scanner",
+    "security",
+    "privacy"
+  ],
+  "bin": {
+    "leaktap": "bin/leaktap.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "optionalDependencies": {
+    "@leaktap/darwin-arm64": "0.1.0",
+    "@leaktap/darwin-x64": "0.1.0",
+    "@leaktap/linux-x64": "0.1.0",
+    "@leaktap/linux-arm64": "0.1.0",
+    "@leaktap/win32-x64": "0.1.0"
+  }
+}
