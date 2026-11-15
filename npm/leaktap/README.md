@@ -1,23 +1,23 @@
 # leaktap
 
-**See what your AI coding CLIs actually leak.**
+See what your AI coding CLIs actually leak.
 
-Fast command-line tool built for **terminal AI coding agents**. Checks local AI coding logs and MCP plugin configs for leaked API keys, passwords, and private data—with an interactive terminal dashboard (`leaktap ui`) and live CLI HTTP header/prompt/socket watching (`leaktap tap`).
+`leaktap` scans local AI chat logs and MCP configs for leaked API keys, database URLs, and personal info, with a terminal UI (`leaktap ui`) and live CLI session watching (`leaktap tap`).
 
-Supports **Claude Code (`claude`)** · **Codex CLI (`codex`)** · **Gemini CLI (`gemini`)** — plus the local **MCP tool plugins** they run *(CLI-focused right now; desktop/IDE GUIs are not intercepted live yet)*.
+Supports **Claude Code** (`claude`), **Codex CLI** (`codex`), **Gemini CLI** (`gemini`), and local **MCP servers**. (Live watching targets terminal CLIs for now, not desktop or IDE apps.)
 
 ## Quickstart
 
 ```bash
-# 1. Check your local agent logs & MCP configs offline
+# Check local logs and MCP configs offline
 npx leaktap scan
 
-# 2. Browse leaks, MCP risks & live wiretap stream in an interactive terminal UI
+# Open the interactive terminal UI
 npx leaktap ui
 
-# 3. Run Claude Code, Codex, or Gemini CLI while checking outgoing HTTP headers & prompts
+# Watch Claude Code, Codex, or Gemini CLI live
 npx leaktap tap --inspect-api --scrub-env -- claude
 npx leaktap tap --inspect-api --scrub-env -- gemini
 ```
 
-Source code and full docs: https://github.com/vssinghh/leaktap
+Source and docs: https://github.com/vssinghh/leaktap

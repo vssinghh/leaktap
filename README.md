@@ -3,56 +3,33 @@
 [![CI](https://github.com/vssinghh/leaktap/actions/workflows/ci.yml/badge.svg)](https://github.com/vssinghh/leaktap/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**See what your AI coding CLIs actually leak.**
+See what your AI coding CLIs actually leak.
 
-`leaktap` is a small, fast command-line tool (single Rust binary, zero tracking) built for **terminal AI coding agents**. It checks your local AI coding logs and tool-plugin configs for leaked API keys, passwords, and private info—and wraps live CLI sessions to catch secret, HTTP header, and network connection leaks without needing Docker or custom HTTPS certificates.
+`leaktap` scans your local AI chat logs and MCP configs for leaked API keys, database URLs, and personal info, scrubs old logs, and watches live CLI sessions for leaked secrets, HTTP headers, and network connections.
 
-Supports **Claude Code (`claude`)** · **Codex CLI (`codex`)** · **Gemini CLI (`gemini`)** — plus any local **MCP tool plugins** they run.
+Currently supports **Claude Code** (`claude`), **Codex CLI** (`codex`), **Gemini CLI** (`gemini`), and local **MCP servers**. Desktop and IDE apps aren't supported for live watching yet, though `leaktap scan` will still check any local logs and MCP configs they leave on disk.
 
-- **CLI-focused right now:** Live session wrapping and API call inspection (`leaktap tap`) work with **terminal CLIs** (`claude`, `codex`, `gemini`) and `stdio` MCP plugins—not desktop or IDE GUI apps yet. (`leaktap scan` still checks any local `~/.cursor` or Claude Desktop logs/configs already saved on disk.)
-- **What is an MCP server?** **MCP (Model Context Protocol)** is the standard plugin system for AI coding tools. Despite the word "server," most MCP servers are small helper programs your agent starts right on your laptop—often via `npx` or `uvx`—to connect to Postgres, GitHub, Figma, Slack, or a browser, which means they can access your local files, shell secrets, and network.
+> **2026 MCP Audit ([full write-up](docs/mcp-top-50-audit.md)):** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry.
 
-> [!NOTE]
-> **2026 MCP Plugin Audit ([read full report](docs/mcp-top-50-audit.md)):** Across the Top 50 open-source MCP servers on GitHub, **70%** recommend unpinned `npx -y` / `uvx` auto-installs, **24%** guide users to paste plain-text API keys into JSON config files, and **24%** include built-in telemetry or analytics SDKs.
+## Install
 
----
-
-## Quick Install
-
-### macOS & Linux (1-Line Installer — Verifies SHA-256 Checksum)
+macOS and Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vssinghh/leaktap/master/install.sh | sh
 ```
 
-### Or Run via `npx` / `cargo` / Prebuilt Binaries
+Or run via `npx` or `cargo`:
 
 ```bash
-# Via npx (Node 18+)
 npx leaktap scan
 
-# Via Cargo (Rust 1.75+)
 cargo install --git https://github.com/vssinghh/leaktap
 ```
 
-Prebuilt binaries for **macOS (`arm64` / `x64`)**, **Linux (`x64` / `arm64`)**, and **Windows (`x64`)** are also available on **[GitHub Releases](https://github.com/vssinghh/leaktap/releases)**.
+Prebuilt binaries for macOS (`arm64`, `x64`), Linux (`x64`, `arm64`), and Windows (`x64`) are on [GitHub Releases](https://github.com/vssinghh/leaktap/releases).
 
----
-
-## The Problem (One Simple Example)
-
-Say you run `claude`, `codex`, or `gemini` in your terminal to fix a Stripe checkout bug in your repo:
-
-1. **The CLI reads your `.env` file:** While searching your code, the agent opens `.env.local` and reads `STRIPE_SECRET_KEY=sk_live_9f8a...` and `DATABASE_URL=postgres://...`, along with your work email and internal company URLs.
-2. **Your live keys get saved in plain text and sent out:** Those raw keys are written straight to local chat logs (`~/.claude/`, `~/.codex/`, or `~/.gemini/`), included in model prompts, and passed into third-party MCP plugins or shell commands—while HTTP headers like `User-Agent` can quietly attach your email or machine name.
-3. **Why OS file sandboxes don't stop this:** File sandboxes (`sandbox-exec` on macOS, `bubblewrap` on Linux) are great at blocking folders outside your project like `~/.ssh`. **But** the agent needs read access to your project folder and internet access to work. Once internet access is on, OS file sandboxes cannot see what is inside outgoing headers, prompts, or MCP tool calls.
-4. **Why heavy network proxies get in your way:** Classic security proxies ask you to run Docker, trust a custom root certificate, and replace secrets with `[REDACTED]`. That often breaks OAuth logins—and makes `git apply` fail when `[REDACTED]` comes back inside a code patch.
-
-`leaktap` keeps things simple: **audit what already leaked on your laptop in under a second offline**, browse and clean leaks in an interactive terminal UI, and watch live CLI commands without Docker or custom root certificates.
-
----
-
-## What `leaktap scan` Looks Like
+## Example output
 
 ```text
 $ leaktap scan
@@ -82,97 +59,83 @@ Next steps:
   • Watch live headers & prompts:  leaktap tap --inspect-api --scrub-env -- claude
 ```
 
----
+## Why I built this
 
-## Commands
+When you run `claude`, `codex`, or `gemini` inside a project, it reads files like `.env` while debugging code. Those keys and database URLs get saved in plain text inside `~/.claude`, `~/.codex`, or `~/.gemini` chat logs, sent out in prompts, and exposed to MCP servers through inherited shell variables. Outgoing HTTP headers like `User-Agent` can also carry your email or machine hostname.
 
-### 1. Check Local Logs and MCP Configs (`scan`)
+OS file sandboxes (`sandbox-exec`, `bubblewrap`) are good at blocking folders outside your repo like `~/.ssh`, which helps, but the CLI still needs read access to your repo and internet access to work. Once network access is open, file sandboxes can't see what goes out in prompts or headers. Full HTTPS proxies go too far the other way: they need Docker and a custom root certificate, and replacing keys with `[REDACTED]` breaks `git apply` when a patch comes back.
 
-Runs 100% offline. Checks `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini`, and any MCP config files (`.mcp.json`, `claude_desktop_config.json`, `.cursor/mcp.json`) in your current project:
+`leaktap` is a single binary with no setup. It checks what already leaked on your machine in ~120ms offline, gives you a terminal UI to browse and clean findings, and can wrap `claude`, `codex`, or `gemini` to inspect live calls without installing root certificates.
+
+## Usage
+
+### Scan local logs and MCP configs (`scan`)
+
+Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini` (plus `~/.cursor` if present) and MCP config files in your current directory:
 
 ```bash
-# Default scan across your local coding agents
+# Default scan
 leaktap
 
-# Scan one specific folder or file
+# Scan a specific folder or file
 leaktap scan --path ./my-project
 
-# Output JSON or SARIF (for GitHub Actions / CI checks)
+# JSON or SARIF output for CI
 leaktap scan --path . --format json
 leaktap scan --path . --format sarif --fail-on high > leaktap.sarif
 ```
 
-### 2. Open the Interactive Terminal Dashboard (`ui`)
+### Terminal UI (`ui`)
 
-Opens a keyboard-driven terminal dashboard with three tabs (**`[1] Transcript Leaks`**, **`[2] MCP Config Risks`**, and **`[3] Live Wiretap`**):
+Opens an interactive terminal view with three tabs: `Transcript Leaks`, `MCP Config Risks`, and `Live Wiretap`.
 
 ```bash
 leaktap ui
 ```
 
-- Move with `↑`/`↓` or `j`/`k`, switch tabs with `Tab` or `1`–`3`, press **`c`** on any leaked secret to scrub that log file in place (with a `.leaktap.bak` backup), and watch live `leaktap tap` events stream into Tab 3 automatically.
+Use `j`/`k` or arrow keys to move, `1`-`3` or `Tab` to switch tabs, and `c` to scrub the selected log file in place (saves a `.leaktap.bak` copy first).
 
-### 3. Scrub Leaked Keys from Old Chat Logs (`clean`)
+### Clean leaked keys from old chat logs (`clean`)
 
-By default, `leaktap clean` runs a **safe preview** without touching any files. When you pass `--apply`, it saves a `.leaktap.bak` backup first and replaces only the secret values so your `.jsonl` chat history still opens cleanly in `/resume`:
+Runs a dry-run preview by default. Passing `--apply` writes a `.leaktap.bak` backup and replaces only the secret strings so `.jsonl` files stay valid for `/resume`:
 
 ```bash
-# Preview how many secrets would be scrubbed
+# Preview what would be cleaned
 leaktap clean
 
-# Scrub secrets and keep .leaktap.bak backups
+# Apply changes
 leaktap clean --apply
 ```
 
-### 4. Watch Live CLI Sessions, HTTP Headers & Outbound Connections (`tap`)
+### Watch live CLI sessions (`tap`)
 
-Wraps any terminal coding CLI (`claude`, `codex`, `gemini`) or `stdio` MCP plugin:
-- **`--scrub-env`** removes unrelated secret environment variables (like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` sitting in your shell) before starting the child process, while automatically keeping the wrapped CLI's own login key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`).
-- **`--inspect-api`** routes `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` through a local zero-certificate loopback listener so `leaktap` can check outgoing HTTP headers (`User-Agent` email/hostname leaks) and prompt bodies in real time while streaming model responses straight back. *(Note: `--inspect-api` inspects terminal CLI API calls—for Gemini CLI, use `GEMINI_API_KEY` mode rather than browser OAuth so `GOOGLE_GEMINI_BASE_URL` is honored.)*
-- **Process socket watch** monitors outbound TCP connections opened by the CLI and its child MCP tools without needing `sudo`.
+Wraps `claude`, `codex`, `gemini`, or an MCP server command:
+
+- `--scrub-env` strips extra secret variables from your shell (like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY`) before starting the command, while keeping the CLI's own API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`).
+- `--inspect-api` points `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` at a local port on `localhost` so `leaktap` can check outgoing HTTP headers and prompt bodies before forwarding requests upstream over HTTPS. (For Gemini CLI, use `GEMINI_API_KEY` auth rather than browser login so `GOOGLE_GEMINI_BASE_URL` takes effect.)
+- Also watches new outbound TCP connections opened by the CLI and its child processes without needing `sudo`.
 
 ```bash
-# Watch Claude Code, Codex CLI, or Gemini CLI live
+# Watch Claude Code, Codex CLI, or Gemini CLI
 leaktap tap --inspect-api --scrub-env -- claude
 leaktap tap --inspect-api --scrub-env -- codex
 leaktap tap --inspect-api --scrub-env -- gemini
 
-# Wrap a third-party MCP plugin inside .mcp.json (alerts go to stderr/log so stdout tool responses stay intact)
+# Wrap an MCP server in .mcp.json (quiet mode keeps stdout clean for JSON-RPC)
 leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
 ```
 
-### 5. List All Built-in Checks (`rules`)
+### List built-in checks (`rules`)
 
 ```bash
 leaktap rules
 ```
 
----
+## Privacy
 
-## How It Stays Fast and Low-Noise
-
-- **Scans ~400 MB/s without freezing on huge log lines:** AI logs often contain giant 20 MB single-line JSON outputs from build tools. `leaktap` checks quick text prefixes first and uses Rust's non-backtracking regex engine across all CPU cores, scanning 50 MB (110,000 turns) in ~120ms.
-- **Catches keys inside escaped `.jsonl` strings:** Properly finds secrets sitting right next to `\n`, `\r`, or `\t` escapes inside JSON log lines.
-- **Skips dummy values and local test noise:** Checks how random a secret looks so real keys get flagged while dummy strings (`AKIAIOSFODNN7EXAMPLE`, `your_api_key`), local test DBs (`localhost`), `git@github.com`, and npm `@scope/pkg` names are ignored.
-- **Groups duplicate hits:** If the same Stripe key shows up 15 times in one chat, `leaktap` hashes it in memory and lists it once (`(15x)`) instead of flooding your terminal.
-
----
-
-## Privacy Promise
-
-- **Offline by default:** `leaktap scan` and `leaktap clean` make **zero** internet requests.
-- **Zero tracking:** No analytics, no telemetry, no accounts.
-- **Always masked:** Secrets are always shortened (`sk_live_9f...4c21`) in terminal, TUI, JSON, SARIF, and wiretap outputs so `leaktap` never dumps raw credentials onto your screen or CI logs.
-
----
-
-## Roadmap
-
-- [x] **`v0.1` — Core CLI (`scan`, `clean`, `tap`, `rules`):** Fast offline log scanner, MCP config checker, safe `.jsonl` cleaner, `stdio`/env wrapper, and JSON/SARIF output.
-- [x] **`v0.2` — Interactive Dashboard + CLI Header & Socket Watch:** 3-tab terminal UI (`leaktap ui`), zero-cert `--inspect-api` HTTP header/prompt inspector (`claude`, `codex`, `gemini`), OS socket watcher, and 1-line SHA-256-verified installer.
-- [ ] **`v0.3` — Safe Placeholder Swap & Optional IDE Gateway Mode:** Swap real secrets with same-format placeholders before prompts leave your machine (swapping back locally so `git apply` still works), plus an optional fixed-port gateway (`leaktap proxy`) for IDE extensions and desktop apps.
-
----
+- `leaktap scan` and `leaktap clean` make zero network requests.
+- No telemetry, analytics, or accounts.
+- Matched secrets are always masked (`sk_live_9f...4c21`) in terminal, UI, JSON, SARIF, and log output.
 
 ## License
 
