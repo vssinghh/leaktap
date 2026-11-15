@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[command(
     name = "leaktap",
     version,
-    about = "See what your AI coding agents actually leak — offline log/MCP scanner, interactive dashboard, and live wiretap.",
-    long_about = "leaktap checks local AI coding logs (Claude Code, Codex, Cursor, Gemini CLI) and MCP configs\ncompletely offline, scrubs leaked keys from old chat logs, opens an interactive terminal dashboard,\nand watches live agent sessions for secret, HTTP header, and outbound connection leaks."
+    about = "See what your AI coding CLIs actually leak — offline log/MCP scanner, interactive dashboard, and live CLI wiretap.",
+    long_about = "leaktap is built for AI coding CLIs (Claude Code, Codex CLI, Gemini CLI) and local MCP tool plugins.\nIt scans local agent chat logs and MCP configs completely offline, scrubs leaked keys from old chat logs,\nopens an interactive terminal dashboard, and wraps live CLI sessions to watch secrets, HTTP headers, and sockets."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -15,7 +15,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Offline check of local AI agent chat logs and MCP server configs (default)
+    /// Offline check of local AI agent chat logs and MCP plugin configs (default)
     Scan(ScanArgs),
 
     /// Scrub leaked secrets from local AI chat logs (safe preview by default)
@@ -24,7 +24,7 @@ pub enum Commands {
     /// Open the interactive terminal dashboard (transcripts, MCP risks, and live wiretap stream)
     Ui(UiArgs),
 
-    /// Wrap a live coding agent or MCP server to watch secrets, headers, env vars, and sockets
+    /// Wrap a live coding CLI (claude, codex, gemini) or MCP plugin to watch secrets, headers, env vars, and sockets
     Tap(TapArgs),
 
     /// List all built-in secret, privacy, header, and MCP detection rules
@@ -121,7 +121,7 @@ pub struct TapArgs {
     #[arg(long, value_delimiter = ',')]
     pub allow_env: Vec<String>,
 
-    /// Route ANTHROPIC_BASE_URL / OPENAI_BASE_URL through a local zero-cert loopback tap to inspect outgoing HTTP headers and prompt bodies
+    /// Route ANTHROPIC_BASE_URL / OPENAI_BASE_URL / GOOGLE_GEMINI_BASE_URL through a local zero-cert loopback tap to inspect outgoing HTTP headers and prompt bodies
     #[arg(long)]
     pub inspect_api: bool,
 
@@ -141,7 +141,7 @@ pub struct TapArgs {
     #[arg(long, short)]
     pub quiet: bool,
 
-    /// Command and arguments to wrap (e.g. `leaktap tap --inspect-api --scrub-env -- claude`)
+    /// CLI command and arguments to wrap (e.g. `leaktap tap --inspect-api --scrub-env -- claude` or `-- gemini`)
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
 }

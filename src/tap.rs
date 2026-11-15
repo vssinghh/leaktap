@@ -103,12 +103,16 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         );
     });
 
-    let allow_set: HashSet<String> = args
+    let mut allow_set: HashSet<String> = args
         .allow_env
         .iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+
+    for &provider_key in default_provider_env_keys(program) {
+        allow_set.insert(provider_key.to_string());
+    }
 
     let mut exposed_env_keys = Vec::new();
     for (k, v) in env::vars() {
@@ -166,16 +170,23 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         let oai_upstream = env::var("LEAKTAP_UPSTREAM_OPENAI_URL")
             .or_else(|_| env::var("OPENAI_BASE_URL"))
             .unwrap_or_else(|_| "https://api.openai.com".to_string());
+        let gemini_upstream = env::var("LEAKTAP_UPSTREAM_GEMINI_URL")
+            .or_else(|_| env::var("GOOGLE_GEMINI_BASE_URL"))
+            .or_else(|_| env::var("GEMINI_API_BASE_URL"))
+            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
 
         let tap = start_local_api_tap(
             anth_upstream,
             oai_upstream,
+            gemini_upstream,
             Arc::clone(&engine),
             Arc::clone(&header_auditor),
             Arc::clone(&emit_cb),
         )?;
         cmd.env("ANTHROPIC_BASE_URL", &tap.anthropic_base_url);
         cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
+        cmd.env("GOOGLE_GEMINI_BASE_URL", &tap.gemini_base_url);
+        cmd.env("GEMINI_API_BASE_URL", &tap.gemini_base_url);
         Some(tap)
     } else {
         None
@@ -422,10 +433,31 @@ fn parse_probable_http_header(line: &str) -> Option<(&str, &str)> {
         || lower.starts_with("x-")
         || lower.starts_with("anthropic-")
         || lower.starts_with("openai-")
+        || lower.starts_with("x-goog-")
     {
         return Some((key, v.trim()));
     }
     None
+}
+
+fn default_provider_env_keys(program: &str) -> &'static [&'static str] {
+    let base = std::path::Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".cmd"))
+        .or_else(|| base.strip_suffix(".bat"))
+        .unwrap_or(&base);
+
+    match stem {
+        "claude" | "claude-code" => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+        "codex" => &["OPENAI_API_KEY"],
+        "gemini" | "gemini-cli" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        _ => &[],
+    }
 }
 
 fn emit_alert(

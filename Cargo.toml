@@ -1,13 +1,13 @@
 [package]
 name = "leaktap"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.75"
-description = "See what your AI coding agents leak. Offline secret & MCP auditor, interactive terminal dashboard, and live outbound wiretap."
+description = "See what your AI coding CLIs leak. Offline secret & MCP auditor, interactive terminal dashboard, and live CLI wiretap."
 license = "MIT"
 repository = "https://github.com/vssinghh/leaktap"
 homepage = "https://github.com/vssinghh/leaktap"
-keywords = ["security", "ai-agents", "mcp", "secret-scanner", "claude-code"]
+keywords = ["security", "ai-agents", "mcp", "claude-code", "gemini-cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]

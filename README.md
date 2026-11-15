@@ -3,13 +3,14 @@
 [![CI](https://github.com/vssinghh/leaktap/actions/workflows/ci.yml/badge.svg)](https://github.com/vssinghh/leaktap/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**See what your AI coding agents actually leak.**
+**See what your AI coding CLIs actually leak.**
 
-`leaktap` is a small, fast command-line tool (single Rust binary, zero tracking) that checks your local AI coding logs and tool-plugin configs for leaked API keys, passwords, and private info—and watches live agent sessions for secret, HTTP header, and network connection leaks without needing Docker or custom HTTPS certificates.
+`leaktap` is a small, fast command-line tool (single Rust binary, zero tracking) built for **terminal AI coding agents**. It checks your local AI coding logs and tool-plugin configs for leaked API keys, passwords, and private info—and wraps live CLI sessions to catch secret, HTTP header, and network connection leaks without needing Docker or custom HTTPS certificates.
 
-Works with **Claude Code** · **Cursor** · **Codex CLI** · **Gemini CLI** — plus any **MCP tool plugins** they run.
+Supports **Claude Code (`claude`)** · **Codex CLI (`codex`)** · **Gemini CLI (`gemini`)** — plus any local **MCP tool plugins** they run.
 
-*(What is an **MCP server**? **MCP [Model Context Protocol]** is the standard plugin system for AI coding tools. Despite the word "server," most MCP servers are small helper programs your agent starts right on your laptop—often via `npx` or `uvx`—to connect to Postgres, GitHub, Figma, Slack, or a browser, which means they can access your local files, shell secrets, and network.)*
+- **CLI-focused right now:** Live session wrapping and API call inspection (`leaktap tap`) work with **terminal CLIs** (`claude`, `codex`, `gemini`) and `stdio` MCP plugins—not desktop or IDE GUI apps yet. (`leaktap scan` still checks any local `~/.cursor` or Claude Desktop logs/configs already saved on disk.)
+- **What is an MCP server?** **MCP (Model Context Protocol)** is the standard plugin system for AI coding tools. Despite the word "server," most MCP servers are small helper programs your agent starts right on your laptop—often via `npx` or `uvx`—to connect to Postgres, GitHub, Figma, Slack, or a browser, which means they can access your local files, shell secrets, and network.
 
 > [!NOTE]
 > **2026 MCP Plugin Audit ([read full report](docs/mcp-top-50-audit.md)):** Across the Top 50 open-source MCP servers on GitHub, **70%** recommend unpinned `npx -y` / `uvx` auto-installs, **24%** guide users to paste plain-text API keys into JSON config files, and **24%** include built-in telemetry or analytics SDKs.
@@ -40,14 +41,14 @@ Prebuilt binaries for **macOS (`arm64` / `x64`)**, **Linux (`x64` / `arm64`)**, 
 
 ## The Problem (One Simple Example)
 
-Say you ask Claude Code or Cursor to fix a Stripe checkout bug in your repo:
+Say you run `claude`, `codex`, or `gemini` in your terminal to fix a Stripe checkout bug in your repo:
 
-1. **The agent reads your `.env` file:** While searching your code, the agent opens `.env.local` and reads `STRIPE_SECRET_KEY=sk_live_9f8a...` and `DATABASE_URL=postgres://...`, along with your work email and internal company URLs.
-2. **Your live keys get saved in plain text and sent out:** Those raw keys are written straight to local chat logs (`~/.claude/` or `~/.codex/`), included in model prompts, and passed into third-party MCP servers or shell commands—while HTTP headers like `User-Agent` can quietly attach your email or machine name.
+1. **The CLI reads your `.env` file:** While searching your code, the agent opens `.env.local` and reads `STRIPE_SECRET_KEY=sk_live_9f8a...` and `DATABASE_URL=postgres://...`, along with your work email and internal company URLs.
+2. **Your live keys get saved in plain text and sent out:** Those raw keys are written straight to local chat logs (`~/.claude/`, `~/.codex/`, or `~/.gemini/`), included in model prompts, and passed into third-party MCP plugins or shell commands—while HTTP headers like `User-Agent` can quietly attach your email or machine name.
 3. **Why OS file sandboxes don't stop this:** File sandboxes (`sandbox-exec` on macOS, `bubblewrap` on Linux) are great at blocking folders outside your project like `~/.ssh`. **But** the agent needs read access to your project folder and internet access to work. Once internet access is on, OS file sandboxes cannot see what is inside outgoing headers, prompts, or MCP tool calls.
 4. **Why heavy network proxies get in your way:** Classic security proxies ask you to run Docker, trust a custom root certificate, and replace secrets with `[REDACTED]`. That often breaks OAuth logins—and makes `git apply` fail when `[REDACTED]` comes back inside a code patch.
 
-`leaktap` keeps things simple: **audit what already leaked on your laptop in under a second offline**, browse and clean leaks in an interactive terminal UI, and watch live commands without Docker or custom root certificates.
+`leaktap` keeps things simple: **audit what already leaked on your laptop in under a second offline**, browse and clean leaks in an interactive terminal UI, and watch live CLI commands without Docker or custom root certificates.
 
 ---
 
@@ -56,8 +57,8 @@ Say you ask Claude Code or Cursor to fix a Stripe checkout bug in your repo:
 ```text
 $ leaktap scan
 
-leaktap v0.2.0 — local offline audit (0 network requests)
-Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.cursor
+leaktap v0.2.2 — local offline audit (0 network requests)
+Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.gemini
 
 CRITICAL  3 unique secret(s) found in local agent transcripts
   ├─ Database URI          postgres://***@db.prod.acme.io  ~/.claude/projects/app/08fa.jsonl:184
@@ -123,18 +124,20 @@ leaktap clean
 leaktap clean --apply
 ```
 
-### 4. Watch Live Sessions, HTTP Headers & Outbound Connections (`tap`)
+### 4. Watch Live CLI Sessions, HTTP Headers & Outbound Connections (`tap`)
 
-Wraps any agent CLI or MCP server:
-- **`--scrub-env`** removes unrelated secret environment variables (like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` sitting in your shell) before starting the child process.
-- **`--inspect-api`** routes `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` through a local zero-certificate loopback listener so `leaktap` can check outgoing HTTP headers (`User-Agent` email/hostname leaks) and prompt bodies in real time while streaming model responses straight back.
-- **Process socket watch** monitors outbound TCP connections opened by the agent and its child MCP tools without needing `sudo`.
+Wraps any terminal coding CLI (`claude`, `codex`, `gemini`) or `stdio` MCP plugin:
+- **`--scrub-env`** removes unrelated secret environment variables (like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` sitting in your shell) before starting the child process, while automatically keeping the wrapped CLI's own login key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`).
+- **`--inspect-api`** routes `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` through a local zero-certificate loopback listener so `leaktap` can check outgoing HTTP headers (`User-Agent` email/hostname leaks) and prompt bodies in real time while streaming model responses straight back. *(Note: `--inspect-api` inspects terminal CLI API calls—for Gemini CLI, use `GEMINI_API_KEY` mode rather than browser OAuth so `GOOGLE_GEMINI_BASE_URL` is honored.)*
+- **Process socket watch** monitors outbound TCP connections opened by the CLI and its child MCP tools without needing `sudo`.
 
 ```bash
-# Run Claude Code while checking outgoing HTTP headers/prompts and stripping unrelated shell secrets
-leaktap tap --inspect-api --scrub-env --allow-env ANTHROPIC_API_KEY -- claude
+# Watch Claude Code, Codex CLI, or Gemini CLI live
+leaktap tap --inspect-api --scrub-env -- claude
+leaktap tap --inspect-api --scrub-env -- codex
+leaktap tap --inspect-api --scrub-env -- gemini
 
-# Wrap a third-party MCP server inside .mcp.json (alerts go to stderr/log so stdout tool responses stay intact)
+# Wrap a third-party MCP plugin inside .mcp.json (alerts go to stderr/log so stdout tool responses stay intact)
 leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
 ```
 
@@ -166,8 +169,8 @@ leaktap rules
 ## Roadmap
 
 - [x] **`v0.1` — Core CLI (`scan`, `clean`, `tap`, `rules`):** Fast offline log scanner, MCP config checker, safe `.jsonl` cleaner, `stdio`/env wrapper, and JSON/SARIF output.
-- [x] **`v0.2` — Interactive Dashboard + Header & Socket Watch:** 3-tab terminal UI (`leaktap ui`), zero-cert `--inspect-api` HTTP header/prompt inspector, OS socket watcher, and 1-line SHA-256-verified installer.
-- [ ] **`v0.3` — Safe Placeholder Swap:** Swap real secrets with same-format placeholders before prompts leave your machine, then swap the real value back locally so `git apply` patches still work.
+- [x] **`v0.2` — Interactive Dashboard + CLI Header & Socket Watch:** 3-tab terminal UI (`leaktap ui`), zero-cert `--inspect-api` HTTP header/prompt inspector (`claude`, `codex`, `gemini`), OS socket watcher, and 1-line SHA-256-verified installer.
+- [ ] **`v0.3` — Safe Placeholder Swap & Optional IDE Gateway Mode:** Swap real secrets with same-format placeholders before prompts leave your machine (swapping back locally so `git apply` still works), plus an optional fixed-port gateway (`leaktap proxy`) for IDE extensions and desktop apps.
 
 ---
 
