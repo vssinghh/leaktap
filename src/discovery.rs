@@ -84,6 +84,8 @@ pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> Discover
                 let workspace_configs = [
                     cwd.join(".mcp.json"),
                     cwd.join("mcp.json"),
+                    cwd.join(".agents/mcp_config.json"),
+                    cwd.join(".antigravitycli/mcp_config.json"),
                     cwd.join(".cursor/mcp.json"),
                     cwd.join(".vscode/mcp.json"),
                     cwd.join(".gemini/settings.json"),

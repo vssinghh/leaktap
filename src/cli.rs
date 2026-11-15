@@ -6,7 +6,7 @@ use std::path::PathBuf;
     name = "leaktap",
     version,
     about = "See what your AI coding CLIs actually leak — offline log/MCP scanner, interactive dashboard, and live CLI wiretap.",
-    long_about = "leaktap is built for AI coding CLIs (Claude Code, Codex CLI, Gemini CLI) and local MCP tool plugins.\nIt scans local agent chat logs and MCP configs completely offline, scrubs leaked keys from old chat logs,\nopens an interactive terminal dashboard, and wraps live CLI sessions to watch secrets, HTTP headers, and sockets."
+    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers.\nIt scans local chat logs and MCP configs offline, scrubs leaked keys from old logs,\nopens an interactive terminal UI, and wraps live CLI sessions to watch secrets, HTTP headers, and sockets."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -24,7 +24,7 @@ pub enum Commands {
     /// Open the interactive terminal dashboard (transcripts, MCP risks, and live wiretap stream)
     Ui(UiArgs),
 
-    /// Wrap a live coding CLI (claude, codex, gemini) or MCP plugin to watch secrets, headers, env vars, and sockets
+    /// Wrap a live coding CLI (claude, codex, agy, gemini) or MCP server to watch secrets, headers, env vars, and sockets
     Tap(TapArgs),
 
     /// List all built-in secret, privacy, header, and MCP detection rules
@@ -141,7 +141,7 @@ pub struct TapArgs {
     #[arg(long, short)]
     pub quiet: bool,
 
-    /// CLI command and arguments to wrap (e.g. `leaktap tap --inspect-api --scrub-env -- claude` or `-- gemini`)
+    /// CLI command and arguments to wrap (e.g. `leaktap tap --inspect-api --scrub-env -- claude` or `-- agy`)
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
 }
