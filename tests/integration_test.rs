@@ -642,3 +642,196 @@ fn scan_and_tap_support_antigravity_cli_paths_and_env_preservation() {
     // 0 metadata exposures (neither marketplace.json nor user:pass@host/hostname inside database-uri should match)
     assert_eq!(report2["summary"]["metadata_exposures"], 0);
 }
+
+#[test]
+fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
+    let bin = env!("CARGO_BIN_EXE_leaktap");
+
+    // 1. Verify `--inspect-api` honors `HTTP_PROXY` (with percent-encoded Basic auth) + chunked SSE streaming
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_port = proxy_listener.local_addr().unwrap().port();
+    let proxy_handle = thread::spawn(move || {
+        let (mut stream, _) = proxy_listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut req_line = String::new();
+        reader.read_line(&mut req_line).unwrap();
+
+        let mut proxy_auth = String::new();
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).unwrap();
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                if k.trim().eq_ignore_ascii_case("proxy-authorization") {
+                    proxy_auth = v.trim().to_string();
+                }
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    content_len = v.trim().parse::<usize>().unwrap_or(0);
+                }
+            }
+        }
+        if content_len > 0 {
+            let mut body = vec![0u8; content_len];
+            reader.read_exact(&mut body).unwrap();
+        }
+
+        let chunk = "data: {\"type\":\"message_start\",\"proxy_ok\":true}\n\n";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+            chunk.len(),
+            chunk
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let _ = stream.shutdown(Shutdown::Write);
+        let mut eof_buf = [0u8; 64];
+        while let Ok(n) = reader.read(&mut eof_buf) {
+            if n == 0 {
+                break;
+            }
+        }
+        (req_line, proxy_auth)
+    });
+
+    let tmp = TempDir::new().unwrap();
+    let wiretap_log = tmp.path().join("claude_proxy_tap.jsonl");
+    let payload_file = tmp.path().join("claude_payload.json");
+    fs::write(
+        &payload_file,
+        r#"{"model":"claude-sonnet-4-5","stream":true}"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    let child_cmd: Vec<String> = vec![
+        "sh".into(),
+        "-c".into(),
+        format!(
+            "curl -sS --noproxy '*' -X POST \"$ANTHROPIC_BASE_URL/v1/messages?beta=true\" -H 'Content-Type: application/json' --data-binary @{}",
+            payload_file.display()
+        ),
+    ];
+
+    #[cfg(windows)]
+    let child_cmd: Vec<String> = vec![
+        "powershell".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        format!(
+            "curl.exe -sS --noproxy '*' -X POST \"$env:ANTHROPIC_BASE_URL/v1/messages?beta=true\" -H \"Content-Type: application/json\" --data-binary \"@{}\"",
+            payload_file.display()
+        ),
+    ];
+
+    let mut args: Vec<String> = vec![
+        "tap".into(),
+        "--inspect-api".into(),
+        "--no-net-watch".into(),
+        "--no-live-log".into(),
+        "--quiet".into(),
+        "--log".into(),
+        wiretap_log.to_string_lossy().into_owned(),
+        "--".into(),
+    ];
+    args.extend(child_cmd);
+
+    let out = Command::new(bin)
+        .args(&args)
+        .env(
+            "LEAKTAP_UPSTREAM_ANTHROPIC_URL",
+            "http://api.anthropic.mock:8080",
+        )
+        .env(
+            "HTTP_PROXY",
+            format!("http://proxy_user:proxy%40pass@127.0.0.1:{proxy_port}"),
+        )
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .expect("run leaktap tap through mock proxy");
+
+    let (req_line, proxy_auth) = proxy_handle.join().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        req_line.contains("POST http://api.anthropic.mock:8080/v1/messages?beta=true HTTP/1.1"),
+        "unexpected proxy request line: {req_line}"
+    );
+    assert_eq!(proxy_auth, "Basic cHJveHlfdXNlcjpwcm94eUBwYXNz");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("proxy_ok"),
+        "expected streamed SSE chunk, got: {stdout}"
+    );
+
+    // 2. Verify `~/.claude/backups/` is ignored during default scan
+    let fake_home = TempDir::new().unwrap();
+    let backups_dir = fake_home.path().join(".claude/backups");
+    fs::create_dir_all(&backups_dir).unwrap();
+    let fake_anth_key = format!("sk-ant-api03-{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
+    fs::write(
+        backups_dir.join("claude_backup.json"),
+        format!(r#"{{"primaryApiKey":"{fake_anth_key}"}}"#),
+    )
+    .unwrap();
+
+    let scan_out = Command::new(bin)
+        .current_dir(tmp.path())
+        .args(["scan", "--format", "json"])
+        .env("HOME", fake_home.path())
+        .env("USERPROFILE", fake_home.path())
+        .output()
+        .expect("run scan with .claude/backups");
+    assert!(scan_out.status.success());
+    let report: Value = serde_json::from_slice(&scan_out.stdout).unwrap();
+    assert_eq!(report["summary"]["unique_secrets"], 0);
+
+    // 3. Verify `CLAUDE_CODE_OAUTH_TOKEN` is preserved under `leaktap tap --scrub-env -- claude`
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = TempDir::new().unwrap();
+        let mock_claude = bin_dir.path().join("claude");
+        fs::write(
+            &mock_claude,
+            "#!/bin/sh\nprintf 'OAUTH=%s|STRIPE=%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"$STRIPE_SECRET_KEY\"\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&mock_claude).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&mock_claude, perms).unwrap();
+
+        let fake_oauth = "sk-ant-oat01-9f8e7d6c5b4a392817263544aabbccdd";
+        let fake_stripe = format!("sk_live_{}", "9f8e7d6c5b4a392817263544");
+
+        let tap_out = Command::new(bin)
+            .args([
+                "tap",
+                "--scrub-env",
+                "--no-net-watch",
+                "--no-live-log",
+                "--quiet",
+                "--",
+                mock_claude.to_str().unwrap(),
+            ])
+            .env("CLAUDE_CODE_OAUTH_TOKEN", fake_oauth)
+            .env("STRIPE_SECRET_KEY", &fake_stripe)
+            .output()
+            .expect("run leaktap tap --scrub-env -- claude");
+
+        assert!(tap_out.status.success());
+        let tap_stdout = String::from_utf8(tap_out.stdout).unwrap();
+        assert!(
+            tap_stdout.contains(&format!("OAUTH={fake_oauth}|STRIPE=")),
+            "expected CLAUDE_CODE_OAUTH_TOKEN preserved, got: {tap_stdout}"
+        );
+        assert!(!tap_stdout.contains(&fake_stripe));
+    }
+}
