@@ -2,7 +2,9 @@
 
 *Date: November 15, 2026 · Reproducible script: [`scripts/audit_top_mcp_servers.py`](../scripts/audit_top_mcp_servers.py)*
 
-To see what typical AI coding setups look like in practice, we audited the **50 most-starred dedicated MCP server repositories on GitHub** (spanning `3,668★` to `56,528★`, and over **515,000 combined stars**).
+**MCP (Model Context Protocol)** is the standard plugin system that lets AI coding agents (like Claude Code, Cursor, Codex, and Gemini CLI) connect to external tools—such as databases, GitHub, Figma, Slack, or browsers. Despite the name **"MCP server,"** most of them are small helper programs that run **locally on your laptop** (usually started via `npx` or `uvx`), with direct access to your local files, shell environment variables, and network.
+
+To see what typical setups look like in practice, we audited the **50 most-starred dedicated MCP server repositories on GitHub** (spanning `3,668★` to `56,528★`, and over **515,000 combined stars**).
 
 We checked each project's official `README` install snippet and package manifest (`package.json` / `pyproject.toml`) for three everyday security and privacy risks that affect developer laptops.
 

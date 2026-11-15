@@ -49,7 +49,6 @@ pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> Discover
                 (".codex", home.join(".codex")),
                 (".cursor", home.join(".cursor")),
                 (".gemini", home.join(".gemini")),
-                (".codeium", home.join(".codeium")),
             ];
 
             for (_, dir) in &agent_dirs {
