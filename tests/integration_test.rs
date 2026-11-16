@@ -1258,3 +1258,132 @@ fn marketplace_plugins_hooks_and_skills_audit_across_claude_codex_and_antigravit
         "clean --apply must never modify plugin or MCP config files"
     );
 }
+
+#[test]
+fn direct_cli_shorthands_auto_enable_inspect_api_and_scrub_env() {
+    let bin = env!("CARGO_BIN_EXE_leaktap");
+    let fake_home = TempDir::new().unwrap();
+
+    // 1. Cross-platform: `leaktap tap` works WITHOUT requiring `--`
+    #[cfg(unix)]
+    let no_sep_args = [
+        "tap",
+        "--no-net-watch",
+        "--no-live-log",
+        "--quiet",
+        "sh",
+        "-c",
+        "printf 'NO_DASH_DASH_OK\n'",
+    ];
+    #[cfg(windows)]
+    let no_sep_args = [
+        "tap",
+        "--no-net-watch",
+        "--no-live-log",
+        "--quiet",
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "Write-Output 'NO_DASH_DASH_OK'",
+    ];
+
+    let no_sep_out = Command::new(bin)
+        .args(no_sep_args)
+        .env("HOME", fake_home.path())
+        .env("USERPROFILE", fake_home.path())
+        .output()
+        .expect("run leaktap tap without -- separator");
+    assert!(
+        no_sep_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&no_sep_out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&no_sep_out.stdout).contains("NO_DASH_DASH_OK"));
+
+    // 2. Direct 2-word shorthands (`leaktap claude`, `leaktap codex`, `leaktap agy`) auto-enable `--inspect-api` + `--scrub-env`
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = TempDir::new().unwrap();
+        let write_exe = |name: &str, body: &str| {
+            let p = bin_dir.path().join(name);
+            fs::write(&p, body).unwrap();
+            let mut perms = fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&p, perms).unwrap();
+        };
+
+        write_exe(
+            "claude",
+            "#!/bin/sh\nprintf 'BASE=%s|AUTH=%s|STRIPE=%s|ARGS=%s\\n' \"$ANTHROPIC_BASE_URL\" \"$ANTHROPIC_API_KEY\" \"$STRIPE_SECRET_KEY\" \"$*\"\n",
+        );
+        write_exe(
+            "codex",
+            "#!/bin/sh\nprintf 'ARG1=%s|ARG2=%s|TOK=%s|STRIPE=%s|ARG3=%s\\n' \"$1\" \"$2\" \"$CODEX_ACCESS_TOKEN\" \"$STRIPE_SECRET_KEY\" \"$3\"\n",
+        );
+        write_exe(
+            "agy",
+            "#!/bin/sh\nprintf 'GEM_BASE=%s|GEM_KEY=%s|STRIPE=%s|ARGS=%s\\n' \"$GOOGLE_GEMINI_BASE_URL\" \"$GEMINI_API_KEY\" \"$STRIPE_SECRET_KEY\" \"$*\"\n",
+        );
+
+        let new_path = format!(
+            "{}:{}",
+            bin_dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let fake_anth = format!("sk-ant-api03-{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
+        let fake_codex_tok = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.codexAccessTokenPayload987654";
+        let fake_gem = format!("AIza{}", "SyDa9B8c7D6e5F4g3H2j1K0lMnOpQrStUvWx");
+        let fake_stripe = format!("sk_live_{}", "9f8e7d6c5b4a392817263544");
+
+        // `leaktap claude -p "fix tests"`
+        let claude_out = Command::new(bin)
+            .args(["claude", "-p", "fix tests"])
+            .env("PATH", &new_path)
+            .env("HOME", fake_home.path())
+            .env("ANTHROPIC_API_KEY", &fake_anth)
+            .env("STRIPE_SECRET_KEY", &fake_stripe)
+            .output()
+            .expect("run leaktap claude");
+        assert!(claude_out.status.success());
+        let claude_stdout = String::from_utf8(claude_out.stdout).unwrap();
+        assert!(
+            claude_stdout.contains("BASE=http://127.0.0.1:")
+                && claude_stdout.contains(&format!("|AUTH={fake_anth}|STRIPE=|ARGS=-p fix tests")),
+            "unexpected leaktap claude output: {claude_stdout}"
+        );
+
+        // `leaktap codex exec "check"`
+        let codex_out = Command::new(bin)
+            .args(["codex", "exec", "check"])
+            .env("PATH", &new_path)
+            .env("HOME", fake_home.path())
+            .env("CODEX_ACCESS_TOKEN", fake_codex_tok)
+            .env("STRIPE_SECRET_KEY", &fake_stripe)
+            .output()
+            .expect("run leaktap codex");
+        assert!(codex_out.status.success());
+        let codex_stdout = String::from_utf8(codex_out.stdout).unwrap();
+        assert!(
+            codex_stdout.contains("ARG1=-c|ARG2=openai_base_url=\"http://127.0.0.1:")
+                && codex_stdout.contains(&format!("|TOK={fake_codex_tok}|STRIPE=|ARG3=exec")),
+            "unexpected leaktap codex output: {codex_stdout}"
+        );
+
+        // `leaktap agy --version` forwards `--version` without starting API tap or emitting noise
+        let agy_ver = Command::new(bin)
+            .args(["agy", "--version"])
+            .env("PATH", &new_path)
+            .env("HOME", fake_home.path())
+            .env("GEMINI_API_KEY", &fake_gem)
+            .env("STRIPE_SECRET_KEY", &fake_stripe)
+            .output()
+            .expect("run leaktap agy --version");
+        assert!(agy_ver.status.success());
+        let agy_stdout = String::from_utf8(agy_ver.stdout).unwrap();
+        assert!(
+            agy_stdout.contains("GEM_BASE=|") && agy_stdout.contains("ARGS=--version"),
+            "expected clean --version pass-through, got: {agy_stdout}"
+        );
+    }
+}

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[command(
     name = "leaktap",
     version,
-    about = "See what your AI coding CLIs actually leak — offline log/MCP scanner, interactive dashboard, and live CLI wiretap.",
-    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers.\nIt scans local chat logs and MCP configs offline, scrubs leaked keys from old logs,\nopens an interactive terminal UI, and wraps live CLI sessions to watch secrets, HTTP headers, and sockets."
+    about = "See what your AI coding CLIs actually leak — offline log/plugin/MCP scanner, terminal UI, and live CLI wiretap.",
+    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers and marketplace plugins.\n\nQuickstart:\n  leaktap          Scan local chat logs, MCP configs, and installed plugins/hooks/skills\n  leaktap ui       Open the interactive 3-tab terminal UI\n  leaktap claude   Start Claude Code with live API, env, and socket watching\n  leaktap codex    Start Codex CLI with live API, env, and socket watching\n  leaktap agy      Start Antigravity CLI with live env and socket watching"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -15,25 +15,49 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Offline check of local AI agent chat logs and MCP plugin configs (default)
+    /// Offline check of local AI chat logs, MCP configs, and installed plugins/hooks/skills (default)
     Scan(ScanArgs),
 
     /// Scrub leaked secrets from local AI chat logs (safe preview by default)
     Clean(CleanArgs),
 
-    /// Open the interactive terminal dashboard (transcripts, MCP risks, and live wiretap stream)
+    /// Open the interactive terminal dashboard (transcripts, MCP/plugin risks, and live wiretap stream)
     Ui(UiArgs),
 
-    /// Wrap a live coding CLI (claude, codex, agy, gemini) or MCP server to watch secrets, headers, env vars, and sockets
+    /// Start Claude Code (`claude`) with live API inspection, env scrubbing, and socket watching
+    Claude(DirectCliArgs),
+
+    /// Start Codex CLI (`codex`) with live API inspection, env scrubbing, and socket watching
+    Codex(DirectCliArgs),
+
+    /// Start Antigravity CLI (`agy`) with live API inspection, env scrubbing, and socket watching
+    Agy(DirectCliArgs),
+
+    /// Start Gemini CLI (`gemini`) with live API inspection, env scrubbing, and socket watching
+    Gemini(DirectCliArgs),
+
+    /// Wrap any CLI or MCP server command with custom wiretap flags
     Tap(TapArgs),
 
-    /// List all built-in secret, privacy, header, and MCP detection rules
+    /// List all built-in secret, privacy, header, plugin, and MCP detection rules
     Rules,
 }
 
 #[derive(Debug, Clone, Parser)]
+#[command(
+    trailing_var_arg = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct DirectCliArgs {
+    /// Arguments passed straight through to the wrapped CLI
+    #[arg(allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Parser)]
 pub struct ScanArgs {
-    /// Specific file(s) or folder(s) to scan (defaults to ~/.claude, ~/.codex, ~/.cursor, ~/.gemini + workspace MCP configs)
+    /// Specific file(s) or folder(s) to scan (defaults to ~/.claude, ~/.codex, ~/.cursor, ~/.gemini + workspace configs)
     #[arg(short, long = "path")]
     pub paths: Vec<PathBuf>,
 
@@ -45,7 +69,7 @@ pub struct ScanArgs {
     #[arg(long)]
     pub no_pii: bool,
 
-    /// Skip MCP config checks
+    /// Skip MCP, plugin, hook, and skill checks
     #[arg(long)]
     pub no_mcp: bool,
 
@@ -112,10 +136,15 @@ pub struct UiArgs {
 }
 
 #[derive(Debug, Clone, Parser)]
+#[command(trailing_var_arg = true)]
 pub struct TapArgs {
     /// Strip secret-looking shell environment variables before starting the child command
     #[arg(long)]
     pub scrub_env: bool,
+
+    /// Keep all inherited environment variables even when using a CLI shorthand
+    #[arg(long)]
+    pub no_scrub_env: bool,
 
     /// Comma-separated environment variables to keep when --scrub-env is enabled
     #[arg(long, value_delimiter = ',')]
@@ -124,6 +153,10 @@ pub struct TapArgs {
     /// Route ANTHROPIC_BASE_URL / OPENAI_BASE_URL / GOOGLE_GEMINI_BASE_URL through a local zero-cert loopback tap to inspect outgoing HTTP headers and prompt bodies
     #[arg(long)]
     pub inspect_api: bool,
+
+    /// Disable local loopback HTTP API inspection
+    #[arg(long)]
+    pub no_inspect_api: bool,
 
     /// Disable background OS TCP socket polling for the child process tree
     #[arg(long)]
@@ -141,7 +174,27 @@ pub struct TapArgs {
     #[arg(long, short)]
     pub quiet: bool,
 
-    /// CLI command and arguments to wrap (e.g. `leaktap tap --inspect-api --scrub-env -- claude` or `-- agy`)
-    #[arg(last = true, required = true)]
+    /// CLI or MCP server command and arguments to wrap
+    #[arg(required = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+impl TapArgs {
+    pub fn for_direct_cli(program: &str, extra_args: Vec<String>) -> Self {
+        let mut command = Vec::with_capacity(extra_args.len() + 1);
+        command.push(program.to_string());
+        command.extend(extra_args);
+        Self {
+            scrub_env: true,
+            no_scrub_env: false,
+            allow_env: Vec::new(),
+            inspect_api: true,
+            no_inspect_api: false,
+            no_net_watch: false,
+            no_live_log: false,
+            log: None,
+            quiet: false,
+            command,
+        }
+    }
 }

@@ -40,17 +40,31 @@ pub fn execute(cli: Cli) -> i32 {
                 2
             }
         },
-        Commands::Tap(args) => match run_tap(&args) {
-            Ok(code) => code,
-            Err(err) => {
-                eprintln!("leaktap tap error: {err}");
-                2
-            }
-        },
+        Commands::Claude(args) => {
+            execute_tap(&crate::cli::TapArgs::for_direct_cli("claude", args.args))
+        }
+        Commands::Codex(args) => {
+            execute_tap(&crate::cli::TapArgs::for_direct_cli("codex", args.args))
+        }
+        Commands::Agy(args) => execute_tap(&crate::cli::TapArgs::for_direct_cli("agy", args.args)),
+        Commands::Gemini(args) => {
+            execute_tap(&crate::cli::TapArgs::for_direct_cli("gemini", args.args))
+        }
+        Commands::Tap(args) => execute_tap(&args),
         Commands::Rules => {
             let engine = RuleEngine::all_rules();
             print!("{}", render_rules_terminal(&engine));
             0
+        }
+    }
+}
+
+fn execute_tap(args: &crate::cli::TapArgs) -> i32 {
+    match run_tap(args) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("leaktap tap error: {err}");
+            2
         }
     }
 }

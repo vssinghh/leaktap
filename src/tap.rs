@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,6 +66,18 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     let program = &args.command[0];
     let cmd_args = &args.command[1..];
 
+    let is_coding_cli = is_known_coding_cli(program);
+    let is_info_only = cmd_args
+        .iter()
+        .any(|a| matches!(a.as_str(), "-h" | "--help" | "-V" | "--version"));
+    let parent_is_tty = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let inherit_tty = is_coding_cli && parent_is_tty;
+    let is_fullscreen_tui =
+        inherit_tty && !is_info_only && !is_oneshot_cli_invocation(program, cmd_args);
+
+    let scrub_env_enabled = args.scrub_env && !args.no_scrub_env;
+    let inspect_api_enabled = args.inspect_api && !args.no_inspect_api && !is_info_only;
+
     let engine = Arc::new(RuleEngine::all_rules());
     let header_auditor = Arc::new(HeaderAuditor::new());
     let url_regex = Arc::new(
@@ -77,7 +89,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     if let Some(ref p) = args.log {
         writers.push(open_private_append_file(p)?);
     }
-    if !args.no_live_log {
+    if !args.no_live_log && !is_info_only {
         if let Some(default_log) = default_live_log_path() {
             let same_as_explicit = args.log.as_ref().is_some_and(|p| p == &default_log);
             if !same_as_explicit {
@@ -89,11 +101,15 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     }
     let log_writers = Arc::new(Mutex::new(writers));
 
-    let quiet = args.quiet;
+    // Avoid writing stderr alerts mid-session over an active full-screen TUI; log to live.jsonl instead
+    let suppress_live_stderr = args.quiet || is_fullscreen_tui || is_info_only;
+    let alert_count = Arc::new(AtomicUsize::new(0));
+    let alert_count_for_cb = Arc::clone(&alert_count);
     let writers_for_cb = Arc::clone(&log_writers);
     let emit_cb: TapCallback = Arc::new(move |stream, kind, rule_id, severity, detail| {
+        alert_count_for_cb.fetch_add(1, Ordering::Relaxed);
         emit_alert(
-            quiet,
+            suppress_live_stderr,
             &writers_for_cb,
             stream,
             kind,
@@ -126,7 +142,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     exposed_env_keys.sort();
 
     // Optional zero-cert local loopback API tap (`--inspect-api`)
-    let local_api_tap = if args.inspect_api {
+    let local_api_tap = if inspect_api_enabled {
         let anth_upstream = env::var("LEAKTAP_UPSTREAM_ANTHROPIC_URL")
             .or_else(|_| env::var("ANTHROPIC_BASE_URL"))
             .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
@@ -159,9 +175,6 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
 
     let mut final_args: Vec<String> = Vec::with_capacity(cmd_args.len() + 2);
     if let Some(ref tap) = local_api_tap {
-        let is_info_only = cmd_args
-            .iter()
-            .any(|a| matches!(a.as_str(), "-h" | "--help" | "-V" | "--version"));
         let has_base_override = cmd_args.iter().any(|a| a.contains("openai_base_url"));
         if program_stem(program) == "codex" && !is_info_only && !has_base_override {
             final_args.push("-c".to_string());
@@ -171,13 +184,19 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     final_args.extend(cmd_args.iter().cloned());
 
     let mut cmd = Command::new(program);
-    cmd.args(&final_args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(&final_args);
+    if inherit_tty {
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    } else {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
 
-    if !exposed_env_keys.is_empty() {
-        if args.scrub_env {
+    if !exposed_env_keys.is_empty() && !is_info_only {
+        if scrub_env_enabled {
             for k in &exposed_env_keys {
                 cmd.env_remove(k);
             }
@@ -217,15 +236,20 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         cmd.env("no_proxy", &no_proxy);
     }
 
+    if is_fullscreen_tui && !args.quiet {
+        let _ = writeln!(
+            io::stderr(),
+            "[leaktap] Watching `{}` — live events streaming to ~/.leaktap/live.jsonl (`leaktap ui` to view)",
+            program_stem(program)
+        );
+    }
+
     let mut child = cmd.spawn()?;
     let child_pid = child.id();
-    let child_stdin = child.stdin.take().expect("piped stdin");
-    let child_stdout = child.stdout.take().expect("piped stdout");
-    let child_stderr = child.stderr.take().expect("piped stderr");
 
     // Zero-root OS socket watcher for outbound TCP connections across child process tree
     let stop_sockets = Arc::new(AtomicBool::new(false));
-    let socket_handle = if !args.no_net_watch {
+    let socket_handle = if !args.no_net_watch && !is_info_only {
         let emit_sock = Arc::clone(&emit_cb);
         Some(spawn_socket_watcher(
             child_pid,
@@ -244,69 +268,77 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         None
     };
 
-    let seen_domains: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let pipe_handles = if !inherit_tty {
+        let child_stdin = child.stdin.take().expect("piped stdin");
+        let child_stdout = child.stdout.take().expect("piped stdout");
+        let child_stderr = child.stderr.take().expect("piped stderr");
+        let seen_domains: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
-    // stdin pump (detached so non-closing parent stdin does not hang after child exits)
-    {
-        let engine = Arc::clone(&engine);
-        let auditor = Arc::clone(&header_auditor);
-        let url_re = Arc::clone(&url_regex);
-        let domains = Arc::clone(&seen_domains);
-        let emit = Arc::clone(&emit_cb);
-        thread::spawn(move || {
-            pump_stream(
-                io::stdin(),
-                child_stdin,
-                "stdin",
-                &engine,
-                &auditor,
-                &url_re,
-                &domains,
-                &emit,
-            );
-        });
-    }
+        // stdin pump (detached so non-closing parent stdin does not hang after child exits)
+        {
+            let engine = Arc::clone(&engine);
+            let auditor = Arc::clone(&header_auditor);
+            let url_re = Arc::clone(&url_regex);
+            let domains = Arc::clone(&seen_domains);
+            let emit = Arc::clone(&emit_cb);
+            thread::spawn(move || {
+                pump_stream(
+                    io::stdin(),
+                    child_stdin,
+                    "stdin",
+                    &engine,
+                    &auditor,
+                    &url_re,
+                    &domains,
+                    &emit,
+                );
+            });
+        }
 
-    // stdout pump — preserves exact raw bytes so MCP JSON-RPC framing is never altered
-    let stdout_handle = {
-        let engine = Arc::clone(&engine);
-        let auditor = Arc::clone(&header_auditor);
-        let url_re = Arc::clone(&url_regex);
-        let domains = Arc::clone(&seen_domains);
-        let emit = Arc::clone(&emit_cb);
-        thread::spawn(move || {
-            pump_stream(
-                child_stdout,
-                io::stdout(),
-                "stdout",
-                &engine,
-                &auditor,
-                &url_re,
-                &domains,
-                &emit,
-            );
-        })
-    };
+        // stdout pump — preserves exact raw bytes so MCP JSON-RPC framing is never altered
+        let stdout_handle = {
+            let engine = Arc::clone(&engine);
+            let auditor = Arc::clone(&header_auditor);
+            let url_re = Arc::clone(&url_regex);
+            let domains = Arc::clone(&seen_domains);
+            let emit = Arc::clone(&emit_cb);
+            thread::spawn(move || {
+                pump_stream(
+                    child_stdout,
+                    io::stdout(),
+                    "stdout",
+                    &engine,
+                    &auditor,
+                    &url_re,
+                    &domains,
+                    &emit,
+                );
+            })
+        };
 
-    // stderr pump
-    let stderr_handle = {
-        let engine = Arc::clone(&engine);
-        let auditor = Arc::clone(&header_auditor);
-        let url_re = Arc::clone(&url_regex);
-        let domains = Arc::clone(&seen_domains);
-        let emit = Arc::clone(&emit_cb);
-        thread::spawn(move || {
-            pump_stream(
-                child_stderr,
-                io::stderr(),
-                "stderr",
-                &engine,
-                &auditor,
-                &url_re,
-                &domains,
-                &emit,
-            );
-        })
+        // stderr pump
+        let stderr_handle = {
+            let engine = Arc::clone(&engine);
+            let auditor = Arc::clone(&header_auditor);
+            let url_re = Arc::clone(&url_regex);
+            let domains = Arc::clone(&seen_domains);
+            let emit = Arc::clone(&emit_cb);
+            thread::spawn(move || {
+                pump_stream(
+                    child_stderr,
+                    io::stderr(),
+                    "stderr",
+                    &engine,
+                    &auditor,
+                    &url_re,
+                    &domains,
+                    &emit,
+                );
+            })
+        };
+        Some((stdout_handle, stderr_handle))
+    } else {
+        None
     };
 
     let status = child.wait()?;
@@ -317,8 +349,20 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     if let Some(h) = socket_handle {
         let _ = h.join();
     }
-    let _ = stdout_handle.join();
-    let _ = stderr_handle.join();
+    if let Some((stdout_handle, stderr_handle)) = pipe_handles {
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+    }
+
+    if is_fullscreen_tui && !args.quiet {
+        let total = alert_count.load(Ordering::Relaxed);
+        if total > 0 {
+            let _ = writeln!(
+                io::stderr(),
+                "[leaktap] Session ended — {total} event(s) logged. Run `leaktap ui` to inspect."
+            );
+        }
+    }
 
     Ok(status.code().unwrap_or(1))
 }
@@ -476,6 +520,37 @@ fn program_stem(program: &str) -> String {
         .or_else(|| base.strip_suffix(".bat"))
         .unwrap_or(&base)
         .to_string()
+}
+
+fn is_known_coding_cli(program: &str) -> bool {
+    matches!(
+        program_stem(program).as_str(),
+        "claude"
+            | "claude-code"
+            | "codex"
+            | "agy"
+            | "antigravity"
+            | "antigravity-cli"
+            | "gemini"
+            | "gemini-cli"
+    )
+}
+
+fn is_oneshot_cli_invocation(program: &str, cmd_args: &[String]) -> bool {
+    let stem = program_stem(program);
+    if stem == "codex"
+        && cmd_args
+            .first()
+            .is_some_and(|a| matches!(a.as_str(), "exec" | "e" | "login" | "mcp" | "plugin"))
+    {
+        return true;
+    }
+    cmd_args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-p" | "--print" | "--prompt" | "plugin" | "mcp" | "auth" | "doctor"
+        )
+    })
 }
 
 fn default_provider_env_keys(program: &str) -> &'static [&'static str] {
