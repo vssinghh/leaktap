@@ -79,7 +79,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
     ));
 
     let total_files = report.transcripts.files_scanned + report.mcp_files_scanned;
-    let size_str = format_bytes(report.transcripts.bytes_scanned);
+    let size_str = format_bytes(report.transcripts.bytes_scanned + report.mcp_bytes_scanned);
     let ms = report.duration.as_millis();
 
     if report.roots.is_empty() && total_files == 0 {
@@ -146,7 +146,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         out.push('\n');
     }
 
-    // Section 2: MCP server configuration issues
+    // Section 2: MCP server, plugin, hook, and skill issues
     if !report.mcp_findings.is_empty() {
         let has_crit = report
             .mcp_findings
@@ -158,7 +158,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             st.yellow("HIGH    ")
         };
         out.push_str(&format!(
-            "{badge}  {} MCP configuration risk(s) detected\n",
+            "{badge}  {} MCP / plugin risk(s) detected\n",
             report.mcp_findings.len()
         ));
 
@@ -217,7 +217,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
 
     if report.total_findings() == 0 {
         out.push_str(&format!(
-            "{} 0 leaked secrets or risky MCP configs found.\n",
+            "{} 0 leaked secrets or risky MCP / plugin configs found.\n",
             st.green("✓ Clean —")
         ));
     } else {
@@ -306,7 +306,7 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
     }
     out.push_str(&format!(
         "\n{}\n\n",
-        st.bold("Built-in MCP Configuration Rules")
+        st.bold("Built-in MCP, Plugin, Hook & Skill Rules")
     ));
     let mcp_rules = [
         (
@@ -338,6 +338,36 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
             "HIGH",
             "mcp-telemetry-endpoint",
             "MCP config referencing known third-party telemetry/analytics endpoints.",
+        ),
+        (
+            "CRITICAL",
+            "plugin-remote-code-exec",
+            "Plugin, hook, or skill executing piped or base64-decoded remote shell payloads.",
+        ),
+        (
+            "CRITICAL",
+            "plugin-credential-harvest",
+            "Plugin, hook, or skill reading `~/.ssh`, `~/.aws`, keychain, or CLI auth files.",
+        ),
+        (
+            "CRITICAL",
+            "plugin-hardcoded-secret",
+            "Live API key or credential bundled inside an installed plugin, hook, or skill.",
+        ),
+        (
+            "HIGH",
+            "plugin-hook-network",
+            "Lifecycle hook (`PreToolUse`, `SessionStart`, etc.) making outbound network calls.",
+        ),
+        (
+            "HIGH",
+            "plugin-prompt-injection",
+            "Skill or rule markdown containing stealth override instructions or hidden HTML/Unicode payloads.",
+        ),
+        (
+            "HIGH",
+            "plugin-telemetry-endpoint",
+            "Plugin manifest, hook, or script referencing third-party analytics endpoints.",
         ),
     ];
     for (sev, id, desc) in mcp_rules {

@@ -70,7 +70,7 @@ fn audit_single_mcp_file(path: &Path, engine: &RuleEngine, out: &mut Vec<McpFind
     let parsed: Option<Value> = if is_toml {
         toml::from_str::<Value>(&raw).ok()
     } else {
-        serde_json::from_str::<Value>(&raw).ok()
+        crate::plugin_audit::parse_json_or_jsonc(&raw)
     };
     let Some(json) = parsed else {
         return;
@@ -148,6 +148,9 @@ fn check_unpinned_execution(
         let pkg_arg = args.iter().copied().find(|a| !a.starts_with('-'));
 
         if let Some(pkg) = pkg_arg {
+            if pkg.starts_with('<') && pkg.ends_with('>') {
+                return;
+            }
             if !has_explicit_version_pin(pkg) {
                 let msg = if has_auto_install {
                     format!(

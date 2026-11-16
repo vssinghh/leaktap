@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod header_audit;
 pub mod mcp_audit;
 pub mod netwatch;
+pub mod plugin_audit;
 pub mod report;
 pub mod rules;
 pub mod scanner;
@@ -15,6 +16,7 @@ use crate::cleaner::clean_transcripts;
 use crate::cli::{CleanArgs, Cli, Commands, FailThreshold, OutputFormat, ScanArgs};
 use crate::discovery::discover_targets;
 use crate::mcp_audit::audit_mcp_configs;
+use crate::plugin_audit::audit_plugin_files;
 use crate::report::json::render_scan_json;
 use crate::report::sarif::render_scan_sarif;
 use crate::report::terminal::{render_clean_terminal, render_rules_terminal, render_scan_terminal};
@@ -23,6 +25,8 @@ use crate::rules::{RuleEngine, Severity};
 use crate::scanner::scan_transcripts;
 use crate::tap::run_tap;
 use crate::tui::run_ui;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Instant;
 
 pub fn execute(cli: Cli) -> i32 {
@@ -57,16 +61,43 @@ pub fn run_scan_report(args: &ScanArgs) -> FullScanReport {
     let targets = discover_targets(&args.paths, !args.no_mcp);
 
     let transcripts = scan_transcripts(&targets.transcript_files, &engine);
-    let mcp_findings = if args.no_mcp {
-        Vec::new()
+    let (mcp_findings, mcp_files_scanned, mcp_bytes_scanned) = if args.no_mcp {
+        (Vec::new(), 0, 0)
     } else {
         let mcp_engine = RuleEngine::new(false);
-        audit_mcp_configs(&targets.mcp_config_files, &mcp_engine)
+        let mut combined = audit_mcp_configs(&targets.mcp_config_files, &mcp_engine);
+        let plugin_findings = audit_plugin_files(&targets.plugin_files, &mcp_engine);
+
+        let mut seen_fp: HashSet<String> = combined.iter().map(|f| f.fingerprint.clone()).collect();
+        for pf in plugin_findings {
+            if seen_fp.insert(pf.fingerprint.clone()) {
+                combined.push(pf);
+            }
+        }
+        combined.sort_by(|a, b| {
+            b.severity
+                .cmp(&a.severity)
+                .then_with(|| a.config_file.cmp(&b.config_file))
+                .then_with(|| a.server_name.cmp(&b.server_name))
+        });
+
+        let unique_audited: HashSet<&PathBuf> = targets
+            .mcp_config_files
+            .iter()
+            .chain(targets.plugin_files.iter())
+            .collect();
+        let audited_bytes: u64 = unique_audited
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len().min(1024 * 1024))
+            .sum();
+        (combined, unique_audited.len(), audited_bytes)
     };
 
     FullScanReport {
         roots: targets.scanned_roots,
-        mcp_files_scanned: targets.mcp_config_files.len(),
+        mcp_files_scanned,
+        mcp_bytes_scanned,
         duration: started.elapsed(),
         transcripts,
         mcp_findings,

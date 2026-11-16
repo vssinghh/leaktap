@@ -30,7 +30,7 @@ pub fn render_scan_json(report: &FullScanReport) -> String {
         version: env!("CARGO_PKG_VERSION"),
         files_scanned: report.transcripts.files_scanned,
         mcp_configs_scanned: report.mcp_files_scanned,
-        bytes_scanned: report.transcripts.bytes_scanned,
+        bytes_scanned: report.transcripts.bytes_scanned + report.mcp_bytes_scanned,
         duration_ms: report.duration.as_millis(),
         summary: JsonSummary {
             unique_secrets: report.transcripts.secret_findings.len(),

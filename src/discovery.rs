@@ -1,12 +1,14 @@
+use crate::plugin_audit::has_script_extension;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Default, Clone)]
 pub struct DiscoveredTargets {
     pub transcript_files: Vec<PathBuf>,
     pub mcp_config_files: Vec<PathBuf>,
+    pub plugin_files: Vec<PathBuf>,
     pub scanned_roots: Vec<String>,
 }
 
@@ -20,88 +22,115 @@ const IGNORED_DIRS: &[&str] = &[
     "venv",
     "__pycache__",
     "Cache",
-    "cache",
     "caches",
     "GPUCache",
     "Code Cache",
     "builtin",
+    ".system",
     "marketplaces",
-    "plugins",
-    "extensions",
+    "store",
+    "assets",
+    "evals",
     "crashes",
     "backups",
 ];
 
+struct WalkContext<'a> {
+    transcripts: &'a mut Vec<PathBuf>,
+    mcp_configs: &'a mut Vec<PathBuf>,
+    plugin_files: &'a mut Vec<PathBuf>,
+    seen: &'a mut HashSet<PathBuf>,
+    include_mcp: bool,
+}
+
 pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> DiscoveredTargets {
     let mut transcripts = Vec::new();
     let mut mcp_configs = Vec::new();
+    let mut plugin_files = Vec::new();
     let mut seen = HashSet::new();
     let mut roots = Vec::new();
 
-    if !custom_paths.is_empty() {
-        for p in custom_paths {
-            roots.push(shorten_home(p));
-            walk_path(
-                p,
-                &mut transcripts,
-                &mut mcp_configs,
-                &mut seen,
-                include_mcp,
-                0,
-            );
-        }
-    } else {
-        if let Some(home) = home_dir() {
-            let agent_dirs = [
-                (".claude", home.join(".claude")),
-                (".codex", home.join(".codex")),
-                (".cursor", home.join(".cursor")),
-                (".gemini", home.join(".gemini")),
-            ];
+    {
+        let mut ctx = WalkContext {
+            transcripts: &mut transcripts,
+            mcp_configs: &mut mcp_configs,
+            plugin_files: &mut plugin_files,
+            seen: &mut seen,
+            include_mcp,
+        };
 
-            for (_, dir) in &agent_dirs {
-                if dir.exists() {
-                    roots.push(shorten_home(dir));
-                    walk_path(
-                        dir,
-                        &mut transcripts,
-                        &mut mcp_configs,
-                        &mut seen,
-                        include_mcp,
-                        0,
-                    );
+        if !custom_paths.is_empty() {
+            for p in custom_paths {
+                roots.push(shorten_home(p));
+                let start_in_cust =
+                    has_customization_ancestor(p) || (p.is_dir() && is_plugin_or_skill_root(p));
+                walk_path(p, &mut ctx, start_in_cust, 0);
+            }
+        } else {
+            if let Some(home) = home_dir() {
+                let agent_dirs = [
+                    (".claude", home.join(".claude")),
+                    (".codex", home.join(".codex")),
+                    (".cursor", home.join(".cursor")),
+                    (".gemini", home.join(".gemini")),
+                ];
+
+                for (_, dir) in &agent_dirs {
+                    if dir.exists() {
+                        roots.push(shorten_home(dir));
+                        walk_path(dir, &mut ctx, false, 0);
+                    }
+                }
+
+                if include_mcp {
+                    let extra_mcp_files = [
+                        home.join(".claude.json"),
+                        home.join(".config/Claude/claude_desktop_config.json"),
+                        home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+                    ];
+                    for cfg in &extra_mcp_files {
+                        if cfg.is_file() && ctx.seen.insert(cfg.clone()) {
+                            ctx.mcp_configs.push(cfg.clone());
+                        }
+                    }
                 }
             }
 
             if include_mcp {
-                let extra_mcp_files = [
-                    home.join(".claude.json"),
-                    home.join(".config/Claude/claude_desktop_config.json"),
-                    home.join("Library/Application Support/Claude/claude_desktop_config.json"),
-                ];
-                for cfg in &extra_mcp_files {
-                    if cfg.is_file() && seen.insert(cfg.clone()) {
-                        mcp_configs.push(cfg.clone());
+                if let Ok(cwd) = env::current_dir() {
+                    let workspace_configs = [
+                        cwd.join(".mcp.json"),
+                        cwd.join("mcp.json"),
+                        cwd.join(".agents/mcp_config.json"),
+                        cwd.join(".antigravitycli/mcp_config.json"),
+                        cwd.join(".codex/config.toml"),
+                        cwd.join(".cursor/mcp.json"),
+                        cwd.join(".vscode/mcp.json"),
+                        cwd.join(".gemini/settings.json"),
+                        cwd.join(".claude/settings.json"),
+                        cwd.join(".claude/settings.local.json"),
+                    ];
+                    for cfg in &workspace_configs {
+                        if cfg.is_file() {
+                            classify_file(cfg, &mut ctx, false);
+                        }
                     }
-                }
-            }
-        }
 
-        if include_mcp {
-            if let Ok(cwd) = env::current_dir() {
-                let workspace_configs = [
-                    cwd.join(".mcp.json"),
-                    cwd.join("mcp.json"),
-                    cwd.join(".agents/mcp_config.json"),
-                    cwd.join(".antigravitycli/mcp_config.json"),
-                    cwd.join(".codex/config.toml"),
-                    cwd.join(".cursor/mcp.json"),
-                    cwd.join(".vscode/mcp.json"),
-                    cwd.join(".gemini/settings.json"),
-                ];
-                for cfg in &workspace_configs {
-                    if cfg.is_file() && seen.insert(cfg.clone()) {
-                        mcp_configs.push(cfg.clone());
+                    let workspace_customization_paths = [
+                        cwd.join(".claude/plugins"),
+                        cwd.join(".claude/skills"),
+                        cwd.join(".claude/hooks"),
+                        cwd.join(".codex/plugins"),
+                        cwd.join(".codex/skills"),
+                        cwd.join(".codex/hooks.json"),
+                        cwd.join(".agents"),
+                        cwd.join(".agent"),
+                        cwd.join(".antigravitycli"),
+                    ];
+                    for cust in &workspace_customization_paths {
+                        if cust.exists() {
+                            walk_path(cust, &mut ctx, true, 0);
+                        }
                     }
                 }
             }
@@ -110,28 +139,23 @@ pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> Discover
 
     transcripts.sort();
     mcp_configs.sort();
+    plugin_files.sort();
 
     DiscoveredTargets {
         transcript_files: transcripts,
         mcp_config_files: mcp_configs,
+        plugin_files,
         scanned_roots: roots,
     }
 }
 
-fn walk_path(
-    path: &Path,
-    transcripts: &mut Vec<PathBuf>,
-    mcp_configs: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
-    include_mcp: bool,
-    depth: usize,
-) {
-    if depth > 12 || !path.exists() {
+fn walk_path(path: &Path, ctx: &mut WalkContext<'_>, in_customization_tree: bool, depth: usize) {
+    if depth > 14 || !path.exists() {
         return;
     }
 
     if path.is_file() {
-        classify_file(path, transcripts, mcp_configs, seen, include_mcp);
+        classify_file(path, ctx, in_customization_tree);
         return;
     }
 
@@ -145,7 +169,7 @@ fn walk_path(
             continue;
         };
 
-        if IGNORED_DIRS.contains(&name) {
+        if should_ignore_dir(path, name) {
             continue;
         }
 
@@ -158,20 +182,61 @@ fn walk_path(
         }
 
         if ft.is_dir() {
-            walk_path(&p, transcripts, mcp_configs, seen, include_mcp, depth + 1);
+            let child_in_cust = in_customization_tree
+                || is_customization_dir_name(name)
+                || is_plugin_or_skill_root(&p);
+            walk_path(&p, ctx, child_in_cust, depth + 1);
         } else if ft.is_file() {
-            classify_file(&p, transcripts, mcp_configs, seen, include_mcp);
+            classify_file(&p, ctx, in_customization_tree);
         }
     }
 }
 
-fn classify_file(
-    path: &Path,
-    transcripts: &mut Vec<PathBuf>,
-    mcp_configs: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
-    include_mcp: bool,
-) {
+fn should_ignore_dir(parent: &Path, name: &str) -> bool {
+    if IGNORED_DIRS.contains(&name) {
+        return true;
+    }
+    if name == "cache" {
+        // Allow `~/.claude/plugins/cache/...` and `~/.codex/plugins/cache/...`,
+        // while skipping general CLI caches like `~/.claude/cache` or `~/.gemini/antigravity-cli/cache`.
+        let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        return !matches!(parent_name, "plugins" | "extensions");
+    }
+    false
+}
+
+fn is_customization_dir_name(name: &str) -> bool {
+    matches!(
+        name,
+        "plugins"
+            | ".claude-plugin"
+            | ".codex-plugin"
+            | "extensions"
+            | "skills"
+            | "hooks"
+            | "hooks-handlers"
+            | ".agents"
+            | ".agent"
+            | ".antigravitycli"
+    )
+}
+
+fn has_customization_ancestor(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        Component::Normal(s) => s.to_str().is_some_and(is_customization_dir_name),
+        _ => false,
+    })
+}
+
+fn is_plugin_or_skill_root(dir: &Path) -> bool {
+    dir.join("plugin.json").is_file()
+        || dir.join(".claude-plugin").is_dir()
+        || dir.join(".codex-plugin").is_dir()
+        || dir.join("gemini-extension.json").is_file()
+        || dir.join("SKILL.md").is_file()
+}
+
+fn classify_file(path: &Path, ctx: &mut WalkContext<'_>, in_customization_tree: bool) {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return;
     };
@@ -188,15 +253,73 @@ fn classify_file(
     }
 
     if is_mcp_config_filename(path, file_name) {
-        if include_mcp && seen.insert(path.to_path_buf()) {
-            mcp_configs.push(path.to_path_buf());
+        if ctx.include_mcp && ctx.seen.insert(path.to_path_buf()) {
+            ctx.mcp_configs.push(path.to_path_buf());
+            // Claude / Gemini `settings.json` can also define lifecycle `hooks`
+            if matches!(file_name, "settings.json" | "settings.local.json") {
+                ctx.plugin_files.push(path.to_path_buf());
+            }
         }
         return;
     }
 
-    if is_transcript_filename(file_name) && seen.insert(path.to_path_buf()) {
-        transcripts.push(path.to_path_buf());
+    let is_explicit_plugin_file = matches!(
+        file_name,
+        "hooks.json" | "plugin.json" | "gemini-extension.json" | "SKILL.md"
+    );
+
+    if is_explicit_plugin_file || in_customization_tree {
+        if ctx.include_mcp
+            && (is_explicit_plugin_file || is_auditable_customization_file(path, file_name))
+            && ctx.seen.insert(path.to_path_buf())
+        {
+            ctx.plugin_files.push(path.to_path_buf());
+        }
+        // Never treat plugin manifests, licenses, or skill files as chat transcripts
+        return;
     }
+
+    if is_transcript_filename(file_name) && ctx.seen.insert(path.to_path_buf()) {
+        ctx.transcripts.push(path.to_path_buf());
+    }
+}
+
+fn is_auditable_customization_file(path: &Path, file_name: &str) -> bool {
+    if matches!(
+        file_name,
+        "hooks.json"
+            | "plugin.json"
+            | "gemini-extension.json"
+            | "SKILL.md"
+            | "AGENTS.md"
+            | "GEMINI.md"
+    ) {
+        return true;
+    }
+
+    if has_script_extension(path) {
+        return true;
+    }
+
+    // Subagent and slash-command prompt markdown files inside plugins (`agents/*.md`, `commands/*.md`, `rules/*.md`)
+    if file_name.ends_with(".md")
+        && !matches!(
+            file_name,
+            "README.md" | "CHANGELOG.md" | "LICENSE.md" | "CONTRIBUTING.md"
+        )
+    {
+        if let Some(parent_name) = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+        {
+            if matches!(parent_name, "agents" | "commands" | "rules") {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn is_mcp_config_filename(path: &Path, file_name: &str) -> bool {
@@ -210,7 +333,7 @@ fn is_mcp_config_filename(path: &Path, file_name: &str) -> bool {
     ) {
         return true;
     }
-    if file_name == "settings.json" {
+    if matches!(file_name, "settings.json" | "settings.local.json") {
         let path_str = path.to_string_lossy();
         if path_str.contains(".gemini") || path_str.contains(".claude") {
             return true;

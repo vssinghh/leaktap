@@ -10,6 +10,7 @@ use std::time::Duration;
 pub struct FullScanReport {
     pub roots: Vec<String>,
     pub mcp_files_scanned: usize,
+    pub mcp_bytes_scanned: u64,
     pub duration: Duration,
     pub transcripts: TranscriptScanResult,
     pub mcp_findings: Vec<McpFinding>,

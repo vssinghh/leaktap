@@ -5,9 +5,9 @@
 
 See what your AI coding CLIs actually leak.
 
-`leaktap` scans your local AI chat logs and MCP configs for leaked API keys, database URLs, and personal info, scrubs old logs, and watches live CLI sessions for leaked secrets, HTTP headers, and network connections.
+`leaktap` scans your local AI chat logs, MCP configs, and installed marketplace plugins, hooks, and skills for leaked API keys, risky shell hooks, and hidden prompt instructions. It also scrubs old logs and watches live CLI sessions for leaked secrets, HTTP headers, and network connections.
 
-Currently supports **Claude Code**, **Codex CLI**, **Antigravity CLI**, and local **MCP servers**. Desktop and IDE apps aren't supported for live watching yet, though `leaktap scan` will still check any local logs and MCP configs they leave on disk.
+Currently supports **Claude Code**, **Codex CLI**, **Antigravity CLI**, and local **MCP servers**. Desktop and IDE apps aren't supported for live watching yet, though `leaktap scan` will still check any local logs, plugins, and MCP configs they leave on disk.
 
 > **2026 MCP Audit:** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry. [Read the full write-up →](docs/mcp-top-50-audit.md)
 
@@ -34,19 +34,21 @@ Prebuilt binaries for macOS, Linux, and Windows are on [GitHub Releases](https:/
 ```text
 $ leaktap scan
 
-leaktap v0.2.6 — local offline audit (0 network requests)
-Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.gemini
+leaktap v0.2.7 — local offline audit (0 network requests)
+Scanned 148 file(s) (49.1 MB) in 122ms across ~/.claude, ~/.codex, ~/.gemini
 
 CRITICAL  3 unique secret(s) found in local agent transcripts
   ├─ Database URI          postgres://***@db.prod.acme.io  ~/.claude/projects/app/08fa.jsonl:184
   ├─ AWS Access Key        AKIA5F29Q...7Q2M                ~/.claude/projects/infra/91bc.jsonl:42
   └─ Stripe Live Key       sk_live_9f...4c21 (2x)          ~/.claude/projects/app/08fa.jsonl:184
 
-HIGH      3 MCP configuration risk(s) detected
+CRITICAL  4 MCP / plugin risk(s) detected
+  ├─ plugin:shady-linter (~/.claude/plugins/cache/community/shady-linter/0.1.0/hooks-handlers/sync.sh)
+  │    References sensitive host credential store (`~/.ssh/id_rsa`) outside workspace
+  ├─ plugin:shady-linter (~/.claude/plugins/cache/community/shady-linter/0.1.0/hooks/hooks.json)
+  │    Lifecycle hook `PreToolUse` runs handler `hooks-handlers/sync.sh` with an outbound network call (`collect.shady-plugin.io`)
   ├─ @community/db-mcp (.mcp.json)
   │    Runs unpinned `npx -y @community/db-mcp` — pulls latest remote code on start with local file/env access
-  ├─ @community/db-mcp (.mcp.json)
-  │    Grants broad filesystem access (`/`) instead of scoping to one workspace folder
   └─ @community/db-mcp (.mcp.json)
        References outbound analytics/telemetry endpoint (`events.posthog.com`)
 
@@ -61,23 +63,23 @@ Next steps:
 
 ## Why I built this
 
-When you run `claude`, `codex`, or `agy` inside a project, it reads files like `.env` while debugging code. Those keys and database URLs get saved in plain text inside `~/.claude`, `~/.codex`, or `~/.gemini` chat logs, sent out in prompts, and exposed to MCP servers through inherited shell variables. Outgoing HTTP headers like `User-Agent` can also carry your email or machine hostname.
+When you run `claude`, `codex`, or `agy` inside a project, two things create most of the real exposure. First, the CLI reads files like `.env` while debugging code and saves those keys and database URLs in plain text inside `~/.claude`, `~/.codex`, or `~/.gemini` chat logs. Second, community MCP servers and marketplace plugins run directly on your machine: plugins can register `hooks.json` commands that run on every tool call, bundle unpinned `npx -y` servers, read `~/.ssh` or `~/.aws`, or hide instructions inside `SKILL.md`.
 
-OS file sandboxes like `sandbox-exec` and `bubblewrap` are good at blocking folders outside your repo like `~/.ssh`, which helps, but the CLI still needs read access to your repo and internet access to work. Once network access is open, file sandboxes can't see what goes out in prompts or headers. Full HTTPS proxies go too far the other way: they need Docker and a custom root certificate, and replacing keys with `[REDACTED]` breaks `git apply` when a patch comes back.
+OS file sandboxes like `sandbox-exec` and `bubblewrap` are good at blocking folders outside your repo like `~/.ssh`, which helps, but the CLI and its plugins still need read access to your repo and internet access to work. Once network access is open, file sandboxes can't see what goes out in prompts or headers. Full HTTPS proxies go too far the other way: they need Docker and a custom root certificate, and replacing keys with `[REDACTED]` breaks `git apply` when a patch comes back.
 
-`leaktap` is a single binary with no setup. It checks what already leaked on your machine in ~120ms offline, gives you a terminal UI to browse and clean findings, and can wrap `claude`, `codex`, or `agy` to inspect live calls without installing root certificates.
+`leaktap` is a single binary with no setup. It checks your chat logs, MCP configs, and installed plugins and hooks in ~120ms offline, gives you a terminal UI to browse and clean findings, and can wrap `claude`, `codex`, or `agy` to inspect live calls without installing root certificates.
 
 ## Usage
 
-### Scan local logs and MCP configs
+### Scan local logs, MCP configs, and plugins
 
-Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`, and MCP config files like `.mcp.json`, `.codex/config.toml`, and `.agents/mcp_config.json` in your current directory:
+Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`, installed marketplace plugins, `hooks.json` lifecycle hooks, `SKILL.md` skills, and MCP config files like `.mcp.json`, `.codex/config.toml`, and `.agents/mcp_config.json`:
 
 ```bash
 # Default scan
 leaktap
 
-# Scan a specific folder or file
+# Scan a specific project or plugin folder before enabling it
 leaktap scan --path ./my-project
 
 # JSON or SARIF output for CI
