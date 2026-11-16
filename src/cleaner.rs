@@ -108,7 +108,8 @@ pub fn clean_transcripts_filtered(
             } else {
                 0
             };
-            if (initial_hits > 0 || wal_hits > 0) && !is_comp {
+            let total_db_hits = initial_hits + wal_hits;
+            if total_db_hits > 0 && !is_comp {
                 if let Ok(Some((item, remaining))) = try_scrub_sqlite_db(
                     path,
                     &sym_meta,
@@ -129,7 +130,10 @@ pub fn clean_transcripts_filtered(
                     continue;
                 }
             }
-            if initial_hits > 0 {
+            if !is_comp && total_db_hits > 0 {
+                summary.uncleaned_sqlite_secrets += total_db_hits;
+                summary.uncleaned_sqlite_files.push(disp.clone());
+            } else if is_comp && initial_hits > 0 {
                 summary.uncleaned_sqlite_secrets += initial_hits;
                 summary.uncleaned_sqlite_files.push(disp.clone());
             }
@@ -164,7 +168,8 @@ pub fn clean_transcripts_filtered(
                 } else {
                     0
                 };
-                if (initial_hits > 0 || wal_hits > 0) && !is_comp {
+                let total_db_hits = initial_hits + wal_hits;
+                if total_db_hits > 0 && !is_comp {
                     if let Ok(Some((item, remaining))) = try_scrub_sqlite_db(
                         path,
                         &sym_meta,
@@ -184,7 +189,10 @@ pub fn clean_transcripts_filtered(
                         continue;
                     }
                 }
-                if initial_hits > 0 {
+                if !is_comp && total_db_hits > 0 {
+                    summary.uncleaned_sqlite_secrets += total_db_hits;
+                    summary.uncleaned_sqlite_files.push(disp.clone());
+                } else if is_comp && initial_hits > 0 {
                     summary.uncleaned_sqlite_secrets += initial_hits;
                     summary.uncleaned_sqlite_files.push(disp.clone());
                 }
@@ -948,6 +956,7 @@ fn companion_sqlite_path(base: &Path, suffix: &str) -> PathBuf {
 
 fn scrub_sqlite_cell_string(
     raw: &str,
+    prev_key_col: Option<&str>,
     engine: &RuleEngine,
     path: &Path,
     target_fingerprint: Option<&str>,
@@ -970,28 +979,75 @@ fn scrub_sqlite_cell_string(
         .into_iter()
         .filter(|m| target_fingerprint.is_none_or(|fp| m.fingerprint == fp))
         .collect();
-    if matches.is_empty() {
-        return None;
-    }
-    let mut out = raw.to_string();
-    let mut count = 0usize;
-    for m in matches.iter().rev() {
-        if m.end <= out.len() && out.is_char_boundary(m.start) && out.is_char_boundary(m.end) {
-            let secret_slice = &out[m.start..m.end];
-            let repl = redact_replacement(&m.rule_id, secret_slice);
-            out.replace_range(m.start..m.end, &repl);
-            count += 1;
+    if !matches.is_empty() {
+        let mut out = raw.to_string();
+        let mut count = 0usize;
+        for m in matches.iter().rev() {
+            if m.end <= out.len() && out.is_char_boundary(m.start) && out.is_char_boundary(m.end) {
+                let secret_slice = &out[m.start..m.end];
+                let repl = redact_replacement(&m.rule_id, secret_slice);
+                out.replace_range(m.start..m.end, &repl);
+                count += 1;
+            }
+        }
+        if count > 0 {
+            return Some((out, count));
         }
     }
-    if count > 0 {
-        Some((out, count))
-    } else {
-        None
+
+    // Also scrub `(key, value)` SQLite state rows (e.g. `('PROD_DB_PASSWORD', 'Sup3rS3cr3t...')`)
+    if let Some(pk_key) = prev_key_col {
+        if (2..=96).contains(&pk_key.len())
+            && (8..=256).contains(&raw.len())
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && !matches!(b, b'"' | b'\''))
+        {
+            let synthetic = format!("{pk_key}={raw}");
+            let prefix_len = pk_key.len() + 1;
+            let kv_matches: Vec<_> = engine
+                .scan_text_for_path(&synthetic, Some(path))
+                .into_iter()
+                .filter(|m| {
+                    m.start >= prefix_len
+                        && m.end <= synthetic.len()
+                        && target_fingerprint.is_none_or(|fp| m.fingerprint == fp)
+                })
+                .collect();
+            if !kv_matches.is_empty() {
+                let mut out = raw.to_string();
+                let mut count = 0usize;
+                for m in kv_matches.iter().rev() {
+                    let rel_s = m.start - prefix_len;
+                    let rel_e = m.end - prefix_len;
+                    if rel_e <= out.len()
+                        && out.is_char_boundary(rel_s)
+                        && out.is_char_boundary(rel_e)
+                    {
+                        let secret_slice = &out[rel_s..rel_e];
+                        let repl = redact_replacement(&m.rule_id, secret_slice);
+                        out.replace_range(rel_s..rel_e, &repl);
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    return Some((out, count));
+                }
+            }
+        }
     }
+
+    None
 }
 
 const SQLITE_DUMP_PY: &str = r#"
-import json, sqlite3, sys
+import base64, json, sqlite3, sys
+
+def enc_pk(v):
+    if isinstance(v, (bytes, bytearray)):
+        return {"__b64__": base64.b64encode(bytes(v)).decode("ascii")}
+    return v
+
 db_path = sys.argv[1]
 conn = sqlite3.connect(db_path, timeout=2.0)
 cur = conn.cursor()
@@ -1004,46 +1060,66 @@ for tbl in tables:
         cols_info = cur.execute(f"PRAGMA table_info({q_tbl})").fetchall()
     except Exception:
         continue
-    cand_cols = [c[1] for c in cols_info if int(c[5] or 0) == 0]
-    if not cand_cols:
+    if not cols_info:
         continue
-    pk_expr = None
+    pks = []
     pk_raw = False
     for rk in ("_rowid_", "rowid", "oid"):
         try:
             cur.execute(f"SELECT {rk} FROM {q_tbl} LIMIT 1")
-            pk_expr = rk
+            pks = [rk]
             pk_raw = True
             break
         except Exception:
             continue
-    if pk_expr is None:
-        pk_cols = [c[1] for c in cols_info if int(c[5] or 0) > 0]
-        if len(pk_cols) == 1:
-            pk_expr = pk_cols[0]
-            pk_raw = False
-    if pk_expr is None:
+    if not pks:
+        pk_sorted = sorted((c for c in cols_info if int(c[5] or 0) > 0), key=lambda x: int(x[5]))
+        pks = [c[1] for c in pk_sorted]
+        pk_raw = False
+    if not pks:
         continue
-    q_pk = pk_expr if pk_raw else ('"' + pk_expr.replace('"', '""') + '"')
-    sel_cols = ", ".join('"' + c.replace('"', '""') + '"' for c in cand_cols)
-    for row in cur.execute(f"SELECT {q_pk}, {sel_cols} FROM {q_tbl}"):
-        rid = row[0]
-        if not isinstance(rid, (int, str)):
+    cand_cols = [c[1] for c in cols_info] if pk_raw else [c[1] for c in cols_info if int(c[5] or 0) == 0]
+    if not cand_cols:
+        continue
+    all_col_names = [c[1] for c in cols_info]
+    q_pks = ", ".join((p if pk_raw else '"' + p.replace('"', '""') + '"') for p in pks)
+    sel_cols = ", ".join('"' + c.replace('"', '""') + '"' for c in all_col_names)
+    cand_set = set(cand_cols)
+    pk_len = len(pks)
+    for row in cur.execute(f"SELECT {q_pks}, {sel_cols} FROM {q_tbl}"):
+        pk_vals = [enc_pk(x) for x in row[:pk_len]]
+        if not all(isinstance(x, (int, float, str, dict)) or x is None for x in pk_vals):
             continue
-        for col_name, val in zip(cand_cols, row[1:]):
-            if isinstance(val, str) and len(val) >= 8:
-                print(json.dumps({"t": tbl, "pk": pk_expr, "pk_raw": pk_raw, "id": rid, "c": col_name, "k": "s", "v": val}))
-            elif isinstance(val, (bytes, bytearray)) and len(val) >= 8:
+        prev_k = None
+        for col_name, val in zip(all_col_names, row[pk_len:]):
+            s_val = None
+            kind = None
+            if isinstance(val, str):
+                s_val = val
+                kind = "s"
+            elif isinstance(val, (bytes, bytearray)):
                 try:
-                    s = bytes(val).decode("utf-8")
-                    print(json.dumps({"t": tbl, "pk": pk_expr, "pk_raw": pk_raw, "id": rid, "c": col_name, "k": "b", "v": s}))
+                    s_val = bytes(val).decode("utf-8")
+                    kind = "b"
                 except Exception:
-                    pass
+                    s_val = None
+            if col_name in cand_set and s_val is not None and len(s_val) >= 8:
+                print(json.dumps({"t": tbl, "pks": pks, "pk_raw": pk_raw, "ids": pk_vals, "c": col_name, "k": kind, "v": s_val, "pk_k": prev_k}))
+            if s_val is not None and 2 <= len(s_val) <= 96 and all(ch.isalnum() or ch in "_-." for ch in s_val):
+                prev_k = s_val
+            else:
+                prev_k = None
 conn.close()
 "#;
 
 const SQLITE_APPLY_PY: &str = r#"
-import json, sqlite3, sys
+import base64, json, sqlite3, sys
+
+def dec_pk(v):
+    if isinstance(v, dict) and "__b64__" in v:
+        return base64.b64decode(v["__b64__"])
+    return v
+
 db_path = sys.argv[1]
 conn = sqlite3.connect(db_path, timeout=5.0)
 cur = conn.cursor()
@@ -1054,9 +1130,18 @@ for line in sys.stdin:
     item = json.loads(line)
     q_tbl = '"' + item["t"].replace('"', '""') + '"'
     q_col = '"' + item["c"].replace('"', '""') + '"'
-    q_pk = item["pk"] if item.get("pk_raw") else ('"' + item["pk"].replace('"', '""') + '"')
-    new_val = item["v"].encode("utf-8") if item["k"] == "b" else item["v"]
-    cur.execute(f"UPDATE {q_tbl} SET {q_col} = ? WHERE {q_pk} = ?", (new_val, item["id"]))
+    pk_vals = [dec_pk(x) for x in item["ids"]]
+    where_parts = []
+    bind_vals = [item["v"].encode("utf-8") if item["k"] == "b" else item["v"]]
+    for pk_name, pv in zip(item["pks"], pk_vals):
+        q_pk = pk_name if item.get("pk_raw") else ('"' + pk_name.replace('"', '""') + '"')
+        if pv is None:
+            where_parts.append(f"{q_pk} IS NULL")
+        else:
+            where_parts.append(f"{q_pk} = ?")
+            bind_vals.append(pv)
+    where_sql = " AND ".join(where_parts)
+    cur.execute(f"UPDATE {q_tbl} SET {q_col} = ? WHERE {where_sql}", tuple(bind_vals))
 conn.commit()
 try:
     cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1098,6 +1183,10 @@ fn try_scrub_sqlite_db(
     target_fingerprint: Option<&str>,
 ) -> io::Result<Option<(CleanedFileSummary, usize)>> {
     let Some(py_bin) = find_python_for_sqlite() else {
+        eprintln!(
+            "[leaktap:warn] Cannot scrub SQLite database {}: `python3` (with `sqlite3` stdlib) was not found on PATH.",
+            shorten_home(path)
+        );
         return Ok(None);
     };
 
@@ -1160,11 +1249,13 @@ fn try_scrub_sqlite_db(
             let Some(cell_val) = row_obj.get("v").and_then(Value::as_str) else {
                 continue;
             };
+            let prev_k = row_obj.get("pk_k").and_then(Value::as_str);
             if let Some((scrubbed, count)) =
-                scrub_sqlite_cell_string(cell_val, engine, path, target_fingerprint)
+                scrub_sqlite_cell_string(cell_val, prev_k, engine, path, target_fingerprint)
             {
                 if let Some(map) = row_obj.as_object_mut() {
                     map.insert("v".to_string(), Value::String(scrubbed));
+                    map.remove("pk_k");
                     if let Ok(mut encoded) = serde_json::to_vec(&Value::Object(map.clone())) {
                         encoded.push(b'\n');
                         updates_jsonl.extend_from_slice(&encoded);

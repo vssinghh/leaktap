@@ -142,6 +142,7 @@ struct UpstreamTargets {
     groq: String,
     block_secrets: bool,
     redact_secrets: bool,
+    update_mcp_pins: bool,
     pool: UpstreamPool,
 }
 
@@ -230,6 +231,35 @@ pub fn start_local_api_tap_with_options(
     header_auditor: Arc<HeaderAuditor>,
     emit: TapCallback,
 ) -> io::Result<LocalApiTap> {
+    start_local_api_tap_full(
+        anthropic_upstream,
+        openai_upstream,
+        chatgpt_upstream,
+        openai_explicit,
+        gemini_upstream,
+        block_secrets,
+        redact_secrets,
+        false,
+        engine,
+        header_auditor,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start_local_api_tap_full(
+    anthropic_upstream: String,
+    openai_upstream: String,
+    chatgpt_upstream: String,
+    openai_explicit: bool,
+    gemini_upstream: String,
+    block_secrets: bool,
+    redact_secrets: bool,
+    update_mcp_pins: bool,
+    engine: Arc<RuleEngine>,
+    header_auditor: Arc<HeaderAuditor>,
+    emit: TapCallback,
+) -> io::Result<LocalApiTap> {
     let v4_listener = TcpListener::bind("127.0.0.1:0")?;
     let port = v4_listener.local_addr()?.port();
 
@@ -261,6 +291,7 @@ pub fn start_local_api_tap_with_options(
         groq: groq_upstream.trim_end_matches('/').to_string(),
         block_secrets,
         redact_secrets,
+        update_mcp_pins,
         pool: Arc::clone(&pool),
     };
 
@@ -758,6 +789,12 @@ fn handle_client(
                                 }
                             }
                         }
+                        inspect_api_mcp_and_tool_results(
+                            provider,
+                            &json_val,
+                            upstreams.update_mcp_pins,
+                            emit,
+                        );
                         parsed_json_body = Some(json_val);
                     }
                 }
@@ -2456,4 +2493,224 @@ fn collect_json_value_strings(val: &serde_json::Value, depth: usize, out: &mut S
 
 fn strip_query(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
+}
+
+fn inspect_api_mcp_and_tool_results(
+    provider: &str,
+    json_val: &serde_json::Value,
+    update_mcp_pins: bool,
+    emit: &TapCallback,
+) {
+    let mut mcp_findings = Vec::new();
+    let api_path = std::path::Path::new("api-request");
+
+    if let Some(tools_arr) = json_val.get("tools").and_then(|v| v.as_array()) {
+        let mut flat_tools: Vec<&serde_json::Value> = Vec::new();
+        for item in tools_arr {
+            if let Some(decls) = item
+                .get("functionDeclarations")
+                .or_else(|| item.get("function_declarations"))
+                .and_then(|d| d.as_array())
+            {
+                flat_tools.extend(decls.iter());
+            } else {
+                flat_tools.push(item);
+            }
+        }
+
+        let mut mcp_grouped: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+            std::collections::BTreeMap::new();
+        for (idx, tool) in flat_tools.into_iter().enumerate() {
+            let tool_name = tool
+                .get("name")
+                .or_else(|| tool.get("function").and_then(|f| f.get("name")))
+                .and_then(|n| n.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("tool_{idx}"));
+
+            if let Some(rest) = tool_name.strip_prefix("mcp__") {
+                if let Some((srv, _)) = rest.split_once("__") {
+                    if !srv.is_empty() {
+                        mcp_grouped
+                            .entry(srv.to_string())
+                            .or_default()
+                            .push(tool.clone());
+                        continue;
+                    }
+                }
+            }
+
+            let per_tool_server = format!("api-tool:{provider}:{tool_name}");
+            let single_arr = serde_json::Value::Array(vec![tool.clone()]);
+            crate::mcp_inspect::audit_mcp_tools_payload_with_options(
+                &per_tool_server,
+                "api-request",
+                api_path,
+                &single_arr,
+                true,
+                update_mcp_pins,
+                &mut mcp_findings,
+            );
+        }
+
+        for (srv, srv_tools) in mcp_grouped {
+            let srv_id = format!("api-mcp:{provider}:{srv}");
+            let arr_val = serde_json::Value::Array(srv_tools);
+            crate::mcp_inspect::audit_mcp_tools_payload_with_options(
+                &srv_id,
+                "api-request",
+                api_path,
+                &arr_val,
+                true,
+                update_mcp_pins,
+                &mut mcp_findings,
+            );
+        }
+    }
+
+    let mut tool_results: Vec<(String, String)> = Vec::new();
+    collect_api_tool_result_texts(json_val, &mut tool_results);
+    let result_path = std::path::Path::new("api-tool-result");
+    for (label, text) in tool_results {
+        crate::mcp_inspect::audit_mcp_tool_call_text(
+            &label,
+            "api-tool-result",
+            result_path,
+            &text,
+            &mut mcp_findings,
+        );
+    }
+
+    let mut emitted_fps = HashSet::new();
+    for mf in mcp_findings {
+        if emitted_fps.insert(mf.fingerprint.clone()) {
+            emit(
+                "http-body",
+                "mcp_tool_risk",
+                mf.rule_id,
+                mf.severity.as_str(),
+                mf.message,
+            );
+        }
+    }
+}
+
+fn append_tool_content_value(val: &serde_json::Value, depth: usize, out: &mut String) {
+    if depth > 12 || out.len() > 256 * 1024 {
+        return;
+    }
+    match val {
+        serde_json::Value::String(s) => {
+            out.push_str(s);
+            out.push('\n');
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                append_tool_content_value(item, depth + 1, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(txt) = map.get("text").and_then(|t| t.as_str()) {
+                out.push_str(txt);
+                out.push('\n');
+            } else {
+                for v in map.values() {
+                    append_tool_content_value(v, depth + 1, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_api_tool_result_texts(val: &serde_json::Value, out: &mut Vec<(String, String)>) {
+    // Anthropic Messages & OpenAI Chat Completions (`messages`)
+    if let Some(msgs) = val.get("messages").and_then(|m| m.as_array()) {
+        for msg in msgs {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if matches!(role, "tool" | "function") {
+                let label = msg
+                    .get("name")
+                    .or_else(|| msg.get("tool_call_id"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("tool_output")
+                    .to_string();
+                if let Some(content) = msg.get("content") {
+                    let mut buf = String::new();
+                    append_tool_content_value(content, 0, &mut buf);
+                    if !buf.trim().is_empty() {
+                        out.push((label, buf));
+                    }
+                }
+                continue;
+            }
+            if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                        let label = block
+                            .get("name")
+                            .or_else(|| block.get("tool_use_id"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("tool_result")
+                            .to_string();
+                        if let Some(content) = block.get("content") {
+                            let mut buf = String::new();
+                            append_tool_content_value(content, 0, &mut buf);
+                            if !buf.trim().is_empty() {
+                                out.push((label, buf));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // OpenAI Responses API (`input`)
+    if let Some(inputs) = val.get("input").and_then(|i| i.as_array()) {
+        for item in inputs {
+            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if matches!(item_type, "function_call_output" | "mcp_call") {
+                let label = item
+                    .get("name")
+                    .or_else(|| item.get("call_id"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("function_call_output")
+                    .to_string();
+                if let Some(output_val) = item.get("output") {
+                    let mut buf = String::new();
+                    append_tool_content_value(output_val, 0, &mut buf);
+                    if !buf.trim().is_empty() {
+                        out.push((label, buf));
+                    }
+                }
+            }
+        }
+    }
+
+    // Gemini API (`contents[].parts[].functionResponse`)
+    if let Some(contents) = val.get("contents").and_then(|c| c.as_array()) {
+        for content in contents {
+            if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
+                for part in parts {
+                    if let Some(fn_resp) = part.get("functionResponse") {
+                        let label = fn_resp
+                            .get("name")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("functionResponse")
+                            .to_string();
+                        if let Some(resp_val) = fn_resp.get("response") {
+                            let mut buf = String::new();
+                            append_tool_content_value(resp_val, 0, &mut buf);
+                            if !buf.trim().is_empty() {
+                                out.push((label, buf));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

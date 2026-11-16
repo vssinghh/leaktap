@@ -1,14 +1,23 @@
 use crate::api_tap::simple_http_exchange;
-use crate::rules::{fingerprint_match, DocHints, RuleEngine};
+use crate::rules::{
+    fingerprint_match, is_likely_placeholder, shannon_entropy, DocHints, RuleEngine,
+};
 use crate::scanner::TranscriptFinding;
+use base64::engine::general_purpose::STANDARD as B64_STD;
+use base64::Engine as _;
+use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_VERIFY_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_VERIFY_WORKERS: usize = 4;
 
 #[derive(Clone)]
 struct VerificationOutcome {
@@ -16,20 +25,37 @@ struct VerificationOutcome {
     detail: Option<String>,
 }
 
+#[derive(Clone)]
+enum ResolvedCredential {
+    Standard {
+        effective_rule_id: String,
+        secret: String,
+    },
+    Aws {
+        access_key_id: String,
+        secret_access_key: Option<String>,
+        session_token: Option<String>,
+    },
+}
+
+struct VerifyTask {
+    cache_key: (String, String),
+    cred: ResolvedCredential,
+}
+
 /// Opt-in (`leaktap scan --verify`) read-only live credential check against provider APIs.
 /// Populates `verified: Some(true | false)` and `verification_detail` without storing raw secrets.
 pub fn verify_secret_findings(findings: &mut [TranscriptFinding], engine: &RuleEngine) {
-    let mut cache: HashMap<(String, String), VerificationOutcome> = HashMap::new();
     let mut file_text_cache: HashMap<(PathBuf, String), Option<String>> = HashMap::new();
+    let mut queued_keys: HashMap<(String, String), usize> = HashMap::new();
+    let mut tasks: Vec<VerifyTask> = Vec::new();
 
-    for finding in findings.iter_mut() {
-        if !is_verifiable_rule(&finding.rule_id) {
+    for finding in findings.iter() {
+        if !is_verifiable_or_wrapper_rule(&finding.rule_id) {
             continue;
         }
         let cache_key = (finding.rule_id.clone(), finding.fingerprint.clone());
-        if let Some(prev) = cache.get(&cache_key) {
-            finding.verified = prev.verified;
-            finding.verification_detail = prev.detail.clone();
+        if queued_keys.contains_key(&cache_key) {
             continue;
         }
 
@@ -42,7 +68,7 @@ pub fn verify_secret_findings(findings: &mut [TranscriptFinding], engine: &RuleE
             continue;
         };
 
-        let Some(raw_secret) = extract_matching_secret(
+        let Some((effective_rule_id, raw_secret)) = extract_matching_secret(
             src_text,
             &finding.first_path,
             finding.first_line,
@@ -53,17 +79,88 @@ pub fn verify_secret_findings(findings: &mut [TranscriptFinding], engine: &RuleE
             continue;
         };
 
-        let outcome = check_single_credential(&finding.rule_id, &raw_secret);
-        finding.verified = outcome.verified;
-        finding.verification_detail = outcome.detail.clone();
-        cache.insert(cache_key, outcome);
+        if !is_verifiable_provider_rule(&effective_rule_id) {
+            continue;
+        }
+
+        let cred = if effective_rule_id == "aws-access-key" {
+            let (secret_access_key, session_token) =
+                extract_aws_companion_credentials(src_text, &raw_secret, finding.first_line);
+            ResolvedCredential::Aws {
+                access_key_id: raw_secret,
+                secret_access_key,
+                session_token,
+            }
+        } else {
+            ResolvedCredential::Standard {
+                effective_rule_id,
+                secret: raw_secret,
+            }
+        };
+
+        queued_keys.insert(cache_key.clone(), tasks.len());
+        tasks.push(VerifyTask { cache_key, cred });
+    }
+
+    if tasks.is_empty() {
+        return;
+    }
+
+    let results: Mutex<HashMap<(String, String), VerificationOutcome>> =
+        Mutex::new(HashMap::with_capacity(tasks.len()));
+    let next_idx = AtomicUsize::new(0);
+    let worker_count = tasks.len().min(MAX_VERIFY_WORKERS);
+
+    std::thread::scope(|s| {
+        for _ in 0..worker_count {
+            s.spawn(|| loop {
+                let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                if idx >= tasks.len() {
+                    break;
+                }
+                let task = &tasks[idx];
+                let outcome = match &task.cred {
+                    ResolvedCredential::Standard {
+                        effective_rule_id,
+                        secret,
+                    } => check_single_credential(effective_rule_id, secret),
+                    ResolvedCredential::Aws {
+                        access_key_id,
+                        secret_access_key,
+                        session_token,
+                    } => check_aws_sts_credential(
+                        access_key_id,
+                        secret_access_key.as_deref(),
+                        session_token.as_deref(),
+                    ),
+                };
+                if let Ok(mut guard) = results.lock() {
+                    guard.insert(task.cache_key.clone(), outcome);
+                }
+            });
+        }
+    });
+
+    let completed = results.into_inner().unwrap_or_default();
+    for finding in findings.iter_mut() {
+        let cache_key = (finding.rule_id.clone(), finding.fingerprint.clone());
+        if let Some(outcome) = completed.get(&cache_key) {
+            finding.verified = outcome.verified;
+            finding.verification_detail = outcome.detail.clone();
+        }
     }
 }
 
-fn is_verifiable_rule(rule_id: &str) -> bool {
+fn is_verifiable_or_wrapper_rule(rule_id: &str) -> bool {
+    is_verifiable_provider_rule(rule_id)
+        || matches!(rule_id, "base64-encoded-secret" | "hex-encoded-secret")
+}
+
+fn is_verifiable_provider_rule(rule_id: &str) -> bool {
     matches!(
         rule_id,
-        "github-pat"
+        "aws-access-key"
+            | "github-pat"
             | "gitlab-pat"
             | "slack-token"
             | "discord-webhook"
@@ -81,6 +178,11 @@ fn is_verifiable_rule(rule_id: &str) -> bool {
             | "postman-api-key"
             | "replicate-api-token"
             | "telegram-bot-token"
+            | "sendgrid-api-key"
+            | "npm-access-token"
+            | "cloudflare-api-token"
+            | "datadog-api-key"
+            | "mailgun-api-key"
     )
 }
 
@@ -115,6 +217,29 @@ fn load_source_text(path: &Path, display_file: &str) -> Option<String> {
         }
     }
 
+    if let Some(mut sqlite_corpus) =
+        crate::scanner::extract_sqlite_text_corpus(path, MAX_VERIFY_FILE_BYTES as usize)
+    {
+        // Also include companion `-wal` text if `path` is a main SQLite database so paired
+        // credentials (e.g. AWS key + secret) split across main DB and WAL can be resolved.
+        let path_str = path.to_string_lossy();
+        if !path_str.ends_with("-wal") {
+            let wal_cand = PathBuf::from(format!("{path_str}-wal"));
+            if wal_cand.is_file() {
+                if let Some(wal_corpus) = crate::scanner::extract_sqlite_text_corpus(
+                    &wal_cand,
+                    MAX_VERIFY_FILE_BYTES as usize,
+                ) {
+                    sqlite_corpus.push('\n');
+                    sqlite_corpus.push_str(&wal_corpus);
+                }
+            }
+        }
+        if !sqlite_corpus.is_empty() {
+            return Some(sqlite_corpus);
+        }
+    }
+
     if let Ok(text) = crate::scanner::read_text_auto_encoding(path, MAX_VERIFY_FILE_BYTES) {
         if !text.is_empty() {
             return Some(text);
@@ -134,7 +259,7 @@ fn extract_matching_secret(
     rule_id: &str,
     target_fp: &str,
     engine: &RuleEngine,
-) -> Option<String> {
+) -> Option<(String, String)> {
     if first_line > 0 {
         if let Some(line) = src_text.lines().nth(first_line - 1) {
             if let Some(found) = scan_slice_for_exact_secret(line, path, rule_id, target_fp, engine)
@@ -152,22 +277,293 @@ fn scan_slice_for_exact_secret(
     rule_id: &str,
     target_fp: &str,
     engine: &RuleEngine,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let hints = DocHints::from_text(text);
     for m in engine.scan_text_with_hints(text, Some(path), hints) {
-        if m.rule_id == rule_id
-            && m.fingerprint == target_fp
-            && m.end <= text.len()
-            && text.is_char_boundary(m.start)
-            && text.is_char_boundary(m.end)
-        {
-            let slice = &text[m.start..m.end];
-            if fingerprint_match(rule_id, slice) == target_fp {
-                return Some(slice.to_string());
+        if m.rule_id == rule_id && m.fingerprint == target_fp {
+            if let Some((inner_rule_id, inner_secret)) = m.decoded_inner {
+                return Some((inner_rule_id, inner_secret));
+            }
+            if m.end <= text.len() && text.is_char_boundary(m.start) && text.is_char_boundary(m.end)
+            {
+                let slice = &text[m.start..m.end];
+                if fingerprint_match(rule_id, slice) == target_fp {
+                    return Some((rule_id.to_string(), slice.to_string()));
+                }
             }
         }
     }
     None
+}
+
+fn aws_secret_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(?:aws_secret_access_key|secret_?access_?key|aws_secret_key|secret_key)\s*(?:=|:|" ?: ?"?|' ?: ?'?)\s*["']?([A-Za-z0-9/+=]{40})["']?"#,
+        )
+        .expect("valid aws secret regex")
+    })
+}
+
+fn aws_session_token_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(?:aws_session_token|session_?token|security_?token)\s*(?:=|:|" ?: ?"?|' ?: ?'?)\s*["']?([A-Za-z0-9/+=]{16,2048})["']?"#,
+        )
+        .expect("valid aws session token regex")
+    })
+}
+
+fn extract_aws_companion_credentials(
+    src_text: &str,
+    access_key_id: &str,
+    first_line: usize,
+) -> (Option<String>, Option<String>) {
+    let lines: Vec<&str> = src_text.lines().collect();
+    let window_text = if first_line > 0 && !lines.is_empty() {
+        let idx = (first_line - 1).min(lines.len() - 1);
+        let start = idx.saturating_sub(25);
+        let end = (idx + 26).min(lines.len());
+        Some(lines[start..end].join("\n"))
+    } else {
+        None
+    };
+
+    let find_secret = |haystack: &str| -> Option<String> {
+        for caps in aws_secret_regex().captures_iter(haystack) {
+            if let Some(m) = caps.get(1) {
+                let cand = m.as_str();
+                if cand != access_key_id
+                    && !is_likely_placeholder(cand)
+                    && shannon_entropy(cand) >= 3.3
+                {
+                    return Some(cand.to_string());
+                }
+            }
+        }
+        None
+    };
+
+    let find_token = |haystack: &str| -> Option<String> {
+        if !access_key_id.starts_with("ASIA") {
+            return None;
+        }
+        aws_session_token_regex()
+            .captures(haystack)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+    };
+
+    let secret = window_text
+        .as_deref()
+        .and_then(find_secret)
+        .or_else(|| find_secret(src_text));
+    let token = window_text
+        .as_deref()
+        .and_then(find_token)
+        .or_else(|| find_token(src_text));
+    (secret, token)
+}
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut k_block = [0u8; 64];
+    if key.len() > 64 {
+        let digest = Sha256::digest(key);
+        k_block[..32].copy_from_slice(&digest);
+    } else {
+        k_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k_block[i];
+        opad[i] ^= k_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    let out = outer.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    arr
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+fn format_utc_amz_datetime(unix_secs: u64) -> (String, String) {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    let date_stamp = format!("{year:04}{m:02}{d:02}");
+    let amz_date = format!("{date_stamp}T{hour:02}{min:02}{sec:02}Z");
+    (date_stamp, amz_date)
+}
+
+fn parse_url_host_and_path(url: &str) -> Option<(String, String)> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (authority, path_part) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let path_only = path_part.split('?').next().unwrap_or("/");
+    Some((authority.to_string(), path_only.to_string()))
+}
+
+fn check_aws_sts_credential(
+    access_key_id: &str,
+    secret_access_key: Option<&str>,
+    session_token: Option<&str>,
+) -> VerificationOutcome {
+    let Some(secret_key) = secret_access_key else {
+        return VerificationOutcome {
+            verified: None,
+            detail: Some(
+                "AWS Access Key ID found without paired 40-char secret key in file".to_string(),
+            ),
+        };
+    };
+    if access_key_id.starts_with("ASIA") && session_token.is_none() {
+        return VerificationOutcome {
+            verified: None,
+            detail: Some(
+                "Temporary AWS ASIA key found without paired session token in file".to_string(),
+            ),
+        };
+    }
+
+    let url = endpoint_url("aws", "https://sts.amazonaws.com", "/");
+    let Some((host_hdr, canonical_uri)) = parse_url_host_and_path(&url) else {
+        return VerificationOutcome {
+            verified: None,
+            detail: Some("Invalid AWS STS endpoint URL".to_string()),
+        };
+    };
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (date_stamp, amz_date) = format_utc_amz_datetime(now_secs);
+    let body = b"Action=GetCallerIdentity&Version=2011-06-15";
+    let payload_hash = hex_lower(&Sha256::digest(body));
+
+    let (canonical_headers, signed_headers) = if let Some(tok) = session_token {
+        (
+            format!(
+                "content-type:application/x-www-form-urlencoded\nhost:{host_hdr}\nx-amz-date:{amz_date}\nx-amz-security-token:{tok}\n"
+            ),
+            "content-type;host;x-amz-date;x-amz-security-token",
+        )
+    } else {
+        (
+            format!(
+                "content-type:application/x-www-form-urlencoded\nhost:{host_hdr}\nx-amz-date:{amz_date}\n"
+            ),
+            "content-type;host;x-amz-date",
+        )
+    };
+
+    let canonical_request =
+        format!("POST\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+    let credential_scope = format!("{date_stamp}/us-east-1/sts/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        hex_lower(&Sha256::digest(canonical_request.as_bytes()))
+    );
+
+    let k_date = hmac_sha256(
+        format!("AWS4{secret_key}").as_bytes(),
+        date_stamp.as_bytes(),
+    );
+    let k_region = hmac_sha256(&k_date, b"us-east-1");
+    let k_service = hmac_sha256(&k_region, b"sts");
+    let k_signing = hmac_sha256(&k_service, b"aws4_request");
+    let signature = hex_lower(&hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+
+    let auth_header = format!(
+        "AWS4-HMAC-SHA256 Credential={access_key_id}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    );
+
+    let mut hdrs = vec![
+        ("Content-Type", "application/x-www-form-urlencoded"),
+        ("X-Amz-Date", amz_date.as_str()),
+        ("Authorization", auth_header.as_str()),
+    ];
+    if let Some(tok) = session_token {
+        hdrs.push(("X-Amz-Security-Token", tok));
+    }
+
+    match simple_http_exchange("POST", &url, &hdrs, Some(body), VERIFY_TIMEOUT) {
+        Ok((200..=299, _, resp_body)) => {
+            let acct = resp_body
+                .split("<Account>")
+                .nth(1)
+                .and_then(|s| s.split("</Account>").next())
+                .unwrap_or("verified");
+            VerificationOutcome {
+                verified: Some(true),
+                detail: Some(format!(
+                    "AWS STS GetCallerIdentity active (account: {acct})"
+                )),
+            }
+        }
+        Ok((401 | 403, _, resp_body)) => {
+            let lower = resp_body.to_ascii_lowercase();
+            if lower.contains("invalidclienttokenid")
+                || lower.contains("expiredtoken")
+                || lower.contains("invalidaccesskeyid")
+                || lower.contains("signaturedoesnotmatch")
+            {
+                VerificationOutcome {
+                    verified: Some(false),
+                    detail: Some("AWS STS rejected credential pair".to_string()),
+                }
+            } else {
+                VerificationOutcome {
+                    verified: None,
+                    detail: Some("AWS STS returned inconclusive 403".to_string()),
+                }
+            }
+        }
+        Ok((code, _, _)) => VerificationOutcome {
+            verified: None,
+            detail: Some(format!("HTTP {code} inconclusive on AWS STS")),
+        },
+        Err(e) => VerificationOutcome {
+            verified: None,
+            detail: Some(format!("AWS STS verification network error: {e}")),
+        },
+    }
 }
 
 fn endpoint_url(provider_slug: &str, default_origin: &str, path: &str) -> String {
@@ -369,6 +765,36 @@ fn check_single_credential(rule_id: &str, secret: &str) -> VerificationOutcome {
             let url = endpoint_url("telegram", "https://api.telegram.org", &path);
             classify_rest_check("Telegram Bot API", &url, &[], false)
         }
+        "sendgrid-api-key" => {
+            let url = endpoint_url("sendgrid", "https://api.sendgrid.com", "/v3/scopes");
+            let hdrs = [("Authorization", bearer.as_str())];
+            classify_rest_check("SendGrid API", &url, &hdrs, true)
+        }
+        "npm-access-token" => {
+            let url = endpoint_url("npm", "https://registry.npmjs.org", "/-/whoami");
+            let hdrs = [("Authorization", bearer.as_str())];
+            classify_rest_check("npm Registry", &url, &hdrs, false)
+        }
+        "cloudflare-api-token" => {
+            let url = endpoint_url(
+                "cloudflare",
+                "https://api.cloudflare.com",
+                "/client/v4/user/tokens/verify",
+            );
+            let hdrs = [("Authorization", bearer.as_str())];
+            classify_rest_check("Cloudflare API", &url, &hdrs, false)
+        }
+        "datadog-api-key" => {
+            let url = endpoint_url("datadog", "https://api.datadoghq.com", "/api/v1/validate");
+            let hdrs = [("DD-API-KEY", secret)];
+            classify_rest_check("Datadog API", &url, &hdrs, false)
+        }
+        "mailgun-api-key" => {
+            let basic = format!("Basic {}", B64_STD.encode(format!("api:{secret}")));
+            let url = endpoint_url("mailgun", "https://api.mailgun.net", "/v3/domains");
+            let hdrs = [("Authorization", basic.as_str())];
+            classify_rest_check("Mailgun API", &url, &hdrs, false)
+        }
         _ => VerificationOutcome {
             verified: None,
             detail: None,
@@ -414,7 +840,11 @@ fn classify_rest_check(
                     )),
                 };
             }
-            if lower.contains("invalid") || lower.contains("revoked") || lower.contains("expired") {
+            if lower.contains("invalid")
+                || lower.contains("revoked")
+                || lower.contains("expired")
+                || (provider_label == "Datadog API" && lower.contains("forbidden"))
+            {
                 return VerificationOutcome {
                     verified: Some(false),
                     detail: Some(format!("HTTP 403 rejected on {provider_label}")),

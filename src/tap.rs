@@ -1,9 +1,9 @@
-use crate::api_tap::{start_local_api_tap_with_options, TapCallback};
+use crate::api_tap::{start_local_api_tap_full, TapCallback};
 use crate::cli::TapArgs;
 use crate::config::PolicyConfig;
 use crate::discovery::home_dir;
 use crate::header_audit::HeaderAuditor;
-use crate::mcp_inspect::audit_mcp_tools_payload;
+use crate::mcp_inspect::{audit_mcp_tool_call_text, audit_mcp_tools_payload_with_options};
 use crate::netwatch::{
     disable_process_dumpable, enable_child_subreaper, reap_reparented_zombies,
     reap_reparented_zombies_except, spawn_socket_watcher, OS_SOCKET_WATCH_SUPPORTED,
@@ -275,7 +275,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             .or_else(|_| env::var("GEMINI_API_BASE_URL"))
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
 
-        let tap = start_local_api_tap_with_options(
+        let tap = start_local_api_tap_full(
             anth_upstream,
             oai_upstream,
             chatgpt_upstream,
@@ -283,6 +283,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             gemini_upstream,
             block_secrets_enabled,
             redact_secrets_enabled,
+            args.update_mcp_pins,
             Arc::clone(&engine),
             Arc::clone(&header_auditor),
             Arc::clone(&emit_cb),
@@ -466,18 +467,23 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         let child_stdout = child.stdout.take().expect("piped stdout");
         let child_stderr = child.stderr.take().expect("piped stderr");
         let seen_domains: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mcp_server_id = Arc::new(format!("stdio:{}", args.command.join(" ")));
+        let update_mcp_pins = args.update_mcp_pins;
 
         {
             let engine = Arc::clone(&engine);
             let auditor = Arc::clone(&header_auditor);
             let url_re = Arc::clone(&url_regex);
             let domains = Arc::clone(&seen_domains);
+            let server_id = Arc::clone(&mcp_server_id);
             let emit = Arc::clone(&emit_cb);
             thread::spawn(move || {
                 pump_stream(
                     io::stdin(),
                     child_stdin,
                     "stdin",
+                    &server_id,
+                    update_mcp_pins,
                     &engine,
                     &auditor,
                     &url_re,
@@ -492,12 +498,15 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             let auditor = Arc::clone(&header_auditor);
             let url_re = Arc::clone(&url_regex);
             let domains = Arc::clone(&seen_domains);
+            let server_id = Arc::clone(&mcp_server_id);
             let emit = Arc::clone(&emit_cb);
             thread::spawn(move || {
                 pump_stream(
                     child_stdout,
                     io::stdout(),
                     "stdout",
+                    &server_id,
+                    update_mcp_pins,
                     &engine,
                     &auditor,
                     &url_re,
@@ -512,12 +521,15 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             let auditor = Arc::clone(&header_auditor);
             let url_re = Arc::clone(&url_regex);
             let domains = Arc::clone(&seen_domains);
+            let server_id = Arc::clone(&mcp_server_id);
             let emit = Arc::clone(&emit_cb);
             thread::spawn(move || {
                 pump_stream(
                     child_stderr,
                     io::stderr(),
                     "stderr",
+                    &server_id,
+                    update_mcp_pins,
                     &engine,
                     &auditor,
                     &url_re,
@@ -612,6 +624,8 @@ fn pump_stream<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
     stream_name: &'static str,
+    mcp_server_id: &str,
+    update_mcp_pins: bool,
     engine: &RuleEngine,
     header_auditor: &HeaderAuditor,
     url_regex: &Regex,
@@ -639,6 +653,8 @@ fn pump_stream<R: Read, W: Write>(
                 inspect_chunk(
                     &line_acc,
                     stream_name,
+                    mcp_server_id,
+                    update_mcp_pins,
                     engine,
                     header_auditor,
                     url_regex,
@@ -654,6 +670,8 @@ fn pump_stream<R: Read, W: Write>(
         inspect_chunk(
             &line_acc,
             stream_name,
+            mcp_server_id,
+            update_mcp_pins,
             engine,
             header_auditor,
             url_regex,
@@ -663,9 +681,12 @@ fn pump_stream<R: Read, W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inspect_chunk(
     bytes: &[u8],
     stream_name: &'static str,
+    mcp_server_id: &str,
+    update_mcp_pins: bool,
     engine: &RuleEngine,
     header_auditor: &HeaderAuditor,
     url_regex: &Regex,
@@ -724,20 +745,38 @@ fn inspect_chunk(
         }
     }
 
-    // Passively audit MCP `tools/list` JSON-RPC responses crossing stdio streams
-    if text.contains("\"tools\"") && text.contains("\"jsonrpc\"") {
+    // Passively audit MCP `tools/list` and `tools/call` JSON-RPC responses crossing stdio streams
+    if text.contains("\"jsonrpc\"") {
         let json_cand = text.trim();
         if json_cand.starts_with('{') {
             if let Ok(rpc_val) = serde_json::from_str::<serde_json::Value>(json_cand) {
                 let mut mcp_findings = Vec::new();
-                audit_mcp_tools_payload(
-                    "stdio-mcp",
-                    stream_name,
-                    Path::new(stream_name),
-                    &rpc_val,
-                    true,
-                    &mut mcp_findings,
-                );
+                if text.contains("\"tools\"") {
+                    audit_mcp_tools_payload_with_options(
+                        mcp_server_id,
+                        stream_name,
+                        Path::new(mcp_server_id),
+                        &rpc_val,
+                        true,
+                        update_mcp_pins,
+                        &mut mcp_findings,
+                    );
+                }
+                if let Some(res_obj) = rpc_val.get("result") {
+                    if let Some(content_arr) = res_obj.get("content").and_then(|c| c.as_array()) {
+                        for item in content_arr {
+                            if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
+                                audit_mcp_tool_call_text(
+                                    mcp_server_id,
+                                    stream_name,
+                                    Path::new(mcp_server_id),
+                                    txt,
+                                    &mut mcp_findings,
+                                );
+                            }
+                        }
+                    }
+                }
                 for mf in mcp_findings {
                     emit(
                         stream_name,

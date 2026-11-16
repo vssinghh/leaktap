@@ -24,7 +24,7 @@ use crate::config::{is_ci_environment, PolicyConfig};
 use crate::discovery::{discover_clean_targets_with_policy, discover_targets_with_all_and_policy};
 use crate::git_scan::run_git_scan;
 use crate::mcp_audit::audit_mcp_configs_with_policy;
-use crate::mcp_inspect::inspect_live_mcp_configs;
+use crate::mcp_inspect::inspect_live_mcp_configs_with_options;
 use crate::plugin_audit::audit_plugin_files_with_policy;
 use crate::report::json::render_scan_json;
 use crate::report::sarif::{render_rules_json, render_scan_sarif_with_rules};
@@ -43,6 +43,7 @@ pub fn execute(cli: Cli) -> i32 {
     let global_config = cli.config;
     let global_policy_git_ref = cli.policy_git_ref;
     let global_trust_project_config = cli.trust_project_config;
+    let global_update_mcp_pins = cli.update_mcp_pins;
     let global_no_config = cli.no_config;
     let global_block_secrets = cli.block_secrets;
     let global_redact_secrets = cli.redact_secrets;
@@ -58,6 +59,7 @@ pub fn execute(cli: Cli) -> i32 {
                 args.policy_git_ref = global_policy_git_ref;
             }
             args.trust_project_config |= global_trust_project_config;
+            args.update_mcp_pins |= global_update_mcp_pins;
             args.no_config |= global_no_config;
             execute_scan(&args)
         }
@@ -120,6 +122,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
         Commands::Codex(args) => {
@@ -135,6 +138,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
         Commands::Agy(args) => {
@@ -150,6 +154,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
         Commands::Gemini(args) => {
@@ -165,6 +170,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
         Commands::Tap(mut args) => {
@@ -172,6 +178,7 @@ pub fn execute(cli: Cli) -> i32 {
             args.redact_secrets |= global_redact_secrets;
             args.scrub_ssh_agent |= global_scrub_ssh_agent;
             args.trust_project_config |= global_trust_project_config;
+            args.update_mcp_pins |= global_update_mcp_pins;
             args.no_config |= global_no_config;
             for v in global_allow_env {
                 if !args.allow_env.contains(&v) {
@@ -296,7 +303,8 @@ pub fn run_scan_report(args: &ScanArgs) -> FullScanReport {
 
 pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> FullScanReport {
     let started = Instant::now();
-    let engine = RuleEngine::with_policy(!args.no_pii, Some(policy));
+    let mut engine = RuleEngine::with_policy(!args.no_pii, Some(policy));
+    engine.set_honor_inline_ignore(!args.no_inline_ignore);
     let active_checks = args.verify || (args.inspect_mcp && !args.no_mcp);
 
     if args.staged || args.git_history {
@@ -341,9 +349,10 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
     if args.inspect_mcp && !args.no_mcp {
         let mut seen_fp: HashSet<String> =
             mcp_findings.iter().map(|f| f.fingerprint.clone()).collect();
-        for lf in inspect_live_mcp_configs(
+        for lf in inspect_live_mcp_configs_with_options(
             &targets.mcp_config_files,
             args.trust_project_config,
+            args.update_mcp_pins,
             Some(policy),
         ) {
             if seen_fp.insert(lf.fingerprint.clone()) {

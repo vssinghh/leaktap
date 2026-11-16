@@ -79,6 +79,90 @@ pub struct RawMatch {
     pub fingerprint: String,
     /// Variable, header, or query parameter name when matched via a key=value rule (e.g. `PROD_DB_PASSWORD`)
     pub secret_key: Option<String>,
+    /// Underlying `(provider_rule_id, raw_decoded_secret)` when matched via Base64/gzip/UTF-16/Hex/JSON-escape decoding
+    pub decoded_inner: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InlineIgnoreSpec {
+    All,
+    Rules(Vec<String>),
+}
+
+impl InlineIgnoreSpec {
+    pub fn matches_rule(&self, rule_id: &str) -> bool {
+        match self {
+            InlineIgnoreSpec::All => true,
+            InlineIgnoreSpec::Rules(list) => list.iter().any(|r| r.eq_ignore_ascii_case(rule_id)),
+        }
+    }
+}
+
+/// Parses inline `# leaktap:ignore`, `// leaktap:allow`, `-- leaktap:ignore=rule-id`, or
+/// `# leaktap:ignore-next-line` directives in source comments (used only for secret/PII file scans).
+pub fn parse_inline_ignore_directive(line: &str, next_line_only: bool) -> Option<InlineIgnoreSpec> {
+    let lower = line.to_ascii_lowercase();
+    if !lower.contains("leaktap:") {
+        return None;
+    }
+    let comment_pos = ["//", "#", "/*", "--", "<!--", ";"]
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min()?;
+    let comment_tail = &lower[comment_pos..];
+
+    let keys: &[&str] = if next_line_only {
+        &["leaktap:ignore-next-line", "leaktap:allow-next-line"]
+    } else {
+        &["leaktap:ignore", "leaktap:allow"]
+    };
+
+    for &key in keys {
+        let mut search_from = 0usize;
+        while let Some(rel) = comment_tail[search_from..].find(key) {
+            let after_key_idx = search_from + rel + key.len();
+            let rest = &comment_tail[after_key_idx..];
+            if !next_line_only && rest.starts_with("-next-line") {
+                search_from = after_key_idx;
+                continue;
+            }
+            let rule_list_slice = if let Some(s) = rest.strip_prefix('=') {
+                Some(s)
+            } else if let Some(s) = rest.strip_prefix('[') {
+                s.split_once(']').map(|(inside, _)| inside)
+            } else if let Some(s) = rest.strip_prefix('(') {
+                s.split_once(')').map(|(inside, _)| inside)
+            } else {
+                rest.strip_prefix(':').map(str::trim_start)
+            };
+            if let Some(list_raw) = rule_list_slice {
+                let list_str: String = list_raw
+                    .chars()
+                    .take_while(|&c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ',' | ' ')
+                    })
+                    .collect();
+                let ids: Vec<String> = list_str
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if !ids.is_empty() {
+                    return Some(InlineIgnoreSpec::Rules(ids));
+                }
+            }
+            if rest.is_empty()
+                || rest.starts_with(|c: char| {
+                    c.is_whitespace() || matches!(c, '*' | '-' | ')' | '>' | ';')
+                })
+            {
+                return Some(InlineIgnoreSpec::All);
+            }
+            search_from = after_key_idx;
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -307,6 +391,7 @@ pub struct RuleEngine {
     b64_rule_enabled: bool,
     hex_rule_enabled: bool,
     k8s_rule_enabled: bool,
+    honor_inline_ignore: bool,
     policy: Option<PolicyConfig>,
 }
 
@@ -1250,6 +1335,71 @@ const RULE_SPECS: &[RuleSpec] = &[
         min_entropy: 3.5,
     },
     RuleSpec {
+        id: "mailgun-api-key",
+        name: "Mailgun API Key",
+        description: "Mailgun private (`key-...`) or v3 sending API key.",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["key-", "MAILGUN_", "mailgun"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(key-[0-9a-f]{32}|[0-9a-f]{32}-[0-9a-f]{8}-[0-9a-f]{8})\b"#,
+        secret_group: 1,
+        min_entropy: 3.3,
+    },
+    RuleSpec {
+        id: "cloudflare-api-token",
+        name: "Cloudflare API Token",
+        description: "Cloudflare API token or Global API key in Cloudflare env/config context.",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &[
+            "CLOUDFLARE_API_TOKEN",
+            "CLOUDFLARE_API_KEY",
+            "CF_API_TOKEN",
+            "CF_API_KEY",
+            "cloudflare_api_token",
+            "cloudflare_token",
+        ],
+        pattern: r#"(?:CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_KEY|CF_API_TOKEN|CF_API_KEY|cloudflare_api_token|cloudflare_token)(?:\\"|\\+u002[27]|["'])?\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\"|\\+u002[27]|["'])?([A-Za-z0-9_\-]{37,45})\b"#,
+        secret_group: 1,
+        min_entropy: 3.7,
+    },
+    RuleSpec {
+        id: "datadog-api-key",
+        name: "Datadog API / Application Key",
+        description: "Datadog 32-char API key or 40-char Application key.",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &[
+            "DD_API_KEY",
+            "DD_APP_KEY",
+            "DATADOG_API_KEY",
+            "DATADOG_APP_KEY",
+            "dd_api_key",
+            "datadog_api_key",
+            "DD-API-KEY",
+        ],
+        pattern: r#"(?:DD_API_KEY|DD_APP_KEY|DATADOG_API_KEY|DATADOG_APP_KEY|dd_api_key|datadog_api_key|DD-API-KEY)(?:\\"|\\+u002[27]|["'])?\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\"|\\+u002[27]|["'])?([0-9a-fA-F]{32,40})\b"#,
+        secret_group: 1,
+        min_entropy: 3.2,
+    },
+    RuleSpec {
+        id: "okta-api-token",
+        name: "Okta API Token",
+        description: "Okta SSWS management API token (`00...`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &[
+            "SSWS ",
+            "OKTA_API_TOKEN",
+            "OKTA_CLIENT_TOKEN",
+            "okta_api_token",
+            "okta_token",
+        ],
+        pattern: r#"(?:SSWS\s+|(?:OKTA_API_TOKEN|OKTA_CLIENT_TOKEN|okta_api_token|okta_token)(?:\\"|\\+u002[27]|["'])?\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\"|\\+u002[27]|["'])?)(00[A-Za-z0-9_\-]{40})\b"#,
+        secret_group: 1,
+        min_entropy: 3.6,
+    },
+    RuleSpec {
         id: "base64-encoded-secret",
         name: "Base64-Encoded Secret",
         description: "Base64-encoded API key, cloud token, or PEM private key across any byte alignment.",
@@ -1508,7 +1658,16 @@ impl RuleEngine {
             hex_rule_enabled,
             k8s_rule_enabled,
             policy: policy.cloned(),
+            honor_inline_ignore: false,
         }
+    }
+
+    pub fn set_honor_inline_ignore(&mut self, honor: bool) {
+        self.honor_inline_ignore = honor;
+    }
+
+    pub fn honors_inline_ignore(&self) -> bool {
+        self.honor_inline_ignore
     }
 
     pub fn all_rules() -> Self {
@@ -1521,12 +1680,22 @@ impl RuleEngine {
 
     /// Scans a single line or chunk in linear O(n) time using SIMD Aho-Corasick prefiltering.
     pub fn scan_text(&self, text: &str) -> Vec<RawMatch> {
-        self.scan_text_inner(text, None, 0, true, true, DocHints::default())
+        let raw = self.scan_text_inner(text, None, 0, true, true, DocHints::default());
+        if self.honor_inline_ignore {
+            filter_inline_ignored_matches(text, None, raw)
+        } else {
+            raw
+        }
     }
 
     /// Scans text while applying path-scoped allowlists (`[allowlist.rule_paths]` and `--trust-project-config`).
     pub fn scan_text_for_path(&self, text: &str, path: Option<&std::path::Path>) -> Vec<RawMatch> {
-        self.scan_text_inner(text, path, 0, true, true, DocHints::default())
+        let raw = self.scan_text_inner(text, path, 0, true, true, DocHints::default());
+        if self.honor_inline_ignore {
+            filter_inline_ignored_matches(text, path, raw)
+        } else {
+            raw
+        }
     }
 
     /// Scans text with an optional file-level GCP service-account context hint so multi-line
@@ -1554,7 +1723,12 @@ impl RuleEngine {
         path: Option<&std::path::Path>,
         hints: DocHints,
     ) -> Vec<RawMatch> {
-        self.scan_text_inner(text, path, 0, true, true, hints)
+        let raw = self.scan_text_inner(text, path, 0, true, true, hints);
+        if self.honor_inline_ignore {
+            filter_inline_ignored_matches(text, path, raw)
+        } else {
+            raw
+        }
     }
 
     fn scan_text_inner(
@@ -1678,6 +1852,7 @@ impl RuleEngine {
                         masked: mask_value(&rule.id, val),
                         fingerprint: fp,
                         secret_key: extract_matched_key_name(&rule.id, full_match),
+                        decoded_inner: None,
                     });
                 }
             }
@@ -1709,6 +1884,7 @@ impl RuleEngine {
                     .is_some_and(|p| p.is_rule_disabled_for("hex-encoded-secret", path))
             {
                 self.scan_hex_candidates(text, path, decode_depth, &mut matches);
+                self.scan_byte_array_candidates(text, path, decode_depth, &mut matches);
             }
         }
 
@@ -1730,6 +1906,13 @@ impl RuleEngine {
                     eff_hints,
                 ) {
                     if um.start < um.end && um.end <= raw_ends.len() {
+                        if um.decoded_inner.is_none()
+                            && unescaped.is_char_boundary(um.start)
+                            && unescaped.is_char_boundary(um.end)
+                        {
+                            um.decoded_inner =
+                                Some((um.rule_id.clone(), unescaped[um.start..um.end].to_string()));
+                        }
                         um.start = raw_starts[um.start];
                         um.end = raw_ends[um.end - 1];
                         matches.push(um);
@@ -1753,6 +1936,15 @@ impl RuleEngine {
                     eff_hints,
                 ) {
                     if pm.start < pm.end && pm.end <= raw_ends.len() {
+                        if pm.decoded_inner.is_none()
+                            && pct_decoded.is_char_boundary(pm.start)
+                            && pct_decoded.is_char_boundary(pm.end)
+                        {
+                            pm.decoded_inner = Some((
+                                pm.rule_id.clone(),
+                                pct_decoded[pm.start..pm.end].to_string(),
+                            ));
+                        }
                         pm.start = raw_starts[pm.start];
                         pm.end = raw_ends[pm.end - 1];
                         matches.push(pm);
@@ -1806,18 +1998,24 @@ impl RuleEngine {
                                 let union_start = prev.start.min(m.start);
                                 let union_end = prev.end.max(m.end);
                                 let preserved_key = m.secret_key.or_else(|| prev.secret_key.take());
+                                let preserved_decoded =
+                                    m.decoded_inner.or_else(|| prev.decoded_inner.take());
                                 prev.rule_id = m.rule_id;
                                 prev.rule_name = m.rule_name;
                                 prev.severity = m.severity;
                                 prev.masked = m.masked;
                                 prev.fingerprint = m.fingerprint;
                                 prev.secret_key = preserved_key;
+                                prev.decoded_inner = preserved_decoded;
                                 prev.start = union_start;
                                 prev.end = union_end;
                             } else {
                                 prev.end = prev.end.max(m.end);
                                 if prev.secret_key.is_none() {
                                     prev.secret_key = m.secret_key;
+                                }
+                                if prev.decoded_inner.is_none() {
+                                    prev.decoded_inner = m.decoded_inner;
                                 }
                             }
                             continue;
@@ -2075,6 +2273,7 @@ impl RuleEngine {
             masked: mask_value("kubernetes-secret-data", trimmed_val),
             fingerprint: fp,
             secret_key: Some(raw_key.to_string()),
+            decoded_inner: None,
         });
     }
 
@@ -2101,6 +2300,7 @@ impl RuleEngine {
             let start = i;
             let mut has_upper = false;
             let mut has_lower = false;
+            let mut has_non_hex_upper = false;
             let mut has_url_sym = false;
             let mut wrapped_multiline = false;
 
@@ -2109,6 +2309,9 @@ impl RuleEngine {
                     let c = bytes[i];
                     if c.is_ascii_uppercase() {
                         has_upper = true;
+                        if c > b'F' {
+                            has_non_hex_upper = true;
+                        }
                         i += 1;
                     } else if c.is_ascii_lowercase() {
                         has_lower = true;
@@ -2147,11 +2350,21 @@ impl RuleEngine {
             let end = body_end + pad_count;
             let tok_len = end - start;
 
-            if !(28..=MAX_B64_CANDIDATE_CHARS).contains(&tok_len) || !(has_upper && has_lower) {
+            if !(28..=MAX_B64_CANDIDATE_CHARS).contains(&tok_len) {
                 continue;
             }
 
             let candidate = &text[start..end];
+            // UTF-16LE/BE Base64 of all-uppercase secrets (e.g. `AKIA...`) can contain only `[A-Z0-9+/=]`.
+            let looks_utf16_or_padded_b64 = has_upper
+                && (has_non_hex_upper || pad_count > 0)
+                && (pad_count > 0
+                    || candidate.contains("AA")
+                    || candidate.contains("AE")
+                    || candidate.contains("QA"));
+            if !(has_upper && has_lower) && !looks_utf16_or_padded_b64 {
+                continue;
+            }
 
             // Skip dot-delimited JWT header/payload/signature segments (`eyJ...`) which `jwt-token` inspects directly,
             // while still catching Base64 secrets followed by a sentence-ending period (`c2tfbGl2ZV8...=`).
@@ -2192,6 +2405,7 @@ impl RuleEngine {
                     masked: format!("b64({})", inner.masked),
                     fingerprint: fp,
                     secret_key: inner.secret_key,
+                    decoded_inner: inner.decoded_inner,
                 });
             }
         }
@@ -2272,31 +2486,179 @@ impl RuleEngine {
         if decoded.len() < 16 || decoded.len() > MAX_B64_DECODED_BYTES {
             return None;
         }
+        self.scan_decoded_bytes(&decoded, path, decode_depth)
+    }
+
+    fn scan_decoded_bytes(
+        &self,
+        decoded: &[u8],
+        path: Option<&std::path::Path>,
+        decode_depth: u8,
+    ) -> Option<RawMatch> {
+        use std::io::Read as _;
+
+        // 1. Decompress `gzip` (`1f 8b 08`) or `zlib` (`78 01/5e/9c/da`) wrappers with strict zip-bomb cap
+        if decode_depth < 2 && decoded.len() >= 18 && decoded.starts_with(&[0x1f, 0x8b, 0x08]) {
+            let mut gunzipped = Vec::new();
+            let _ = flate2::read::MultiGzDecoder::new(decoded)
+                .take((MAX_B64_DECODED_BYTES + 1) as u64)
+                .read_to_end(&mut gunzipped);
+            if (16..=MAX_B64_DECODED_BYTES).contains(&gunzipped.len()) {
+                if let Some(found) = self.scan_decoded_bytes(&gunzipped, path, decode_depth + 1) {
+                    return Some(found);
+                }
+            }
+        } else if decode_depth < 2
+            && decoded.len() >= 16
+            && decoded[0] == 0x78
+            && matches!(decoded[1], 0x01 | 0x5e | 0x9c | 0xda)
+        {
+            let mut inflated = Vec::new();
+            let _ = flate2::read::ZlibDecoder::new(decoded)
+                .take((MAX_B64_DECODED_BYTES + 1) as u64)
+                .read_to_end(&mut inflated);
+            if (16..=MAX_B64_DECODED_BYTES).contains(&inflated.len()) {
+                if let Some(found) = self.scan_decoded_bytes(&inflated, path, decode_depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+
+        // 2. Printable UTF-8 / ASCII OR UTF-16LE / UTF-16BE (across byte alignments 0 and 1)
         let printable = decoded
             .iter()
             .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
             .count();
         let decoded_cow: std::borrow::Cow<'_, str> = if printable * 10 >= decoded.len() * 8 {
-            match std::str::from_utf8(&decoded) {
+            match std::str::from_utf8(decoded) {
                 Ok(s) => std::borrow::Cow::Borrowed(s),
-                Err(_) => String::from_utf8_lossy(&decoded),
+                Err(_) => String::from_utf8_lossy(decoded),
             }
         } else {
-            let u16_str = decode_utf16_if_printable(&decoded)?;
+            let u16_str = decode_utf16_if_printable(decoded)?;
             std::borrow::Cow::Owned(u16_str)
         };
         let inner_hints = DocHints::from_text(&decoded_cow);
-        self.scan_text_inner(
-            &decoded_cow,
-            path,
-            decode_depth + 1,
-            true,
-            true,
-            inner_hints,
-        )
-        .into_iter()
-        .filter(|m| m.category == RuleCategory::Secret)
-        .max_by_key(|m| m.severity)
+        let mut best = self
+            .scan_text_inner(
+                &decoded_cow,
+                path,
+                decode_depth + 1,
+                true,
+                true,
+                inner_hints,
+            )
+            .into_iter()
+            .filter(|m| m.category == RuleCategory::Secret)
+            .max_by_key(|m| m.severity)?;
+
+        if best.decoded_inner.is_none()
+            && best.start < best.end
+            && best.end <= decoded_cow.len()
+            && decoded_cow.is_char_boundary(best.start)
+            && decoded_cow.is_char_boundary(best.end)
+        {
+            best.decoded_inner = Some((
+                best.rule_id.clone(),
+                decoded_cow[best.start..best.end].to_string(),
+            ));
+        }
+        Some(best)
+    }
+
+    /// Single-pass linear O(n) scanner for serialized byte arrays (e.g. Node.js `{"type":"Buffer","data":[115,107,95,...]}`).
+    fn scan_byte_array_candidates(
+        &self,
+        text: &str,
+        path: Option<&std::path::Path>,
+        decode_depth: u8,
+        out: &mut Vec<RawMatch>,
+    ) {
+        if !text.contains('[') || !text.contains(',') {
+            return;
+        }
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        let mut i = 0usize;
+
+        while i < len {
+            if bytes[i] != b'[' {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut k = i + 1;
+            let mut decoded: Vec<u8> = Vec::new();
+            let mut valid = true;
+
+            while k < len && decoded.len() < 8192 {
+                while k < len && matches!(bytes[k], b' ' | b'\t' | b'\r' | b'\n') {
+                    k += 1;
+                }
+                if k >= len || !bytes[k].is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+                let mut val: u16 = 0;
+                let mut digits = 0usize;
+                while k < len && bytes[k].is_ascii_digit() && digits < 4 {
+                    val = val * 10 + (bytes[k] - b'0') as u16;
+                    k += 1;
+                    digits += 1;
+                }
+                if digits == 0 || val > 255 {
+                    valid = false;
+                    break;
+                }
+                decoded.push(val as u8);
+                while k < len && matches!(bytes[k], b' ' | b'\t' | b'\r' | b'\n') {
+                    k += 1;
+                }
+                if k < len && bytes[k] == b',' {
+                    k += 1;
+                    continue;
+                } else if k < len && bytes[k] == b']' {
+                    break;
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if valid && k < len && bytes[k] == b']' && decoded.len() >= 16 {
+                let end = k + 1;
+                i = end;
+                let raw_span = &text[start..end];
+                if !self.has_stopword(raw_span, path) {
+                    if let Some(inner) = self.scan_decoded_bytes(&decoded, path, decode_depth) {
+                        if !out
+                            .iter()
+                            .any(|existing| existing.start <= start && existing.end >= end)
+                        {
+                            let fp_input: String =
+                                decoded.iter().map(|b| format!("{b:02x}")).collect();
+                            let fp = fingerprint_match("hex-encoded-secret", &fp_input);
+                            if !self.is_fingerprint_ignored(&fp, path) {
+                                out.push(RawMatch {
+                                    rule_id: "hex-encoded-secret".to_string(),
+                                    rule_name: format!("Byte-Array {}", inner.rule_name),
+                                    severity: inner.severity.max(Severity::High),
+                                    category: RuleCategory::Secret,
+                                    start,
+                                    end,
+                                    masked: format!("bytes({})", inner.masked),
+                                    fingerprint: fp,
+                                    secret_key: inner.secret_key,
+                                    decoded_inner: inner.decoded_inner,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                i = k.max(start + 1);
+            }
+        }
     }
 
     /// Single-pass linear O(n) scanner for continuous, `0x`-prefixed, `xxd` (default + `-p`),
@@ -2526,6 +2888,7 @@ impl RuleEngine {
             masked: format!("hex({})", inner.masked),
             fingerprint: fp,
             secret_key: inner.secret_key,
+            decoded_inner: inner.decoded_inner,
         });
     }
 
@@ -2566,31 +2929,7 @@ impl RuleEngine {
             if !ok {
                 continue;
             }
-            let printable = decoded
-                .iter()
-                .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
-                .count();
-            if printable * 10 < decoded.len() * 8 {
-                continue;
-            }
-            let decoded_cow = match std::str::from_utf8(&decoded) {
-                Ok(s) => std::borrow::Cow::Borrowed(s),
-                Err(_) => String::from_utf8_lossy(&decoded),
-            };
-            let inner_hints = DocHints::from_text(&decoded_cow);
-            if let Some(best) = self
-                .scan_text_inner(
-                    &decoded_cow,
-                    path,
-                    decode_depth + 1,
-                    true,
-                    true,
-                    inner_hints,
-                )
-                .into_iter()
-                .filter(|m| m.category == RuleCategory::Secret)
-                .max_by_key(|m| m.severity)
-            {
+            if let Some(best) = self.scan_decoded_bytes(&decoded, path, decode_depth) {
                 return Some(best);
             }
         }
@@ -3974,6 +4313,7 @@ fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
         ("figma-pat", &["figd_"]),
         ("voyage-api-key", &["pa-"]),
         ("vercel-access-token", &["vcp_", "vca_", "vck_"]),
+        ("mailgun-api-key", &["key-"]),
         ("jwt-token", &["eyJ"]),
     ];
 
@@ -3988,6 +4328,70 @@ fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Returns `true` when source-level `# leaktap:ignore` comments are honored for `path`.
+/// Machine-generated AI transcripts and SQLite state DBs (`.jsonl`, `.vscdb`, `.db`, `.sqlite`, `-wal`)
+/// never honor inline comments so untrusted prompt/tool payloads cannot self-suppress leaked secrets.
+pub fn path_allows_inline_ignore(path: Option<&std::path::Path>) -> bool {
+    let Some(p) = path else {
+        return true;
+    };
+    let name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    !(name.ends_with(".jsonl")
+        || name.ends_with(".ndjson")
+        || name.ends_with(".vscdb")
+        || name.ends_with(".sqlite")
+        || name.ends_with(".sqlite3")
+        || name.ends_with(".db")
+        || name.ends_with("-wal")
+        || name.ends_with(".wal"))
+}
+
+pub fn match_suppressed_by_spec(spec: &InlineIgnoreSpec, m: &RawMatch) -> bool {
+    spec.matches_rule(&m.rule_id)
+        || m.decoded_inner
+            .as_ref()
+            .is_some_and(|(inner_id, _)| spec.matches_rule(inner_id))
+}
+
+fn filter_inline_ignored_matches(
+    text: &str,
+    path: Option<&std::path::Path>,
+    matches: Vec<RawMatch>,
+) -> Vec<RawMatch> {
+    if matches.is_empty() || !path_allows_inline_ignore(path) {
+        return matches;
+    }
+    matches
+        .into_iter()
+        .filter(|m| {
+            let pos = m.start.min(text.len());
+            let line_start = text[..pos].rfind('\n').map_or(0, |idx| idx + 1);
+            let line_end_raw = text[pos..].find('\n').map_or(text.len(), |rel| pos + rel);
+            let line = text[line_start..line_end_raw].trim_end_matches('\r');
+            if let Some(spec) = parse_inline_ignore_directive(line, false) {
+                if match_suppressed_by_spec(&spec, m) {
+                    return false;
+                }
+            }
+            if line_start > 0 {
+                let prev_end = line_start - 1;
+                let prev_start = text[..prev_end].rfind('\n').map_or(0, |idx| idx + 1);
+                let prev_line = text[prev_start..prev_end].trim_end_matches('\r');
+                if let Some(spec) = parse_inline_ignore_directive(prev_line, true) {
+                    if match_suppressed_by_spec(&spec, m) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 pub fn redact_replacement(rule_id: &str, raw: &str) -> String {
@@ -4021,32 +4425,40 @@ pub fn redact_replacement(rule_id: &str, raw: &str) -> String {
 }
 
 fn decode_utf16_if_printable(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 24 || !bytes.len().is_multiple_of(2) {
+    if bytes.len() < 20 {
         return None;
     }
-    for is_le in [true, false] {
-        let mut units = Vec::with_capacity(bytes.len() / 2);
-        for &[b0, b1] in bytes.as_chunks::<2>().0 {
-            let u = if is_le {
-                u16::from_le_bytes([b0, b1])
-            } else {
-                u16::from_be_bytes([b0, b1])
-            };
-            units.push(u);
+    for byte_offset in [0usize, 1usize] {
+        if bytes.len() < byte_offset + 20 {
+            continue;
         }
-        let slice = if units.first() == Some(&0xFEFF) {
-            &units[1..]
-        } else {
-            &units[..]
-        };
-        if let Ok(s) = String::from_utf16(slice) {
-            if s.len() >= 12 && !s.contains('\0') {
-                let ascii_print = s
-                    .bytes()
-                    .filter(|&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
-                    .count();
-                if ascii_print * 10 >= s.len() * 8 {
-                    return Some(s);
+        let even_len = (bytes.len() - byte_offset) & !1;
+        let sub = &bytes[byte_offset..byte_offset + even_len];
+        for is_le in [true, false] {
+            let mut units = Vec::with_capacity(sub.len() / 2);
+            for &[b0, b1] in sub.as_chunks::<2>().0 {
+                let u = if is_le {
+                    u16::from_le_bytes([b0, b1])
+                } else {
+                    u16::from_be_bytes([b0, b1])
+                };
+                units.push(u);
+            }
+            let slice = if matches!(units.first(), Some(&0xFEFF) | Some(&0xFFFE)) {
+                &units[1..]
+            } else {
+                &units[..]
+            };
+            if let Ok(s) = String::from_utf16(slice) {
+                let cleaned = s.trim_matches('\0');
+                if cleaned.len() >= 10 && !cleaned.contains('\0') {
+                    let ascii_print = cleaned
+                        .bytes()
+                        .filter(|&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+                        .count();
+                    if ascii_print * 10 >= cleaned.len() * 8 {
+                        return Some(cleaned.to_string());
+                    }
                 }
             }
         }

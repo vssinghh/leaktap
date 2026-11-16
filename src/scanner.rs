@@ -228,6 +228,9 @@ fn scan_single_file_impl(
     let mut hits = Vec::new();
     let mut doc_hints: Option<crate::rules::DocHints> = None;
     let mut k8s_tracker = crate::rules::K8sDataTracker::default();
+    let allow_inline_ignore = engine.honors_inline_ignore()
+        && crate::rules::path_allows_inline_ignore(Some(logical_path));
+    let mut pending_ignore: Option<(usize, crate::rules::InlineIgnoreSpec)> = None;
 
     loop {
         buf.clear();
@@ -425,6 +428,13 @@ fn scan_single_file_impl(
 
         for m in engine.scan_text_with_hints(&text, Some(logical_path), line_hints) {
             let (hit_line, hit_col) = compute_line_and_column(&text, start_line, m.start);
+            if allow_inline_ignore
+                && pending_ignore.as_ref().is_some_and(|(target_ln, spec)| {
+                    *target_ln == hit_line && crate::rules::match_suppressed_by_spec(spec, &m)
+                })
+            {
+                continue;
+            }
             hits.push(FileHit {
                 file: logical_path.to_path_buf(),
                 display_file: display_file.clone(),
@@ -438,6 +448,16 @@ fn scan_single_file_impl(
                 fingerprint: m.fingerprint,
                 secret_key: m.secret_key,
             });
+        }
+        if allow_inline_ignore {
+            let last_ln = if pending_line.is_some() {
+                line_num.saturating_sub(1)
+            } else {
+                line_num
+            };
+            let last_sub = text.lines().last().unwrap_or("");
+            pending_ignore = crate::rules::parse_inline_ignore_directive(last_sub, true)
+                .map(|spec| (last_ln + 1, spec));
         }
     }
 
@@ -769,6 +789,9 @@ fn scan_utf16_file_as(
     let decoded = decode_utf16_bytes(&raw);
     let base_hints = crate::rules::DocHints::from_text(&decoded);
     let mut k8s_tracker = crate::rules::K8sDataTracker::default();
+    let allow_inline_ignore = engine.honors_inline_ignore()
+        && crate::rules::path_allows_inline_ignore(Some(logical_path));
+    let mut pending_ignore: Option<(usize, crate::rules::InlineIgnoreSpec)> = None;
     let lines: Vec<&str> = decoded.lines().collect();
     let mut hits = Vec::new();
     let mut i = 0usize;
@@ -870,6 +893,13 @@ fn scan_utf16_file_as(
         }
         for m in engine.scan_text_with_hints(&block, Some(logical_path), line_hints) {
             let (hit_line, hit_col) = compute_line_and_column(&block, start_line, m.start);
+            if allow_inline_ignore
+                && pending_ignore.as_ref().is_some_and(|(target_ln, spec)| {
+                    *target_ln == hit_line && crate::rules::match_suppressed_by_spec(spec, &m)
+                })
+            {
+                continue;
+            }
             hits.push(FileHit {
                 file: logical_path.to_path_buf(),
                 display_file: display_file.to_string(),
@@ -883,6 +913,12 @@ fn scan_utf16_file_as(
                 fingerprint: m.fingerprint,
                 secret_key: m.secret_key,
             });
+        }
+        if allow_inline_ignore {
+            let last_ln = i;
+            let last_sub = block.lines().last().unwrap_or("");
+            pending_ignore = crate::rules::parse_inline_ignore_directive(last_sub, true)
+                .map(|spec| (last_ln + 1, spec));
         }
     }
     Some(PerFileResult {
@@ -911,10 +947,30 @@ fn scan_sqlite_strings_as(
         return None;
     }
 
+    let mut hits = Vec::new();
+    let mut seen_fps: HashSet<String> = HashSet::new();
+
+    // 1. Primary pass: parse SQLite B-tree records (`0x0d` table leaf, `0x0a` WITHOUT ROWID/index leaf,
+    // `0x02` WITHOUT ROWID/index interior pivot, plus `-wal` page frames and overflow page chains),
+    // inserting `\n` between every column so adjacent row columns (`'composerData'`, `'sk_live_...'`)
+    // never concatenate across word boundaries.
+    scan_sqlite_btree_records(
+        disk_path,
+        logical_path,
+        meta.len(),
+        &display_file,
+        engine,
+        &mut seen_fps,
+        &mut hits,
+        None,
+    );
+
+    // 2. Secondary pass: stream printable runs across the raw file to catch deleted/freelist slack bytes,
+    // deduplicating by secret fingerprint.
     let mut file = File::open(disk_path).ok()?;
     let mut io_buf = vec![0u8; SQLITE_STREAM_CHUNK_BYTES];
     let mut run_buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut hits = Vec::new();
+    let mut raw_hits = Vec::new();
     let mut total_bytes = 0u64;
 
     loop {
@@ -930,13 +986,23 @@ fn scan_sqlite_strings_as(
             if is_text_byte {
                 run_buf.push(b);
                 if run_buf.len() >= SQLITE_MAX_RUN_BYTES {
-                    scan_sqlite_chunk(&run_buf, logical_path, &display_file, engine, &mut hits);
+                    scan_sqlite_chunk(&run_buf, logical_path, &display_file, engine, &mut raw_hits);
+                    for h in raw_hits.drain(..) {
+                        if seen_fps.insert(h.fingerprint.clone()) {
+                            hits.push(h);
+                        }
+                    }
                     let keep_from = run_buf.len().saturating_sub(SQLITE_OVERLAP_BYTES);
                     run_buf.drain(0..keep_from);
                 }
             } else {
                 if run_buf.len() >= 16 {
-                    scan_sqlite_chunk(&run_buf, logical_path, &display_file, engine, &mut hits);
+                    scan_sqlite_chunk(&run_buf, logical_path, &display_file, engine, &mut raw_hits);
+                    for h in raw_hits.drain(..) {
+                        if seen_fps.insert(h.fingerprint.clone()) {
+                            hits.push(h);
+                        }
+                    }
                 }
                 run_buf.clear();
             }
@@ -944,19 +1010,13 @@ fn scan_sqlite_strings_as(
     }
 
     if run_buf.len() >= 16 {
-        scan_sqlite_chunk(&run_buf, logical_path, &display_file, engine, &mut hits);
+        scan_sqlite_chunk(&run_buf, logical_path, &display_file, engine, &mut raw_hits);
+        for h in raw_hits.drain(..) {
+            if seen_fps.insert(h.fingerprint.clone()) {
+                hits.push(h);
+            }
+        }
     }
-
-    // Reassemble multi-page SQLite B-tree leaf overflow cells (`> ~4 KiB` rows such as Cursor `ItemTable`
-    // conversation blobs) where 4-byte page-chain headers or non-contiguous page numbers split tokens.
-    scan_sqlite_overflow_cells(
-        disk_path,
-        logical_path,
-        meta.len(),
-        &display_file,
-        engine,
-        &mut hits,
-    );
 
     Some(PerFileResult {
         bytes: total_bytes,
@@ -964,152 +1024,551 @@ fn scan_sqlite_strings_as(
     })
 }
 
-fn scan_sqlite_overflow_cells(
+/// Extracts column-delimited text from a SQLite 3 database or `-wal` journal (up to `max_corpus_bytes`)
+/// for live `--verify` secret extraction without breaking on >32 MiB binary DBs or concatenated columns.
+pub(crate) fn extract_sqlite_text_corpus(
+    disk_path: &Path,
+    max_corpus_bytes: usize,
+) -> Option<String> {
+    let meta = fs::metadata(disk_path).ok()?;
+    if meta.len() > MAX_SQLITE_SCAN_BYTES {
+        return None;
+    }
+    let dummy_engine = RuleEngine::new(false);
+    let mut seen_fps = HashSet::new();
+    let mut dummy_hits = Vec::new();
+    let mut corpus = Vec::with_capacity(max_corpus_bytes.min(256 * 1024));
+    scan_sqlite_btree_records(
+        disk_path,
+        disk_path,
+        meta.len(),
+        "",
+        &dummy_engine,
+        &mut seen_fps,
+        &mut dummy_hits,
+        Some((&mut corpus, max_corpus_bytes)),
+    );
+
+    if corpus.len() < max_corpus_bytes {
+        if let Ok(mut file) = File::open(disk_path) {
+            let mut io_buf = vec![0u8; SQLITE_STREAM_CHUNK_BYTES];
+            let mut run_buf: Vec<u8> = Vec::with_capacity(4096);
+            'outer: loop {
+                let n = match file.read(&mut io_buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                for &b in &io_buf[..n] {
+                    if b >= 0x20 || matches!(b, b'\n' | b'\r' | b'\t') {
+                        run_buf.push(b);
+                    } else {
+                        if run_buf.len() >= 12 {
+                            let rem = max_corpus_bytes.saturating_sub(corpus.len());
+                            if rem == 0 {
+                                break 'outer;
+                            }
+                            let take = run_buf.len().min(rem);
+                            corpus.extend_from_slice(&run_buf[..take]);
+                            corpus.push(b'\n');
+                        }
+                        run_buf.clear();
+                    }
+                }
+            }
+            if run_buf.len() >= 12 && corpus.len() < max_corpus_bytes {
+                let take = run_buf.len().min(max_corpus_bytes - corpus.len());
+                corpus.extend_from_slice(&run_buf[..take]);
+                corpus.push(b'\n');
+            }
+        }
+    }
+
+    Some(String::from_utf8_lossy(&corpus).into_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_sqlite_btree_records(
     disk_path: &Path,
     logical_path: &Path,
     file_len: u64,
     display_file: &str,
     engine: &RuleEngine,
+    seen_fps: &mut HashSet<String>,
     hits: &mut Vec<FileHit>,
+    mut corpus_out: Option<(&mut Vec<u8>, usize)>,
 ) {
+    use std::collections::HashMap;
     use std::io::{Seek, SeekFrom};
 
-    if file_len < 100 {
+    if file_len < 32 {
         return;
     }
     let Ok(mut file) = File::open(disk_path) else {
         return;
     };
-    let mut db_hdr = [0u8; 100];
-    if file.read_exact(&mut db_hdr).is_err() || !db_hdr.starts_with(b"SQLite format 3\0") {
+    let mut magic_hdr = [0u8; 100];
+    let hdr_read = file.read(&mut magic_hdr).unwrap_or(0);
+    if hdr_read < 32 {
         return;
     }
-    let raw_ps = u16::from_be_bytes([db_hdr[16], db_hdr[17]]);
-    let page_size: usize = if raw_ps == 1 { 65536 } else { raw_ps as usize };
+
+    let is_wal = matches!(
+        &magic_hdr[..4],
+        [0x37, 0x7f, 0x06, 0x82] | [0x37, 0x7f, 0x06, 0x83]
+    );
+    let is_db = hdr_read == 100 && magic_hdr.starts_with(b"SQLite format 3\0");
+    if !is_db && !is_wal {
+        return;
+    }
+
+    let mut sibling_db_file: Option<File> = None;
+    let mut sibling_db_pages: u32 = 0;
+
+    let (page_size, reserved, text_encoding) = if is_db {
+        let raw_ps = u16::from_be_bytes([magic_hdr[16], magic_hdr[17]]);
+        let ps: usize = if raw_ps == 1 { 65536 } else { raw_ps as usize };
+        let res = magic_hdr[20] as usize;
+        let enc = u32::from_be_bytes([magic_hdr[56], magic_hdr[57], magic_hdr[58], magic_hdr[59]]);
+        (ps, res, if matches!(enc, 1..=3) { enc } else { 1 })
+    } else {
+        let raw_ps = u32::from_be_bytes([magic_hdr[8], magic_hdr[9], magic_hdr[10], magic_hdr[11]]);
+        let ps: usize = if raw_ps == 1 || raw_ps == 65536 {
+            65536
+        } else {
+            raw_ps as usize
+        };
+        let mut res = 0usize;
+        let mut enc = 1u32;
+        if let Some(s_str) = disk_path.to_str().and_then(|s| s.strip_suffix("-wal")) {
+            let sib_path = Path::new(s_str);
+            if let Ok(mut sf) = File::open(sib_path) {
+                let mut shdr = [0u8; 100];
+                if sf.read_exact(&mut shdr).is_ok() && shdr.starts_with(b"SQLite format 3\0") {
+                    res = shdr[20] as usize;
+                    let senc = u32::from_be_bytes([shdr[56], shdr[57], shdr[58], shdr[59]]);
+                    if matches!(senc, 1..=3) {
+                        enc = senc;
+                    }
+                    if ps > 0 {
+                        if let Ok(smeta) = sf.metadata() {
+                            sibling_db_pages = (smeta.len() / ps as u64) as u32;
+                        }
+                    }
+                    sibling_db_file = Some(sf);
+                }
+            }
+        }
+        (ps, res, enc)
+    };
+
     if !(512..=65536).contains(&page_size) || !page_size.is_power_of_two() {
         return;
     }
-    let reserved = db_hdr[20] as usize;
     if reserved >= page_size || page_size - reserved < 480 {
         return;
     }
     let usable = page_size - reserved;
-    let max_local = usable - 35;
-    let min_local = ((usable - 12) * 32 / 255).saturating_sub(23);
-    if usable <= 4 || min_local > max_local {
+    if usable <= 35 {
         return;
     }
 
-    let total_pages = (file_len / page_size as u64) as u32;
-    if total_pages < 2 {
-        return;
+    let mut wal_page_offsets: HashMap<u32, u64> = HashMap::new();
+    let mut frames_to_visit: Vec<(u32, u64)> = Vec::new();
+
+    if is_wal {
+        let frame_stride = 24u64 + page_size as u64;
+        let mut f_off = 32u64;
+        let mut f_hdr = [0u8; 24];
+        while f_off + frame_stride <= file_len {
+            if file.seek(SeekFrom::Start(f_off)).is_err() || file.read_exact(&mut f_hdr).is_err() {
+                break;
+            }
+            let pgno = u32::from_be_bytes([f_hdr[0], f_hdr[1], f_hdr[2], f_hdr[3]]);
+            if pgno >= 1 {
+                let page_data_off = f_off + 24;
+                wal_page_offsets.insert(pgno, page_data_off);
+                frames_to_visit.push((pgno, page_data_off));
+            }
+            f_off += frame_stride;
+        }
+    } else {
+        let total_pages = (file_len / page_size as u64) as u32;
+        for pgno in 1..=total_pages {
+            frames_to_visit.push((pgno, (pgno as u64 - 1) * page_size as u64));
+        }
     }
 
-    let mut seen_fps: HashSet<String> = hits.iter().map(|h| h.fingerprint.clone()).collect();
+    let total_db_pages = if is_db {
+        (file_len / page_size as u64) as u32
+    } else {
+        sibling_db_pages
+    };
+
     let mut page_buf = vec![0u8; page_size];
     let mut ovf_buf = vec![0u8; page_size];
+    let mut batch_buf: Vec<u8> = Vec::with_capacity(65536);
+    let mut cell_hits = Vec::new();
 
-    for page_num in 1..=total_pages {
-        let page_off = (page_num as u64 - 1) * page_size as u64;
+    let flush_batch = |batch: &mut Vec<u8>,
+                       seen: &mut HashSet<String>,
+                       out_hits: &mut Vec<FileHit>,
+                       tmp_hits: &mut Vec<FileHit>,
+                       corpus: &mut Option<(&mut Vec<u8>, usize)>| {
+        if batch.is_empty() {
+            return;
+        }
+        if let Some((ref mut c_vec, max_c)) = corpus {
+            let rem = max_c.saturating_sub(c_vec.len());
+            if rem > 0 {
+                let take = batch.len().min(rem);
+                c_vec.extend_from_slice(&batch[..take]);
+            }
+        } else {
+            tmp_hits.clear();
+            scan_sqlite_chunk(batch, logical_path, display_file, engine, tmp_hits);
+            for h in tmp_hits.drain(..) {
+                if seen.insert(h.fingerprint.clone()) {
+                    out_hits.push(h);
+                }
+            }
+        }
+        batch.clear();
+    };
+
+    for (page_num, page_off) in frames_to_visit {
+        if let Some((ref c_vec, max_c)) = corpus_out {
+            if c_vec.len() >= max_c {
+                break;
+            }
+        }
         if file.seek(SeekFrom::Start(page_off)).is_err() || file.read_exact(&mut page_buf).is_err()
         {
             break;
         }
         let btree_hdr_off = if page_num == 1 { 100usize } else { 0usize };
-        if btree_hdr_off + 8 > usable || page_buf[btree_hdr_off] != 0x0d {
+        if btree_hdr_off + 8 > usable {
+            continue;
+        }
+        let page_type = page_buf[btree_hdr_off];
+        // 0x0d = table leaf, 0x0a = index / WITHOUT ROWID leaf, 0x02 = index / WITHOUT ROWID interior
+        let hdr_len = match page_type {
+            0x0d | 0x0a => 8usize,
+            0x02 => 12usize,
+            _ => continue,
+        };
+        if btree_hdr_off + hdr_len > usable {
             continue;
         }
         let cell_count =
             u16::from_be_bytes([page_buf[btree_hdr_off + 3], page_buf[btree_hdr_off + 4]]) as usize;
-        let ptr_table_end = btree_hdr_off + 8 + cell_count.saturating_mul(2);
+        let ptr_table_end = btree_hdr_off + hdr_len + cell_count.saturating_mul(2);
         if ptr_table_end > usable {
             continue;
         }
 
+        let max_local = if page_type == 0x0d {
+            usable - 35
+        } else {
+            ((usable - 12) * 64 / 255).saturating_sub(23)
+        };
+        let min_local = ((usable - 12) * 32 / 255).saturating_sub(23);
+        if min_local > max_local || max_local == 0 {
+            continue;
+        }
+
         for cell_idx in 0..cell_count {
-            let ptr_pos = btree_hdr_off + 8 + cell_idx * 2;
+            let ptr_pos = btree_hdr_off + hdr_len + cell_idx * 2;
             let raw_cell_off = u16::from_be_bytes([page_buf[ptr_pos], page_buf[ptr_pos + 1]]);
-            let cell_off = if raw_cell_off == 0 && page_size == 65536 {
+            let mut cursor = if raw_cell_off == 0 && page_size == 65536 {
                 65536
             } else {
                 raw_cell_off as usize
             };
-            if cell_off >= usable {
+            if page_type == 0x02 {
+                cursor = cursor.saturating_add(4); // skip 4-byte left-child page pointer
+            }
+            if cursor >= usable {
                 continue;
             }
-            let Some((payload_size_u64, v1_len)) = read_sqlite_varint(&page_buf[cell_off..usable])
+
+            let Some((payload_size_u64, v1_len)) = read_sqlite_varint(&page_buf[cursor..usable])
             else {
                 continue;
             };
-            if payload_size_u64 <= max_local as u64 || payload_size_u64 > 4 * 1024 * 1024 {
+            if payload_size_u64 == 0 || payload_size_u64 > 4 * 1024 * 1024 {
                 continue;
             }
             let payload_size = payload_size_u64 as usize;
-            let after_v1 = cell_off + v1_len;
-            let Some((_rowid, v2_len)) = read_sqlite_varint(&page_buf[after_v1..usable]) else {
-                continue;
+            cursor += v1_len;
+
+            if page_type == 0x0d {
+                if cursor >= usable {
+                    continue;
+                }
+                let Some((_rowid, v2_len)) = read_sqlite_varint(&page_buf[cursor..usable]) else {
+                    continue;
+                };
+                cursor += v2_len;
+            }
+
+            let has_overflow = payload_size > max_local;
+            let local_len = if !has_overflow {
+                payload_size
+            } else {
+                let k = min_local + ((payload_size - min_local) % (usable - 4));
+                if k <= max_local {
+                    k
+                } else {
+                    min_local
+                }
             };
-            let payload_start = after_v1 + v2_len;
-            let k = min_local + ((payload_size - min_local) % (usable - 4));
-            let local_len = if k <= max_local { k } else { min_local };
-            if payload_start + local_len + 4 > usable {
+            let needed = local_len + if has_overflow { 4 } else { 0 };
+            if cursor + needed > usable {
                 continue;
             }
 
-            let ovf_ptr_pos = payload_start + local_len;
-            let mut next_ovf = u32::from_be_bytes([
-                page_buf[ovf_ptr_pos],
-                page_buf[ovf_ptr_pos + 1],
-                page_buf[ovf_ptr_pos + 2],
-                page_buf[ovf_ptr_pos + 3],
-            ]);
-            if next_ovf == 0 || next_ovf > total_pages {
-                continue;
-            }
+            if !has_overflow {
+                let cell_payload = &page_buf[cursor..cursor + local_len];
+                append_sqlite_record_columns(cell_payload, text_encoding, &mut batch_buf);
+                if batch_buf.len() >= 48 * 1024 {
+                    flush_batch(
+                        &mut batch_buf,
+                        seen_fps,
+                        hits,
+                        &mut cell_hits,
+                        &mut corpus_out,
+                    );
+                }
+            } else {
+                let ovf_ptr_pos = cursor + local_len;
+                let mut next_ovf = u32::from_be_bytes([
+                    page_buf[ovf_ptr_pos],
+                    page_buf[ovf_ptr_pos + 1],
+                    page_buf[ovf_ptr_pos + 2],
+                    page_buf[ovf_ptr_pos + 3],
+                ]);
+                let mut assembled = Vec::with_capacity(payload_size.min(2 * 1024 * 1024));
+                assembled.extend_from_slice(&page_buf[cursor..cursor + local_len]);
+                let mut visited_ovf = HashSet::new();
 
-            let mut assembled = Vec::with_capacity(payload_size.min(2 * 1024 * 1024));
-            assembled.extend_from_slice(&page_buf[payload_start..payload_start + local_len]);
-            let mut visited_ovf = HashSet::new();
-
-            while next_ovf != 0
-                && next_ovf <= total_pages
-                && assembled.len() < payload_size
-                && assembled.len() < 2 * 1024 * 1024
-                && visited_ovf.len() < 512
-                && visited_ovf.insert(next_ovf)
-            {
-                let ovf_off = (next_ovf as u64 - 1) * page_size as u64;
-                if file.seek(SeekFrom::Start(ovf_off)).is_err()
-                    || file.read_exact(&mut ovf_buf).is_err()
+                while next_ovf != 0
+                    && assembled.len() < payload_size
+                    && assembled.len() < 2 * 1024 * 1024
+                    && visited_ovf.len() < 512
+                    && visited_ovf.insert(next_ovf)
                 {
-                    break;
+                    let read_ok = if is_wal {
+                        if let Some(&wal_off) = wal_page_offsets.get(&next_ovf) {
+                            file.seek(SeekFrom::Start(wal_off)).is_ok()
+                                && file.read_exact(&mut ovf_buf).is_ok()
+                        } else if next_ovf <= total_db_pages {
+                            if let Some(ref mut sf) = sibling_db_file {
+                                let sib_off = (next_ovf as u64 - 1) * page_size as u64;
+                                sf.seek(SeekFrom::Start(sib_off)).is_ok()
+                                    && sf.read_exact(&mut ovf_buf).is_ok()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else if next_ovf <= total_db_pages {
+                        let ovf_off = (next_ovf as u64 - 1) * page_size as u64;
+                        file.seek(SeekFrom::Start(ovf_off)).is_ok()
+                            && file.read_exact(&mut ovf_buf).is_ok()
+                    } else {
+                        false
+                    };
+                    if !read_ok {
+                        break;
+                    }
+                    next_ovf = u32::from_be_bytes([ovf_buf[0], ovf_buf[1], ovf_buf[2], ovf_buf[3]]);
+                    let rem = payload_size - assembled.len();
+                    let copy_len = rem.min(usable - 4);
+                    assembled.extend_from_slice(&ovf_buf[4..4 + copy_len]);
                 }
-                next_ovf = u32::from_be_bytes([ovf_buf[0], ovf_buf[1], ovf_buf[2], ovf_buf[3]]);
-                let rem = payload_size - assembled.len();
-                let copy_len = rem.min(usable - 4);
-                assembled.extend_from_slice(&ovf_buf[4..4 + copy_len]);
-            }
 
-            let mut cell_hits = Vec::new();
-            // Replace NUL/control bytes inside SQLite record header with spaces so contiguous text scans cleanly
-            for b in &mut assembled {
-                if *b < 0x20 && !matches!(*b, b'\n' | b'\r' | b'\t') {
-                    *b = b' ';
-                }
-            }
-            scan_sqlite_chunk(
-                &assembled,
-                logical_path,
-                display_file,
-                engine,
-                &mut cell_hits,
-            );
-            for h in cell_hits {
-                if seen_fps.insert(h.fingerprint.clone()) {
-                    hits.push(h);
-                }
+                append_sqlite_record_columns(&assembled, text_encoding, &mut batch_buf);
+                flush_batch(
+                    &mut batch_buf,
+                    seen_fps,
+                    hits,
+                    &mut cell_hits,
+                    &mut corpus_out,
+                );
             }
         }
+    }
+
+    flush_batch(
+        &mut batch_buf,
+        seen_fps,
+        hits,
+        &mut cell_hits,
+        &mut corpus_out,
+    );
+}
+
+fn append_raw_sqlite_payload(payload: &[u8], out: &mut Vec<u8>) {
+    if payload.is_empty() {
+        return;
+    }
+    if payload.starts_with(&[0xFF, 0xFE])
+        || payload.starts_with(&[0xFE, 0xFF])
+        || (payload.contains(&0) && looks_like_utf16(payload))
+    {
+        let decoded = decode_utf16_bytes(payload);
+        for &b in decoded.as_bytes() {
+            out.push(if b >= 0x20 || matches!(b, b'\n' | b'\r' | b'\t') {
+                b
+            } else {
+                b' '
+            });
+        }
+    } else {
+        for &b in payload {
+            out.push(if b >= 0x20 || matches!(b, b'\n' | b'\r' | b'\t') {
+                b
+            } else {
+                b' '
+            });
+        }
+    }
+    out.push(b'\n');
+}
+
+/// Parses a SQLite record payload into `\n`-separated TEXT/BLOB column values (plus synthetic `key=value`
+/// pairs for `(key, value)` state tables) so adjacent columns never merge across `\b` word boundaries.
+/// Falls back to contiguous printable bytes when `payload` is not a well-formed SQLite record.
+fn append_sqlite_record_columns(payload: &[u8], text_encoding: u32, out: &mut Vec<u8>) {
+    let Some((hdr_sz_u64, mut hdr_pos)) = read_sqlite_varint(payload) else {
+        return;
+    };
+    if hdr_sz_u64 < hdr_pos as u64 || hdr_sz_u64 > payload.len() as u64 || hdr_sz_u64 > 65536 {
+        append_raw_sqlite_payload(payload, out);
+        return;
+    }
+    let hdr_sz = hdr_sz_u64 as usize;
+    let initial_out_len = out.len();
+    let mut body_pos = hdr_sz;
+    let mut prev_key_col: Option<String> = None;
+    let mut cols_seen = 0usize;
+    let mut aborted = false;
+
+    while hdr_pos < hdr_sz && cols_seen < 2048 {
+        let Some((serial_type, v_len)) = read_sqlite_varint(&payload[hdr_pos..hdr_sz]) else {
+            aborted = true;
+            break;
+        };
+        hdr_pos += v_len;
+        cols_seen += 1;
+
+        let (col_len, is_text, is_blob) = match serial_type {
+            0 | 8 | 9 => (0usize, false, false),
+            1 => (1, false, false),
+            2 => (2, false, false),
+            3 => (3, false, false),
+            4 => (4, false, false),
+            5 => (6, false, false),
+            6 | 7 => (8, false, false),
+            10 | 11 => {
+                aborted = true;
+                break;
+            }
+            n if n >= 12 && n % 2 == 0 => (((n - 12) / 2) as usize, false, true),
+            n => (((n - 13) / 2) as usize, true, false),
+        };
+
+        if body_pos.saturating_add(col_len) > payload.len() {
+            if payload.len() < 2 * 1024 * 1024 {
+                aborted = true;
+            }
+            break;
+        }
+        let col_bytes = &payload[body_pos..body_pos + col_len];
+        body_pos += col_len;
+
+        if !(is_text || is_blob) || col_len == 0 {
+            prev_key_col = None;
+            continue;
+        }
+
+        let decoded_col: Option<String> = if is_text && (text_encoding == 2 || text_encoding == 3) {
+            let is_be = text_encoding == 3;
+            let mut units = Vec::with_capacity(col_bytes.len() / 2);
+            for &pair in col_bytes.as_chunks::<2>().0 {
+                units.push(if is_be {
+                    u16::from_be_bytes(pair)
+                } else {
+                    u16::from_le_bytes(pair)
+                });
+            }
+            Some(String::from_utf16_lossy(&units))
+        } else if col_bytes.starts_with(&[0xFF, 0xFE])
+            || col_bytes.starts_with(&[0xFE, 0xFF])
+            || (col_bytes.contains(&0) && looks_like_utf16(col_bytes))
+        {
+            Some(decode_utf16_bytes(col_bytes))
+        } else {
+            None
+        };
+
+        let start_out = out.len();
+        if let Some(ref s) = decoded_col {
+            for &b in s.as_bytes() {
+                out.push(if b >= 0x20 || matches!(b, b'\n' | b'\r' | b'\t') {
+                    b
+                } else {
+                    b' '
+                });
+            }
+        } else {
+            for &b in col_bytes {
+                out.push(if b >= 0x20 || matches!(b, b'\n' | b'\r' | b'\t') {
+                    b
+                } else {
+                    b' '
+                });
+            }
+        }
+        let col_str_len = out.len() - start_out;
+        out.push(b'\n');
+
+        // Also emit `key=value` when a short identifier key column precedes a single-line value column
+        if let Some(ref key_name) = prev_key_col {
+            let val_ok = {
+                let val_slice = &out[start_out..start_out + col_str_len];
+                (8..=256).contains(&val_slice.len())
+                    && val_slice
+                        .iter()
+                        .all(|&b| b.is_ascii_graphic() && !matches!(b, b'"' | b'\''))
+            };
+            if val_ok {
+                out.extend_from_slice(key_name.as_bytes());
+                out.push(b'=');
+                out.extend_from_within(start_out..start_out + col_str_len);
+                out.push(b'\n');
+            }
+        }
+
+        let written_slice = &out[start_out..start_out + col_str_len];
+        if (2..=96).contains(&written_slice.len())
+            && written_slice
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            prev_key_col = std::str::from_utf8(written_slice).ok().map(str::to_string);
+        } else {
+            prev_key_col = None;
+        }
+    }
+
+    if aborted
+        || hdr_pos != hdr_sz
+        || (body_pos != payload.len() && payload.len() < 2 * 1024 * 1024)
+    {
+        out.truncate(initial_out_len);
+        append_raw_sqlite_payload(payload, out);
     }
 }
 

@@ -1296,6 +1296,7 @@ fn stream_unified_diff(
     let mut in_hunk = false;
     let mut current_new_line: usize = 1;
     let mut warned_binary_cap = false;
+    let mut pending_diff_ignore: Option<(usize, crate::rules::InlineIgnoreSpec)> = None;
 
     let mut block_buf = String::new();
     let mut block_start_line = 1usize;
@@ -1457,6 +1458,7 @@ fn stream_unified_diff(
                 current_checked_doc_blob = false;
                 current_blob_text = None;
                 k8s_tracker = crate::rules::K8sDataTracker::default();
+                pending_diff_ignore = None;
                 if rest == "/dev/null" {
                     current_rel_file = None;
                     current_abs_file = None;
@@ -1758,7 +1760,52 @@ fn stream_unified_diff(
                 }
             }
 
+            let allow_inline_ignore =
+                engine.honors_inline_ignore() && crate::rules::path_allows_inline_ignore(Some(abs));
+
             for m in engine.scan_text_with_hints(added, Some(abs), line_hints) {
+                if allow_inline_ignore {
+                    let suppressed_by_added =
+                        pending_diff_ignore.as_ref().is_some_and(|(t_ln, spec)| {
+                            *t_ln == line_no && crate::rules::match_suppressed_by_spec(spec, &m)
+                        });
+                    if suppressed_by_added {
+                        continue;
+                    }
+                    // In `-U0` diffs, line `line_no - 1` may be an unchanged `# leaktap:ignore-next-line` comment
+                    if line_no >= 2
+                        && pending_diff_ignore
+                            .as_ref()
+                            .is_none_or(|(t_ln, _)| *t_ln != line_no)
+                    {
+                        if !current_checked_doc_blob {
+                            current_checked_doc_blob = true;
+                            let spec = match &current_commit {
+                                Some(sha) => format!("{sha}:{rel}"),
+                                None => format!(":{rel}"),
+                            };
+                            if let Some(blob) = run_git_bytes_capped(
+                                repo_root,
+                                &["cat-file", "-p", &spec],
+                                512 * 1024,
+                            ) {
+                                current_blob_text =
+                                    Some(String::from_utf8_lossy(&blob).into_owned());
+                            }
+                        }
+                        if let Some(ref blob_str) = current_blob_text {
+                            if let Some(prev_ln) = blob_str.lines().nth(line_no - 2) {
+                                if let Some(spec) =
+                                    crate::rules::parse_inline_ignore_directive(prev_ln, true)
+                                {
+                                    if crate::rules::match_suppressed_by_spec(&spec, &m) {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let (_, col) = compute_line_and_column(added, 1, m.start);
                 hits.push(FileHit {
                     file: abs.clone(),
@@ -1774,9 +1821,18 @@ fn stream_unified_diff(
                     fingerprint: m.fingerprint,
                 });
             }
+            if allow_inline_ignore {
+                pending_diff_ignore = crate::rules::parse_inline_ignore_directive(added, true)
+                    .map(|spec| (line_no + 1, spec));
+            }
         } else if line.starts_with(' ') || line.starts_with('-') {
             if let Some(ctx) = line.strip_prefix(' ') {
+                let ctx_line_no = current_new_line;
                 current_new_line += 1;
+                if engine.honors_inline_ignore() {
+                    pending_diff_ignore = crate::rules::parse_inline_ignore_directive(ctx, true)
+                        .map(|spec| (ctx_line_no + 1, spec));
+                }
                 current_doc_hints = current_doc_hints.merge(crate::rules::DocHints::from_text(ctx));
                 if contains_gcp_sa_markers(ctx) {
                     current_doc_hints.has_gcp_sa = true;

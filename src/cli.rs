@@ -6,7 +6,7 @@ use std::path::PathBuf;
     name = "leaktap",
     version,
     about = "See what your AI coding CLIs actually leak — offline log/plugin/MCP scanner, terminal UI, and live CLI wiretap.",
-    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers and marketplace plugins.\n\nSecurity boundary: `leaktap` provides offline secret/MCP/plugin auditing and cooperative user-space DLP (`*_BASE_URL` proxy + env scrubbing + 10ms/250ms OS socket polling). It is not a kernel eBPF/network-namespace sandbox — pair with `bubblewrap`, `sandbox-exec`, or a container firewall when running untrusted code.\n\nQuickstart:\n  leaktap                          Scan local chat logs, SQLite state, MCP configs, and plugins/hooks/skills\n  leaktap scan --all               Scan both the current workspace repo and all user-home AI agent stores\n  leaktap scan --verify            Verify whether detected API keys/tokens are still live\n  leaktap scan --inspect-mcp       Query configured MCP servers for tool poisoning & schema rug-pulls\n  leaktap ui                       Open the interactive 4-tab terminal UI\n  leaktap claude                   Start Claude Code with live API, env, and socket watching\n  leaktap --block-secrets claude   Actively block outgoing prompts that contain leaked secrets\n  leaktap --redact-secrets claude  Scrub secrets to [REDACTED:...] in-transit without interrupting the turn"
+    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers and marketplace plugins.\n\nSecurity boundary: `leaktap` provides offline secret/MCP/plugin auditing and cooperative user-space DLP (`*_BASE_URL` proxy + env scrubbing + 10ms Linux / 1s macOS OS socket polling). It is not a kernel eBPF/network-namespace sandbox — pair with `bubblewrap`, `sandbox-exec`, or a container firewall when running untrusted code.\n\nQuickstart:\n  leaktap                          Scan local chat logs, SQLite state, MCP configs, and plugins/hooks/skills\n  leaktap scan --all               Scan both the current workspace repo and all user-home AI agent stores\n  leaktap scan --verify            Verify whether detected API keys/tokens are still live\n  leaktap scan --inspect-mcp       Query configured MCP servers for tool poisoning & schema rug-pulls\n  leaktap ui                       Open the interactive 4-tab terminal UI\n  leaktap claude                   Start Claude Code with live API, env, and socket watching\n  leaktap --block-secrets claude   Actively block outgoing prompts that contain leaked secrets\n  leaktap --redact-secrets claude  Scrub secrets to [REDACTED_BY_LEAKTAP] in-transit without interrupting the turn"
 )]
 pub struct Cli {
     /// Explicit path to a trusted `.leaktap.toml` or `.leaktapignore` policy file
@@ -25,11 +25,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_config: bool,
 
+    /// Refresh stored MCP `tools/list` schema pins in `~/.local/share/leaktap/mcp_tool_pins.json` when a server upgrades
+    #[arg(long, global = true)]
+    pub update_mcp_pins: bool,
+
     /// Actively block outgoing LLM API requests (`HTTP 400`) when a secret is detected in the prompt or headers
     #[arg(long, global = true)]
     pub block_secrets: bool,
 
-    /// Scrub detected secrets in-transit (`[REDACTED:...]`) inside outgoing LLM API requests instead of blocking the turn
+    /// Scrub detected secrets in-transit (`[REDACTED_BY_LEAKTAP]`) inside outgoing LLM API requests instead of blocking the turn
     #[arg(long, global = true)]
     pub redact_secrets: bool,
 
@@ -70,7 +74,7 @@ pub enum Commands {
 
     /// Wrap any CLI or MCP server command with custom wiretap flags (cooperative DLP + user-space socket watch)
     #[command(
-        long_about = "Wrap any CLI or MCP server command with environment scrubbing, cooperative `*_BASE_URL` HTTP API inspection (`--block-secrets` / `--redact-secrets`), passive stdio MCP `tools/list` poisoning checks, and user-space child socket telemetry (`10ms` Linux `/proc`, `250ms` macOS `ps`+`lsof`).\n\nSecurity boundary: `tap` operates without root or kernel hooks. A hostile binary that ignores `*_BASE_URL` env vars or sends connectionless UDP/DNS packets can bypass user-space interception — run untrusted code inside `bubblewrap`, `sandbox-exec`, or a network-isolated container."
+        long_about = "Wrap any CLI or MCP server command with environment scrubbing, cooperative `*_BASE_URL` HTTP API inspection (`--block-secrets` / `--redact-secrets`), passive stdio/API MCP tool poisoning checks, and user-space child socket telemetry (`10ms` Linux `/proc`, `1s` macOS `ps`+`lsof`).\n\nSecurity boundary: `tap` operates without root or kernel hooks. A hostile binary that ignores `*_BASE_URL` env vars or sends connectionless UDP/DNS packets can bypass user-space interception — run untrusted code inside `bubblewrap`, `sandbox-exec`, or a network-isolated container."
     )]
     Tap(TapArgs),
 
@@ -135,6 +139,10 @@ pub struct ScanArgs {
     #[arg(long)]
     pub inspect_mcp: bool,
 
+    /// Ignore inline `# leaktap:ignore` / `// leaktap:allow` suppression comments in scanned text files
+    #[arg(long)]
+    pub no_inline_ignore: bool,
+
     /// Exit with code 1 if any finding meets or exceeds this severity (default `none` exits 0 for interactive use; pass `--fail-on high` or `--fail-on medium` in CI/pre-commit)
     #[arg(long, value_enum, default_value_t = FailThreshold::None)]
     pub fail_on: FailThreshold,
@@ -166,6 +174,10 @@ pub struct ScanArgs {
     /// Ignore all policy files
     #[arg(skip)]
     pub no_config: bool,
+
+    /// Refresh stored MCP `tools/list` schema pins
+    #[arg(skip)]
+    pub update_mcp_pins: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -290,11 +302,11 @@ pub struct TapArgs {
     #[arg(skip)]
     pub block_secrets: bool,
 
-    /// Scrub detected secrets to `[REDACTED:...]` inside outgoing LLM API requests before forwarding upstream
+    /// Scrub detected secrets to `[REDACTED_BY_LEAKTAP]` inside outgoing LLM API requests before forwarding upstream
     #[arg(skip)]
     pub redact_secrets: bool,
 
-    /// Disable best-effort OS socket polling (`10ms` Linux `/proc`, `250ms` macOS `ps`+`lsof`; TCP & connected UDP)
+    /// Disable best-effort OS socket polling (`10ms` Linux `/proc`, `1s` macOS `ps`+`lsof`; TCP & connected UDP)
     #[arg(long)]
     pub no_net_watch: bool,
 
@@ -325,6 +337,10 @@ pub struct TapArgs {
     /// Ignore all policy files
     #[arg(skip)]
     pub no_config: bool,
+
+    /// Refresh stored MCP `tools/list` schema pins
+    #[arg(skip)]
+    pub update_mcp_pins: bool,
 
     /// CLI or MCP server command and arguments to wrap
     #[arg(required = true, allow_hyphen_values = true)]
@@ -364,6 +380,7 @@ impl TapArgs {
             policy_git_ref,
             trust_project_config,
             no_config,
+            update_mcp_pins: false,
             command,
         }
     }

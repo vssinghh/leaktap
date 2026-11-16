@@ -195,6 +195,9 @@ struct PluginRegexes {
     base64_exec: Regex,
     eval_net: Regex,
     dynamic_code_exec: Regex,
+    reflective_code_exec: Regex,
+    py_empty_join: Regex,
+    js_empty_join: Regex,
     download_then_exec: Regex,
     download_output_cmd: Regex,
     cred_path_join: Regex,
@@ -243,6 +246,18 @@ fn plugin_regexes() -> &'static PluginRegexes {
             r"(?is)(?:\b(?:exec|eval)\s*\([^\n;]{0,200}\b(?:urllib|urlopen|requests\.|httpx\.|b64decode|fetch\s*\(|atob\s*\(|Buffer\.from\s*\()|\bnew\s+Function\s*\([^\n;]{0,200}\b(?:fetch|atob|Buffer\.from)\b)",
         )
         .expect("dynamic_code_exec regex"),
+        reflective_code_exec: Regex::new(
+            r#"(?i)(?:\b__import__\s*\(\s*['"](?:os|posix|subprocess|pty|socket|shutil|urllib(?:\.request)?|http(?:\.client)?|ctypes|builtins)['"]|\bimportlib\.import_module\s*\(\s*['"](?:os|posix|subprocess|pty|socket|shutil|urllib(?:\.request)?|http(?:\.client)?|ctypes|builtins)['"]|\bgetattr\s*\(\s*(?:__import__\s*\(|importlib\.import_module\s*\()|\bgetattr\s*\(\s*(?:os|posix|subprocess|shutil|builtins|__builtins__)\b[^;\n]{0,120}?['"](?:system|popen|spawn[A-Za-z]*|exec[A-Za-z]*|run|Popen|check_output|check_call|eval|compile|__import__)['"]|\b(?:__builtins__|builtins)\s*(?:\.\s*__dict__\s*)?\[\s*['"](?:eval|exec|__import__|compile|getattr)['"]\s*\]|\bglobals\s*\(\s*\)\s*\[\s*['"](?:eval|exec|__import__|getattr)['"]\s*\]|\b(?:globalThis|global|window)\s*\[\s*['"`](?:eval|Function|require|child_process)['"`]\s*\]|\bprocess\s*\.\s*(?:mainModule\s*\.\s*require|binding|dlopen)\s*\(|\bReflect\.construct\s*\(\s*Function\b|\brequire\s*\(\s*['"`](?:node:)?child_process['"`]\s*\)\s*\[\s*['"`](?:exec|execSync|spawn|spawnSync|execFile|execFileSync|fork)['"`]\s*\])"#,
+        )
+        .expect("reflective_code_exec regex"),
+        py_empty_join: Regex::new(
+            r#"(?:""|'')\s*\.\s*join\s*\(\s*\[\s*((?:['"][^'"\n\\]{1,24}['"]\s*,\s*)+['"][^'"\n\\]{1,24}['"]\s*,?)\s*\]\s*\)"#,
+        )
+        .expect("py_empty_join regex"),
+        js_empty_join: Regex::new(
+            r#"\[\s*((?:['"][^'"\n\\]{1,24}['"]\s*,\s*)+['"][^'"\n\\]{1,24}['"]\s*,?)\s*\]\s*\.\s*join\s*\(\s*(?:""|'')\s*\)"#,
+        )
+        .expect("js_empty_join regex"),
         download_then_exec: Regex::new(
             r"(?i)\b(?:curl|wget)\b[^\n;&|]{0,160}\s(?:-o|-O|>)\s*(?:/tmp/|\$TMPDIR/|\./)?[A-Za-z0-9._-]+[^\n]{0,120}(?:&&|;)\s*(?:chmod\s+\+x\s+\S+\s*(?:&&|;)\s*)?(?:sh|bash|zsh|dash|python3?|node|bun|\./|/tmp/)",
         )
@@ -308,7 +323,7 @@ fn plugin_regexes() -> &'static PluginRegexes {
         )
         .expect("sensitive_env_name regex"),
         dotenv_file_read: Regex::new(
-            r#"(?i)(?:\b(?:readFileSync|readFile|createReadStream|open|read_text|read_bytes|dotenv_values)\s*\([^\n)]{0,120}['"`/\\]\.env(?:\.[A-Za-z0-9_-]+)?['"`]|\bPath(?:\.cwd\(\))?\s*/\s*['"]\.env(?:\.[A-Za-z0-9_-]+)?['"]|\b(?:cat|Get-Content|type)\s+['"]?(?:\./|\$PWD/|\$\{PWD\}/)?\.env(?:\.[A-Za-z0-9_-]+)?\b)"#,
+            r#"(?i)(?:\b(?:readFileSync|readFile|createReadStream|open|read_text|read_bytes|dotenv_values)\s*\([^\n)]{0,120}['"`/\\]\.(?:env(?:\.[A-Za-z0-9_-]+)?|npmrc|pypirc|netrc|git-credentials|pgpass|my\.cnf|vault-token)['"`]|\bPath\s*\([^\n)]{0,120}['"`/\\]\.(?:env(?:\.[A-Za-z0-9_-]+)?|npmrc|pypirc|netrc|git-credentials|pgpass|my\.cnf|vault-token)['"`]\s*\)\s*\.\s*(?:read_text|read_bytes|open)\b|\bPath(?:\.cwd\(\))?\s*/\s*['"]\.(?:env(?:\.[A-Za-z0-9_-]+)?|npmrc|pypirc|netrc|git-credentials)['"]|\b(?:cat|Get-Content|type)\s+['"]?(?:\./|\$PWD/|\$\{PWD\}/)?\.(?:env(?:\.[A-Za-z0-9_-]+)?|npmrc|pypirc|netrc|git-credentials)\b)"#,
         )
         .expect("dotenv_file_read regex"),
     })
@@ -802,7 +817,7 @@ fn audit_single_plugin_file(
                     config_file: display.clone(),
                     config_path: logical_path.to_path_buf(),
                     line: net_line.max(1),
-                    severity: Severity::High,
+                    severity: Severity::Medium,
                     fingerprint: fp,
                     message: format!(
                         "Skill or plugin script makes an outbound network call ({target_desc}) — inspect script inputs for data exfiltration"
@@ -2612,7 +2627,7 @@ fn split_shell_tokens(cmd: &str) -> Vec<String> {
 }
 
 pub fn detect_external_network_call(text: &str) -> Option<String> {
-    let code = strip_code_comments(text);
+    let code = collapse_adjacent_string_literals(&strip_code_comments(text));
     let re = plugin_regexes();
     let valid_matches: Vec<(usize, usize)> = re
         .net_call
@@ -2817,6 +2832,200 @@ fn map_folded_line(line_map: &[usize], folded_one_based_line: usize) -> usize {
         .unwrap_or(1)
 }
 
+fn scan_single_quoted_literal(s: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    let quote = *bytes.get(start)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let mut inner = String::new();
+    let mut idx = start + 1;
+    let max_end = (start + 512).min(bytes.len());
+    while idx < max_end {
+        let ch = s[idx..].chars().next()?;
+        let clen = ch.len_utf8();
+        if ch == '\n' || ch == '\r' {
+            return None;
+        }
+        if ch == '\\' {
+            let next_idx = idx + clen;
+            let next_ch = s.get(next_idx..)?.chars().next()?;
+            if next_ch == '\n' || next_ch == '\r' {
+                return None;
+            }
+            if next_ch == '"' || next_ch == '\'' {
+                inner.push(next_ch);
+            } else {
+                inner.push('\\');
+                inner.push(next_ch);
+            }
+            idx = next_idx + next_ch.len_utf8();
+            continue;
+        }
+        if ch as u8 == quote && clen == 1 {
+            return Some((inner, idx + 1));
+        }
+        inner.push(ch);
+        idx += clen;
+    }
+    None
+}
+
+fn extract_comma_joined_string_items(items_raw: &str) -> Option<String> {
+    let mut acc = String::new();
+    for part in items_raw.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let q = t.as_bytes()[0];
+        if (q != b'"' && q != b'\'') || t.len() < 2 || t.as_bytes()[t.len() - 1] != q {
+            return None;
+        }
+        acc.push_str(&t[1..t.len() - 1]);
+    }
+    if acc.is_empty() {
+        None
+    } else {
+        Some(acc)
+    }
+}
+
+fn collapse_array_char_joins(raw: &str) -> String {
+    if !raw.contains("join") {
+        return raw.to_string();
+    }
+    let re = plugin_regexes();
+    let after_py = re.py_empty_join.replace_all(raw, |caps: &regex::Captures| {
+        if let Some(joined) = caps
+            .get(1)
+            .and_then(|m| extract_comma_joined_string_items(m.as_str()))
+        {
+            format!("\"{joined}\"")
+        } else {
+            caps[0].to_string()
+        }
+    });
+    re.js_empty_join
+        .replace_all(&after_py, |caps: &regex::Captures| {
+            if let Some(joined) = caps
+                .get(1)
+                .and_then(|m| extract_comma_joined_string_items(m.as_str()))
+            {
+                format!("\"{joined}\"")
+            } else {
+                caps[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
+/// Folds adjacent string-literal concatenations (`"sys" + "tem"` -> `"system"`,
+/// `'child_' + 'process'` -> `'child_process'`, and `"".join(["s","y","s"])` -> `"sys"`)
+/// while preserving exact `\n` counts so downstream line numbers remain accurate.
+pub(crate) fn collapse_adjacent_string_literals(raw: &str) -> String {
+    let joined = collapse_array_char_joins(raw);
+    if !joined.contains('+') {
+        return joined;
+    }
+    let bytes = joined.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0usize;
+
+    while i < len {
+        let ch = joined[i..].chars().next().expect("valid utf8");
+        if ch != '"' && ch != '\'' {
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if i + 2 < len && bytes[i + 1] == ch as u8 && bytes[i + 2] == ch as u8 {
+            out.push(ch);
+            out.push(ch);
+            out.push(ch);
+            i += 3;
+            continue;
+        }
+        let open_quote = ch;
+        let Some((first_inner, after_first)) = scan_single_quoted_literal(&joined, i) else {
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+
+        let mut merged_inner = first_inner;
+        let mut cursor = after_first;
+        let mut trailing_newlines = 0usize;
+        let mut did_merge = false;
+
+        loop {
+            let mut probe = cursor;
+            let mut nl_here = 0usize;
+            while probe < len {
+                match bytes[probe] {
+                    b' ' | b'\t' | b'\r' => probe += 1,
+                    b'\n' => {
+                        nl_here += 1;
+                        probe += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if probe >= len || bytes[probe] != b'+' {
+                break;
+            }
+            probe += 1;
+            if probe < len && (bytes[probe] == b'=' || bytes[probe] == b'+') {
+                break;
+            }
+            while probe < len {
+                match bytes[probe] {
+                    b' ' | b'\t' | b'\r' => probe += 1,
+                    b'\n' => {
+                        nl_here += 1;
+                        probe += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if probe >= len || (bytes[probe] != b'"' && bytes[probe] != b'\'') {
+                break;
+            }
+            let q2 = bytes[probe];
+            if probe + 2 < len && bytes[probe + 1] == q2 && bytes[probe + 2] == q2 {
+                break;
+            }
+            let Some((next_inner, after_next)) = scan_single_quoted_literal(&joined, probe) else {
+                break;
+            };
+            merged_inner.push_str(&next_inner);
+            trailing_newlines += nl_here;
+            cursor = after_next;
+            did_merge = true;
+        }
+
+        if did_merge {
+            out.push(open_quote);
+            for mc in merged_inner.chars() {
+                if mc == open_quote {
+                    out.push('\\');
+                }
+                out.push(mc);
+            }
+            out.push(open_quote);
+            for _ in 0..trailing_newlines {
+                out.push('\n');
+            }
+            i = cursor;
+        } else {
+            out.push_str(&joined[i..after_first]);
+            i = after_first;
+        }
+    }
+    out
+}
+
 pub fn decode_powershell_encoded_commands(text: &str) -> Vec<(usize, String)> {
     let re = plugin_regexes();
     let mut out = Vec::new();
@@ -2865,25 +3074,29 @@ pub fn decode_powershell_encoded_commands(text: &str) -> Vec<(usize, String)> {
 
 pub fn detect_inline_rce(raw: &str) -> Option<String> {
     let (folded, _) = fold_backslash_continuations(raw);
+    let collapsed = collapse_adjacent_string_literals(&folded);
     let re = plugin_regexes();
     if let Some(m) = re
         .pipe_to_shell
-        .find(&folded)
-        .or_else(|| re.ps_download_exec.find(&folded))
-        .or_else(|| re.base64_exec.find(&folded))
-        .or_else(|| re.eval_net.find(&folded))
-        .or_else(|| re.dynamic_code_exec.find(&folded))
-        .or_else(|| re.download_then_exec.find(&folded))
+        .find(&collapsed)
+        .or_else(|| re.ps_download_exec.find(&collapsed))
+        .or_else(|| re.base64_exec.find(&collapsed))
+        .or_else(|| re.eval_net.find(&collapsed))
+        .or_else(|| re.dynamic_code_exec.find(&collapsed))
+        .or_else(|| re.reflective_code_exec.find(&collapsed))
+        .or_else(|| re.download_then_exec.find(&collapsed))
     {
         return Some(truncate_snippet(m.as_str().trim(), 64));
     }
     for (_, decoded_ps) in decode_powershell_encoded_commands(&folded) {
+        let dec_collapsed = collapse_adjacent_string_literals(&decoded_ps);
         if let Some(m) = re
             .ps_download_exec
-            .find(&decoded_ps)
-            .or_else(|| re.pipe_to_shell.find(&decoded_ps))
-            .or_else(|| re.dynamic_code_exec.find(&decoded_ps))
-            .or_else(|| re.download_then_exec.find(&decoded_ps))
+            .find(&dec_collapsed)
+            .or_else(|| re.pipe_to_shell.find(&dec_collapsed))
+            .or_else(|| re.dynamic_code_exec.find(&dec_collapsed))
+            .or_else(|| re.reflective_code_exec.find(&dec_collapsed))
+            .or_else(|| re.download_then_exec.find(&dec_collapsed))
         {
             return Some(format!(
                 "EncodedCommand: {}",
@@ -3145,7 +3358,8 @@ fn detect_multiline_download_then_exec(
 }
 
 pub fn detect_credential_store_ref(raw: &str) -> Option<&'static str> {
-    let (folded, _) = fold_backslash_continuations(raw);
+    let (folded_raw, _) = fold_backslash_continuations(raw);
+    let folded = collapse_adjacent_string_literals(&folded_raw);
     let lower = folded.to_ascii_lowercase();
     for &(needle, human_target) in CREDENTIAL_HARVEST_PATTERNS {
         for (byte_idx, _) in lower.match_indices(needle) {
@@ -3158,8 +3372,9 @@ pub fn detect_credential_store_ref(raw: &str) -> Option<&'static str> {
     if let Some(mat) = re.cred_path_join.find(&folded) {
         return Some(describe_joined_cred_target(mat.as_str()));
     }
-    for (_, decoded_ps) in decode_powershell_encoded_commands(&folded) {
-        let ps_lower = decoded_ps.to_ascii_lowercase();
+    for (_, decoded_ps) in decode_powershell_encoded_commands(&folded_raw) {
+        let ps_collapsed = collapse_adjacent_string_literals(&decoded_ps);
+        let ps_lower = ps_collapsed.to_ascii_lowercase();
         for &(needle, human_target) in CREDENTIAL_HARVEST_PATTERNS {
             if ps_lower.contains(needle) {
                 return Some(human_target);
@@ -3181,6 +3396,7 @@ fn check_remote_code_exec(
     seen_fp: &mut HashSet<String>,
 ) {
     let (folded, line_map) = fold_backslash_continuations(raw);
+    let collapsed = collapse_adjacent_string_literals(&folded);
     let re = plugin_regexes();
     let rce_regexes = [
         &re.pipe_to_shell,
@@ -3193,9 +3409,9 @@ fn check_remote_code_exec(
 
     if !is_prompt_doc {
         for rx in rce_regexes {
-            if let Some(m) = rx.find(&folded) {
+            if let Some(m) = rx.find(&collapsed) {
                 let snippet = truncate_snippet(m.as_str().trim(), 64);
-                let folded_ln = line_at_offset(&folded, m.start());
+                let folded_ln = line_at_offset(&collapsed, m.start());
                 let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
                 let fp =
                     fingerprint_match("plugin-remote-code-exec", &format!("{display}:{snippet}"));
@@ -3244,7 +3460,9 @@ fn check_remote_code_exec(
                 return;
             }
         }
-        if let Some((folded_ln, desc)) = detect_multiline_download_then_exec(&folded, false, None) {
+        if let Some((folded_ln, desc)) =
+            detect_multiline_download_then_exec(&collapsed, false, None)
+        {
             let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
             let fp = fingerprint_match("plugin-remote-code-exec", &format!("{display}:{desc}"));
             push_finding(
@@ -3263,15 +3481,39 @@ fn check_remote_code_exec(
                     ),
                 },
             );
+            return;
+        }
+        let code_no_comments = strip_code_comments(&collapsed);
+        if let Some(m) = re.reflective_code_exec.find(&code_no_comments) {
+            let snippet = truncate_snippet(m.as_str().trim(), 64);
+            let folded_ln = line_at_offset(&code_no_comments, m.start());
+            let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
+            let fp = fingerprint_match("plugin-dynamic-code-exec", &format!("{display}:{snippet}"));
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "plugin-dynamic-code-exec",
+                    server_name: label.to_string(),
+                    config_file: display.to_string(),
+                    config_path: path.to_path_buf(),
+                    line,
+                    severity: Severity::High,
+                    fingerprint: fp,
+                    message: format!(
+                        "Uses reflective or dynamic code execution (`{snippet}`) inside plugin/hook/skill"
+                    ),
+                },
+            );
         }
         return;
     }
 
-    let line_meta = build_prompt_line_defensive_states(&folded);
+    let line_meta = build_prompt_line_defensive_states(&collapsed);
 
     for rx in rce_regexes {
-        for m in rx.find_iter(&folded) {
-            let folded_ln = line_at_offset(&folded, m.start());
+        for m in rx.find_iter(&collapsed) {
+            let folded_ln = line_at_offset(&collapsed, m.start());
             let line_idx = folded_ln.saturating_sub(1);
             if let Some(info) = line_meta.get(line_idx) {
                 let col_byte = m.start().saturating_sub(info.line_start_byte);
@@ -3336,7 +3578,7 @@ fn check_remote_code_exec(
     }
 
     if let Some((folded_ln, desc)) =
-        detect_multiline_download_then_exec(&folded, true, Some(&line_meta))
+        detect_multiline_download_then_exec(&collapsed, true, Some(&line_meta))
     {
         let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
         let fp = fingerprint_match("plugin-remote-code-exec", &format!("{display}:{desc}"));
@@ -3356,6 +3598,44 @@ fn check_remote_code_exec(
                 ),
             },
         );
+        return;
+    }
+
+    for m in re.reflective_code_exec.find_iter(&collapsed) {
+        let folded_ln = line_at_offset(&collapsed, m.start());
+        let line_idx = folded_ln.saturating_sub(1);
+        if let Some(info) = line_meta.get(line_idx) {
+            let col_byte = m.start().saturating_sub(info.line_start_byte);
+            if is_rce_explicitly_prohibited_on_line(&info.lower_line, col_byte)
+                || is_target_defensively_negated_on_line(
+                    &info.lower_line,
+                    col_byte,
+                    info.in_defensive_list,
+                )
+            {
+                continue;
+            }
+        }
+        let snippet = truncate_snippet(m.as_str().trim(), 64);
+        let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
+        let fp = fingerprint_match("plugin-dynamic-code-exec", &format!("{display}:{snippet}"));
+        push_finding(
+            out,
+            seen_fp,
+            McpFinding {
+                rule_id: "plugin-dynamic-code-exec",
+                server_name: label.to_string(),
+                config_file: display.to_string(),
+                config_path: path.to_path_buf(),
+                line,
+                severity: Severity::High,
+                fingerprint: fp,
+                message: format!(
+                    "Instruction file embeds reflective or dynamic code execution (`{snippet}`)"
+                ),
+            },
+        );
+        break;
     }
 }
 
@@ -4018,14 +4298,15 @@ fn check_credential_harvest(
     }
 
     let re = plugin_regexes();
-    let lower = folded.to_ascii_lowercase();
+    let folded_code = collapse_adjacent_string_literals(&folded);
+    let lower = folded_code.to_ascii_lowercase();
     for &(needle, human_target) in CREDENTIAL_HARVEST_PATTERNS {
         let mut found_line = None;
         for (byte_idx, _) in lower.match_indices(needle) {
-            if is_benign_ignore_or_filter_context(&folded, byte_idx, needle) {
+            if is_benign_ignore_or_filter_context(&folded_code, byte_idx, needle) {
                 continue;
             }
-            found_line = Some(line_at_offset(&folded, byte_idx));
+            found_line = Some(line_at_offset(&folded_code, byte_idx));
             break;
         }
         if let Some(folded_ln) = found_line {
@@ -4054,9 +4335,9 @@ fn check_credential_harvest(
         }
     }
 
-    if let Some(mat) = re.cred_path_join.find(&folded) {
+    if let Some(mat) = re.cred_path_join.find(&folded_code) {
         let human_target = describe_joined_cred_target(mat.as_str());
-        let folded_ln = line_at_offset(&folded, mat.start());
+        let folded_ln = line_at_offset(&folded_code, mat.start());
         let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
         let fp = fingerprint_match(
             "plugin-credential-harvest",
@@ -4375,7 +4656,7 @@ fn detect_code_env_exfiltration_in_block(
     block: &str,
     window_lines: usize,
 ) -> Option<(usize, String)> {
-    let stripped = strip_code_comments(block);
+    let stripped = collapse_adjacent_string_literals(&strip_code_comments(block));
     let re = plugin_regexes();
     if !re.exfil_net_sink.is_match(&stripped) {
         return None;
@@ -4814,6 +5095,81 @@ fn check_prompt_injection(
                 message: format!(
                     "Instruction file directs multi-step secret exfiltration over the network ({summary})"
                 ),
+            },
+        );
+    }
+
+    let folded_lines: Vec<&str> = folded.lines().collect();
+    for idx in 0..folded_lines.len() {
+        if line_states.get(idx).is_some_and(|st| {
+            is_target_defensively_negated_on_line(
+                &st.lower_line,
+                st.lower_line.len(),
+                st.in_defensive_list,
+            )
+        }) {
+            continue;
+        }
+        let mut win_buf = String::from(folded_lines[idx]);
+        for (next_idx, &next_line) in folded_lines
+            .iter()
+            .enumerate()
+            .take((idx + 3).min(folded_lines.len()))
+            .skip(idx + 1)
+        {
+            let next_defensive = line_states.get(next_idx).is_some_and(|st| {
+                is_target_defensively_negated_on_line(
+                    &st.lower_line,
+                    st.lower_line.len(),
+                    st.in_defensive_list,
+                )
+            });
+            if !next_defensive {
+                win_buf.push('\n');
+                win_buf.push_str(next_line);
+            }
+        }
+        if let Some(reason) = crate::mcp_inspect::detect_paraphrased_param_exfil(&win_buf) {
+            let line = base_line + map_folded_line(&line_map, idx + 1).saturating_sub(1);
+            let fp = fingerprint_match(
+                "plugin-prompt-injection",
+                &format!("{display}:param-smuggling:{reason}"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "plugin-prompt-injection",
+                    server_name: label.to_string(),
+                    config_file: display.to_string(),
+                    config_path: path.to_path_buf(),
+                    line,
+                    severity: Severity::Critical,
+                    fingerprint: fp,
+                    message: format!("Instruction file {reason}"),
+                },
+            );
+            break;
+        }
+    }
+
+    if let Some(enc_reason) = crate::mcp_inspect::detect_encoded_instruction_payload(&folded) {
+        let fp = fingerprint_match(
+            "plugin-prompt-injection",
+            &format!("{display}:encoded-injection:{enc_reason}"),
+        );
+        push_finding(
+            out,
+            seen_fp,
+            McpFinding {
+                rule_id: "plugin-prompt-injection",
+                server_name: label.to_string(),
+                config_file: display.to_string(),
+                config_path: path.to_path_buf(),
+                line: base_line,
+                severity: Severity::High,
+                fingerprint: fp,
+                message: format!("Instruction file {enc_reason}"),
             },
         );
     }

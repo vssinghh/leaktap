@@ -112,7 +112,7 @@ where
             return;
         }
         #[cfg(target_os = "macos")]
-        let poll_interval = Duration::from_millis(250);
+        let poll_interval = Duration::from_millis(1000);
         #[cfg(not(target_os = "macos"))]
         let poll_interval = Duration::from_millis(10);
 

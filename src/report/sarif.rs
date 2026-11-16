@@ -79,10 +79,22 @@ pub const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         Severity::High,
     ),
     (
+        "mcp-indirect-prompt-injection",
+        "MCP or Tool-Output Indirect Prompt Injection",
+        "MCP tools/call or LLM tool_result payload embeds hidden Unicode smuggling, override/stealth directives with credential reads, or encoded instructions.",
+        Severity::Critical,
+    ),
+    (
         "plugin-remote-code-exec",
         "Plugin Remote Code Execution",
         "Plugin, hook, or skill executes piped, encoded, or dynamically fetched remote payloads.",
         Severity::Critical,
+    ),
+    (
+        "plugin-dynamic-code-exec",
+        "Plugin Reflective or Dynamic Code Execution",
+        "Plugin, hook, MCP script, or skill uses dynamic reflection or obfuscated module/attribute lookup (__import__, getattr, importlib, globalThis, child_process bracket access) to execute code.",
+        Severity::High,
     ),
     (
         "plugin-credential-harvest",
@@ -112,7 +124,7 @@ pub const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         "plugin-skill-network",
         "Skill Script Outbound Network Call",
         "Executable skill script makes outbound network calls to non-official external endpoints.",
-        Severity::High,
+        Severity::Medium,
     ),
     (
         "plugin-hook-network",
@@ -376,7 +388,7 @@ pub fn render_scan_sarif_with_rules(report: &FullScanReport, engine: &RuleEngine
                 "locations": [loc_val]
             });
             // Privacy boundary: omit unsalted value hashes (`partialFingerprints`) on low-entropy
-            // PII findings (emails, SSNs, phone numbers, IPv4s) unless a fingerprint salt is active.
+            // context/PII findings (`pii-email`, `internal-hostname`) unless a fingerprint salt is active.
             if !is_pii || has_salt {
                 let loc_fp_seed = if let Some(sha) = commit_sha {
                     format!("{}:{sha}:{uri_str}:{loc_line}:{loc_col}", f.fingerprint)
