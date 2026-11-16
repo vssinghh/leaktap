@@ -47,6 +47,10 @@ pub struct TranscriptFinding {
     pub fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_detail: Option<String>,
     pub first_file: String,
     pub first_path: PathBuf,
     pub first_line: usize,
@@ -108,6 +112,8 @@ pub fn scan_transcripts(files: &[PathBuf], engine: &RuleEngine) -> TranscriptSca
                         masked: hit.masked.clone(),
                         fingerprint: hit.fingerprint.clone(),
                         secret_key: hit.secret_key.clone(),
+                        verified: None,
+                        verification_detail: None,
                         first_file: hit.display_file.clone(),
                         first_path: hit.file.clone(),
                         first_line: hit.line,

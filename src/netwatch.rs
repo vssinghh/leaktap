@@ -114,7 +114,7 @@ where
         #[cfg(target_os = "macos")]
         let poll_interval = Duration::from_millis(250);
         #[cfg(not(target_os = "macos"))]
-        let poll_interval = Duration::from_millis(20);
+        let poll_interval = Duration::from_millis(10);
 
         #[cfg(target_os = "macos")]
         let mut mac_cmdline_cache: std::collections::HashMap<u32, String> =
@@ -265,12 +265,13 @@ fn list_tree_sockets(
                 continue;
             }
             let state = cols[3];
-            // TCP: 01 = ESTABLISHED, 02 = SYN_SENT, 06 = TIME_WAIT (skip), 08 = CLOSE_WAIT
+            // TCP: 01=ESTABLISHED, 02=SYN_SENT, 03=SYN_RECV, 04=FIN_WAIT1, 05=FIN_WAIT2,
+            // 08=CLOSE_WAIT, 09=LAST_ACK, 0B=CLOSING (all while FD inode is still open in /proc/<pid>/fd)
             // UDP connected sockets use 01 (established) or 07 with non-zero rem_address
             let active = if allow_udp_states {
                 state == "01" || state == "07"
             } else {
-                state == "01" || state == "02" || state == "08"
+                matches!(state, "01" | "02" | "03" | "04" | "05" | "08" | "09" | "0B")
             };
             if !active {
                 continue;
@@ -278,6 +279,9 @@ fn list_tree_sockets(
             let Ok(inode) = cols[9].parse::<u64>() else {
                 continue;
             };
+            if inode == 0 {
+                continue;
+            }
             let Some(owner) = inode_owner.get(&inode) else {
                 continue;
             };
@@ -328,7 +332,7 @@ fn list_tree_sockets(
             let active = if allow_udp_states {
                 state == "01" || state == "07"
             } else {
-                state == "01" || state == "02" || state == "08"
+                matches!(state, "01" | "02" | "03" | "04" | "05" | "08" | "09" | "0B")
             };
             if !active {
                 continue;
@@ -336,6 +340,9 @@ fn list_tree_sockets(
             let Ok(inode) = cols[9].parse::<u64>() else {
                 continue;
             };
+            if inode == 0 {
+                continue;
+            }
             let Some(owner) = inode_owner.get(&inode) else {
                 continue;
             };

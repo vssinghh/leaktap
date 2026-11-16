@@ -1,8 +1,9 @@
-use crate::api_tap::{start_local_api_tap, TapCallback};
+use crate::api_tap::{start_local_api_tap_with_options, TapCallback};
 use crate::cli::TapArgs;
 use crate::config::PolicyConfig;
 use crate::discovery::home_dir;
 use crate::header_audit::HeaderAuditor;
+use crate::mcp_inspect::audit_mcp_tools_payload;
 use crate::netwatch::{
     disable_process_dumpable, enable_child_subreaper, reap_reparented_zombies,
     reap_reparented_zombies_except, spawn_socket_watcher, OS_SOCKET_WATCH_SUPPORTED,
@@ -176,9 +177,11 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         inherit_tty && !is_info_only && !is_oneshot_cli_invocation(program, cmd_args);
 
     let block_secrets_enabled = args.block_secrets || env_flag_enabled("LEAKTAP_BLOCK_SECRETS");
+    let redact_secrets_enabled = args.redact_secrets || env_flag_enabled("LEAKTAP_REDACT_SECRETS");
     let scrub_env_enabled = args.scrub_env && !args.no_scrub_env;
-    let inspect_api_enabled =
-        (args.inspect_api || block_secrets_enabled) && !args.no_inspect_api && !is_info_only;
+    let inspect_api_enabled = (args.inspect_api || block_secrets_enabled || redact_secrets_enabled)
+        && !args.no_inspect_api
+        && !is_info_only;
 
     let policy = PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
@@ -272,13 +275,14 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             .or_else(|_| env::var("GEMINI_API_BASE_URL"))
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
 
-        let tap = start_local_api_tap(
+        let tap = start_local_api_tap_with_options(
             anth_upstream,
             oai_upstream,
             chatgpt_upstream,
             openai_explicit,
             gemini_upstream,
             block_secrets_enabled,
+            redact_secrets_enabled,
             Arc::clone(&engine),
             Arc::clone(&header_auditor),
             Arc::clone(&emit_cb),
@@ -371,6 +375,10 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
         cmd.env("GOOGLE_GEMINI_BASE_URL", &tap.gemini_base_url);
         cmd.env("GEMINI_API_BASE_URL", &tap.gemini_base_url);
+        cmd.env("OPENROUTER_BASE_URL", &tap.openrouter_base_url);
+        cmd.env("DEEPSEEK_BASE_URL", &tap.deepseek_base_url);
+        cmd.env("XAI_BASE_URL", &tap.xai_base_url);
+        cmd.env("GROQ_BASE_URL", &tap.groq_base_url);
         let no_proxy = build_loopback_no_proxy();
         cmd.env("NO_PROXY", &no_proxy);
         cmd.env("no_proxy", &no_proxy);
@@ -379,6 +387,8 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     if is_fullscreen_tui && !args.quiet {
         let mode_label = if block_secrets_enabled {
             "active secret blocking enabled"
+        } else if redact_secrets_enabled {
+            "in-transit secret redaction enabled"
         } else {
             "audit mode"
         };
@@ -713,6 +723,33 @@ fn inspect_chunk(
             );
         }
     }
+
+    // Passively audit MCP `tools/list` JSON-RPC responses crossing stdio streams
+    if text.contains("\"tools\"") && text.contains("\"jsonrpc\"") {
+        let json_cand = text.trim();
+        if json_cand.starts_with('{') {
+            if let Ok(rpc_val) = serde_json::from_str::<serde_json::Value>(json_cand) {
+                let mut mcp_findings = Vec::new();
+                audit_mcp_tools_payload(
+                    "stdio-mcp",
+                    stream_name,
+                    Path::new(stream_name),
+                    &rpc_val,
+                    true,
+                    &mut mcp_findings,
+                );
+                for mf in mcp_findings {
+                    emit(
+                        stream_name,
+                        "mcp_tool_risk",
+                        mf.rule_id,
+                        mf.severity.as_str(),
+                        mf.message,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn parse_probable_http_header(line: &str) -> Option<(&str, &str)> {
@@ -1029,6 +1066,10 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
                     | "OPENAI_BASE_URL"
                     | "GOOGLE_GEMINI_BASE_URL"
                     | "GEMINI_API_BASE_URL"
+                    | "OPENROUTER_BASE_URL"
+                    | "DEEPSEEK_BASE_URL"
+                    | "XAI_BASE_URL"
+                    | "GROQ_BASE_URL"
                     | "CLAUDE_CODE_USE_BEDROCK"
                     | "CLAUDE_CODE_USE_VERTEX"
                     | "CLAUDE_CODE_USE_FOUNDRY"
@@ -1105,6 +1146,10 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
                         | "ANTHROPIC_BASE_URL"
                         | "GOOGLE_GEMINI_BASE_URL"
                         | "GEMINI_API_BASE_URL"
+                        | "OPENROUTER_BASE_URL"
+                        | "DEEPSEEK_BASE_URL"
+                        | "XAI_BASE_URL"
+                        | "GROQ_BASE_URL"
                 ) {
                     warnings.push(format!(
                         "`{}` defines `{k}` in env settings, which can override `leaktap`'s local API tap URL",

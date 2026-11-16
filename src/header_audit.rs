@@ -9,6 +9,10 @@ pub enum UpstreamProvider {
     Anthropic,
     OpenAi,
     Gemini,
+    OpenRouter,
+    DeepSeek,
+    Xai,
+    Groq,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +302,27 @@ fn is_expected_provider_auth(
                 || raw_cred.starts_with("ya29.")
                 || is_jwt_with_issuer_markers(raw_cred, &["accounts.google.com", "googleapis.com"])
                 || matches_env_vars(raw_cred, &["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+        }
+        UpstreamProvider::OpenRouter => {
+            matches!(lower_header_name, "authorization" | "x-api-key")
+                && (raw_cred.starts_with("sk-or-v1-")
+                    || matches_env_vars(raw_cred, &["OPENROUTER_API_KEY"]))
+        }
+        UpstreamProvider::DeepSeek => {
+            matches!(lower_header_name, "authorization" | "x-api-key")
+                && ((raw_cred.starts_with("sk-")
+                    && !raw_cred.starts_with("sk-ant-")
+                    && !raw_cred.starts_with("sk_live_")
+                    && !raw_cred.starts_with("sk-or-v1-"))
+                    || matches_env_vars(raw_cred, &["DEEPSEEK_API_KEY"]))
+        }
+        UpstreamProvider::Xai => {
+            matches!(lower_header_name, "authorization" | "x-api-key")
+                && (raw_cred.starts_with("xai-") || matches_env_vars(raw_cred, &["XAI_API_KEY"]))
+        }
+        UpstreamProvider::Groq => {
+            matches!(lower_header_name, "authorization" | "x-api-key")
+                && (raw_cred.starts_with("gsk_") || matches_env_vars(raw_cred, &["GROQ_API_KEY"]))
         }
     }
 }

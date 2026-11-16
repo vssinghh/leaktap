@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod git_scan;
 pub mod header_audit;
 pub mod mcp_audit;
+pub mod mcp_inspect;
 pub mod netwatch;
 pub mod plugin_audit;
 pub mod report;
@@ -13,6 +14,7 @@ pub mod rules;
 pub mod scanner;
 pub mod tap;
 pub mod tui;
+pub mod verify;
 
 use crate::cleaner::clean_transcripts_with_policy;
 use crate::cli::{
@@ -22,6 +24,7 @@ use crate::config::{is_ci_environment, PolicyConfig};
 use crate::discovery::{discover_clean_targets_with_policy, discover_targets_with_all_and_policy};
 use crate::git_scan::run_git_scan;
 use crate::mcp_audit::audit_mcp_configs_with_policy;
+use crate::mcp_inspect::inspect_live_mcp_configs;
 use crate::plugin_audit::audit_plugin_files_with_policy;
 use crate::report::json::render_scan_json;
 use crate::report::sarif::{render_rules_json, render_scan_sarif_with_rules};
@@ -31,6 +34,7 @@ use crate::rules::{RuleEngine, Severity};
 use crate::scanner::scan_transcripts;
 use crate::tap::run_tap;
 use crate::tui::run_ui;
+use crate::verify::verify_secret_findings;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -41,6 +45,7 @@ pub fn execute(cli: Cli) -> i32 {
     let global_trust_project_config = cli.trust_project_config;
     let global_no_config = cli.no_config;
     let global_block_secrets = cli.block_secrets;
+    let global_redact_secrets = cli.redact_secrets;
     let global_scrub_ssh_agent = cli.scrub_ssh_agent;
     let global_allow_env = cli.allow_env;
 
@@ -102,52 +107,69 @@ pub fn execute(cli: Cli) -> i32 {
                 }
             }
         }
-        Commands::Claude(args) => execute_tap(&TapArgs::for_direct_cli(
-            "claude",
-            args.args,
-            global_block_secrets,
-            global_scrub_ssh_agent,
-            global_allow_env,
-            global_config,
-            global_policy_git_ref,
-            global_trust_project_config,
-            global_no_config,
-        )),
-        Commands::Codex(args) => execute_tap(&TapArgs::for_direct_cli(
-            "codex",
-            args.args,
-            global_block_secrets,
-            global_scrub_ssh_agent,
-            global_allow_env,
-            global_config,
-            global_policy_git_ref,
-            global_trust_project_config,
-            global_no_config,
-        )),
-        Commands::Agy(args) => execute_tap(&TapArgs::for_direct_cli(
-            "agy",
-            args.args,
-            global_block_secrets,
-            global_scrub_ssh_agent,
-            global_allow_env,
-            global_config,
-            global_policy_git_ref,
-            global_trust_project_config,
-            global_no_config,
-        )),
-        Commands::Gemini(args) => execute_tap(&TapArgs::for_direct_cli(
-            "gemini",
-            args.args,
-            global_block_secrets,
-            global_scrub_ssh_agent,
-            global_allow_env,
-            global_config,
-            global_policy_git_ref,
-            global_trust_project_config,
-            global_no_config,
-        )),
+        Commands::Claude(args) => {
+            let mut tap_args = TapArgs::for_direct_cli(
+                "claude",
+                args.args,
+                global_block_secrets,
+                global_scrub_ssh_agent,
+                global_allow_env,
+                global_config,
+                global_policy_git_ref,
+                global_trust_project_config,
+                global_no_config,
+            );
+            tap_args.redact_secrets = global_redact_secrets;
+            execute_tap(&tap_args)
+        }
+        Commands::Codex(args) => {
+            let mut tap_args = TapArgs::for_direct_cli(
+                "codex",
+                args.args,
+                global_block_secrets,
+                global_scrub_ssh_agent,
+                global_allow_env,
+                global_config,
+                global_policy_git_ref,
+                global_trust_project_config,
+                global_no_config,
+            );
+            tap_args.redact_secrets = global_redact_secrets;
+            execute_tap(&tap_args)
+        }
+        Commands::Agy(args) => {
+            let mut tap_args = TapArgs::for_direct_cli(
+                "agy",
+                args.args,
+                global_block_secrets,
+                global_scrub_ssh_agent,
+                global_allow_env,
+                global_config,
+                global_policy_git_ref,
+                global_trust_project_config,
+                global_no_config,
+            );
+            tap_args.redact_secrets = global_redact_secrets;
+            execute_tap(&tap_args)
+        }
+        Commands::Gemini(args) => {
+            let mut tap_args = TapArgs::for_direct_cli(
+                "gemini",
+                args.args,
+                global_block_secrets,
+                global_scrub_ssh_agent,
+                global_allow_env,
+                global_config,
+                global_policy_git_ref,
+                global_trust_project_config,
+                global_no_config,
+            );
+            tap_args.redact_secrets = global_redact_secrets;
+            execute_tap(&tap_args)
+        }
         Commands::Tap(mut args) => {
             args.block_secrets |= global_block_secrets;
+            args.redact_secrets |= global_redact_secrets;
             args.scrub_ssh_agent |= global_scrub_ssh_agent;
             args.trust_project_config |= global_trust_project_config;
             args.no_config |= global_no_config;
@@ -275,9 +297,10 @@ pub fn run_scan_report(args: &ScanArgs) -> FullScanReport {
 pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> FullScanReport {
     let started = Instant::now();
     let engine = RuleEngine::with_policy(!args.no_pii, Some(policy));
+    let active_checks = args.verify || (args.inspect_mcp && !args.no_mcp);
 
     if args.staged || args.git_history {
-        let git_out = run_git_scan(
+        let mut git_out = run_git_scan(
             &args.paths,
             args.staged,
             args.git_history,
@@ -286,12 +309,16 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
             &engine,
             Some(policy),
         );
+        if args.verify {
+            verify_secret_findings(&mut git_out.transcripts.secret_findings, &engine);
+        }
 
         return FullScanReport {
             roots: git_out.roots,
             scan_paths: args.paths.clone(),
             mcp_files_scanned: git_out.mcp_files_scanned,
             mcp_bytes_scanned: git_out.mcp_bytes_scanned,
+            active_checks,
             duration: started.elapsed(),
             transcripts: git_out.transcripts,
             mcp_findings: git_out.mcp_findings,
@@ -300,18 +327,44 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
 
     let targets =
         discover_targets_with_all_and_policy(&args.paths, args.all, !args.no_mcp, Some(policy));
-    let transcripts = scan_transcripts(&targets.transcript_files, &engine);
-    let (mcp_findings, mcp_files_scanned, mcp_bytes_scanned) = if args.no_mcp {
+    let mut transcripts = scan_transcripts(&targets.transcript_files, &engine);
+    if args.verify {
+        verify_secret_findings(&mut transcripts.secret_findings, &engine);
+    }
+
+    let (mut mcp_findings, mcp_files_scanned, mcp_bytes_scanned) = if args.no_mcp {
         (Vec::new(), 0, 0)
     } else {
         audit_discovered_mcp_and_plugins(&targets.mcp_config_files, &targets.plugin_files, policy)
     };
+
+    if args.inspect_mcp && !args.no_mcp {
+        let mut seen_fp: HashSet<String> =
+            mcp_findings.iter().map(|f| f.fingerprint.clone()).collect();
+        for lf in inspect_live_mcp_configs(
+            &targets.mcp_config_files,
+            args.trust_project_config,
+            Some(policy),
+        ) {
+            if seen_fp.insert(lf.fingerprint.clone()) {
+                mcp_findings.push(lf);
+            }
+        }
+        mcp_findings.sort_by(|a, b| {
+            b.severity
+                .cmp(&a.severity)
+                .then_with(|| a.config_file.cmp(&b.config_file))
+                .then_with(|| a.line.cmp(&b.line))
+                .then_with(|| a.server_name.cmp(&b.server_name))
+        });
+    }
 
     FullScanReport {
         roots: targets.scanned_roots,
         scan_paths: args.paths.clone(),
         mcp_files_scanned,
         mcp_bytes_scanned,
+        active_checks,
         duration: started.elapsed(),
         transcripts,
         mcp_findings,

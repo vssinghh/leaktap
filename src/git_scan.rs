@@ -1290,6 +1290,7 @@ fn stream_unified_diff(
     let mut current_abs_file: Option<PathBuf> = None;
     let mut current_doc_hints = crate::rules::DocHints::default();
     let mut current_checked_doc_blob = false;
+    let mut current_blob_text: Option<String> = None;
     let mut k8s_tracker = crate::rules::K8sDataTracker::default();
     let mut skip_current_file = false;
     let mut in_hunk = false;
@@ -1390,6 +1391,7 @@ fn stream_unified_diff(
             current_abs_file = None;
             current_doc_hints = crate::rules::DocHints::default();
             current_checked_doc_blob = false;
+            current_blob_text = None;
             k8s_tracker = crate::rules::K8sDataTracker::default();
             in_hunk = false;
             continue;
@@ -1413,6 +1415,7 @@ fn stream_unified_diff(
             current_abs_file = None;
             current_doc_hints = crate::rules::DocHints::default();
             current_checked_doc_blob = false;
+            current_blob_text = None;
             k8s_tracker = crate::rules::K8sDataTracker::default();
             skip_current_file = false;
             in_hunk = false;
@@ -1452,6 +1455,7 @@ fn stream_unified_diff(
             if let Some(rest) = line.strip_prefix("+++ ") {
                 current_doc_hints = crate::rules::DocHints::default();
                 current_checked_doc_blob = false;
+                current_blob_text = None;
                 k8s_tracker = crate::rules::K8sDataTracker::default();
                 if rest == "/dev/null" {
                     current_rel_file = None;
@@ -1489,6 +1493,38 @@ fn stream_unified_diff(
             );
             in_hunk = true;
             current_new_line = parse_hunk_new_start(line).unwrap_or(1);
+            if !skip_current_file {
+                if let Some(ref rel) = current_rel_file {
+                    let lower_rel = rel.to_ascii_lowercase();
+                    let is_structured_manifest = lower_rel.ends_with(".yaml")
+                        || lower_rel.ends_with(".yml")
+                        || lower_rel.ends_with(".json");
+                    if is_structured_manifest && !current_checked_doc_blob {
+                        current_checked_doc_blob = true;
+                        let spec = match &current_commit {
+                            Some(sha) => format!("{sha}:{rel}"),
+                            None => format!(":{rel}"),
+                        };
+                        if let Some(blob) =
+                            run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 512 * 1024)
+                        {
+                            let blob_str = String::from_utf8_lossy(&blob).into_owned();
+                            current_doc_hints = current_doc_hints
+                                .merge(crate::rules::DocHints::from_text(&blob_str));
+                            if contains_gcp_sa_markers(&blob_str) {
+                                current_doc_hints.has_gcp_sa = true;
+                            }
+                            current_blob_text = Some(blob_str);
+                        }
+                    }
+                }
+                if let Some(ref blob_str) = current_blob_text {
+                    k8s_tracker = crate::rules::K8sDataTracker::default();
+                    for prev_line in blob_str.lines().take(current_new_line.saturating_sub(1)) {
+                        let _ = k8s_tracker.observe_line(prev_line);
+                    }
+                }
+            }
             continue;
         }
 
@@ -1528,14 +1564,19 @@ fn stream_unified_diff(
                     None => format!(":{rel}"),
                 };
                 if let Some(blob) =
-                    run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 256 * 1024)
+                    run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 512 * 1024)
                 {
-                    let blob_text = String::from_utf8_lossy(&blob);
+                    let blob_str = String::from_utf8_lossy(&blob).into_owned();
                     current_doc_hints =
-                        current_doc_hints.merge(crate::rules::DocHints::from_text(&blob_text));
-                    if contains_gcp_sa_markers(&blob_text) {
+                        current_doc_hints.merge(crate::rules::DocHints::from_text(&blob_str));
+                    if contains_gcp_sa_markers(&blob_str) {
                         current_doc_hints.has_gcp_sa = true;
                     }
+                    k8s_tracker = crate::rules::K8sDataTracker::default();
+                    for prev_line in blob_str.lines().take(line_no.saturating_sub(1)) {
+                        let _ = k8s_tracker.observe_line(prev_line);
+                    }
+                    current_blob_text = Some(blob_str);
                 }
             }
 
@@ -1740,7 +1781,12 @@ fn stream_unified_diff(
                 if contains_gcp_sa_markers(ctx) {
                     current_doc_hints.has_gcp_sa = true;
                 }
-                if current_doc_hints.is_k8s_secret_manifest {
+                if current_doc_hints.is_k8s_secret_manifest
+                    || k8s_tracker.is_tracking()
+                    || ctx.contains("kind:")
+                    || ctx.contains("\"kind\"")
+                    || ctx.trim() == "---"
+                {
                     let _ = k8s_tracker.observe_line(ctx);
                 }
             }
@@ -1844,6 +1890,8 @@ fn group_git_hits(
                     rule_id: hit.rule_id.clone(),
                     rule_name: hit.rule_name.clone(),
                     secret_key: hit.secret_key.clone(),
+                    verified: None,
+                    verification_detail: None,
                     severity: hit.severity,
                     category: hit.category,
                     masked: hit.masked.clone(),

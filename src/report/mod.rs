@@ -13,6 +13,7 @@ pub struct FullScanReport {
     pub scan_paths: Vec<PathBuf>,
     pub mcp_files_scanned: usize,
     pub mcp_bytes_scanned: u64,
+    pub active_checks: bool,
     pub duration: Duration,
     pub transcripts: TranscriptScanResult,
     pub mcp_findings: Vec<McpFinding>,

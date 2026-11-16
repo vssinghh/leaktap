@@ -2040,13 +2040,13 @@ fn is_auditable_local_script_arg(arg: &str) -> bool {
         || arg.ends_with(".cmd")
 }
 
-/// Returns `Some((wrapped_cmd, wrapped_args))` when `sh/bash/zsh -lc "exec ~/.nvm/.../node ./mcp.js"`
+/// Returns `Some((wrapped_cmd, wrapped_args, inner_priv))` when `sh/bash/zsh -lc "exec ~/.nvm/.../node ./mcp.js"`
 /// is a simple single-command local launcher wrapper with no shell chaining, pipes, command
 /// substitution, redirection, inline RCE, credential-store access, or external network call.
 fn parse_benign_single_command_shell_wrapper(
     is_posix_shell: bool,
     eff_args: &[&str],
-) -> Option<(String, Vec<String>)> {
+) -> Option<(String, Vec<String>, Option<String>)> {
     if !is_posix_shell || eff_args.len() != 2 || !is_posix_shell_inline_flag(eff_args[0]) {
         return None;
     }
@@ -2088,8 +2088,8 @@ fn parse_benign_single_command_shell_wrapper(
 
     let raw_wrapped_cmd = tokens.remove(0);
     let raw_wrapped_refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
-    let (wrapped_cmd, unwrapped_tokens) =
-        unwrap_command_launchers(&raw_wrapped_cmd, &raw_wrapped_refs);
+    let (wrapped_cmd, unwrapped_tokens, inner_priv) =
+        unwrap_command_launchers_with_priv(&raw_wrapped_cmd, &raw_wrapped_refs);
     let wrapped_base = normalized_cmd_base(&wrapped_cmd);
     let wrapped_arg_refs: Vec<&str> = unwrapped_tokens.iter().map(String::as_str).collect();
 
@@ -2105,7 +2105,7 @@ fn parse_benign_single_command_shell_wrapper(
         return None;
     }
 
-    Some((wrapped_cmd, unwrapped_tokens))
+    Some((wrapped_cmd, unwrapped_tokens, inner_priv))
 }
 
 fn split_simple_wrapper_tokens(script: &str) -> Option<Vec<String>> {
@@ -2172,6 +2172,7 @@ fn check_command_and_host_access(
     );
     let cmd_base = normalized_cmd_base(eff_cmd);
 
+    let had_outer_priv = priv_wrapper.is_some();
     if let Some(priv_bin) = priv_wrapper {
         out.push(McpFinding {
             rule_id: "mcp-privilege-escalation",
@@ -2296,11 +2297,32 @@ fn check_command_and_host_access(
         .unwrap_or_default();
 
     if !is_named_shell_mcp {
-        if let Some((wrapped_cmd, wrapped_args)) =
+        if let Some((wrapped_cmd, wrapped_args, inner_priv)) =
             parse_benign_single_command_shell_wrapper(is_posix_shell, eff_args)
         {
             let wrapped_refs: Vec<&str> = wrapped_args.iter().map(String::as_str).collect();
             let wrapped_base = normalized_cmd_base(&wrapped_cmd);
+            if !had_outer_priv {
+                if let Some(priv_bin) = inner_priv {
+                    let inner_full = format!("{wrapped_cmd} {}", wrapped_args.join(" "));
+                    out.push(McpFinding {
+                        rule_id: "mcp-privilege-escalation",
+                        server_name: server_name.to_string(),
+                        config_file: display.to_string(),
+                        config_path: path.to_path_buf(),
+                        line: server_line,
+                        severity: Severity::High,
+                        fingerprint: fingerprint_match(
+                            "mcp-privilege-escalation",
+                            &format!("{display}:{server_name}:{priv_bin}"),
+                        ),
+                        message: format!(
+                            "MCP server runs with elevated privileges via `{priv_bin}` (`{}`)",
+                            inner_full.trim()
+                        ),
+                    });
+                }
+            }
             check_unpinned_execution(
                 server_name,
                 &wrapped_cmd,
@@ -3122,28 +3144,55 @@ fn check_network_and_telemetry(
     display: &str,
     out: &mut Vec<McpFinding>,
 ) {
-    for url_field in ["url", "serverUrl"] {
+    const URL_FIELDS: &[&str] = &[
+        "url",
+        "serverUrl",
+        "httpUrl",
+        "sseUrl",
+        "wsUrl",
+        "endpoint",
+        "uri",
+    ];
+    let mut candidate_urls: Vec<&str> = Vec::new();
+    for &url_field in URL_FIELDS {
         if let Some(url) = spec.get(url_field).and_then(|v| v.as_str()) {
-            let lower = url.to_ascii_lowercase();
-            let is_local = crate::plugin_audit::is_localhost_url(url);
-            if lower.starts_with("http://") && !is_local {
-                let line = find_line_number(raw_file, url).max(server_line);
-                out.push(McpFinding {
-                    rule_id: "mcp-plaintext-http",
-                    server_name: server_name.to_string(),
-                    config_file: display.to_string(),
-                    config_path: path.to_path_buf(),
-                    line,
-                    severity: Severity::High,
-                    fingerprint: fingerprint_match(
-                        "mcp-plaintext-http",
-                        &format!("{display}:{server_name}:{url}"),
-                    ),
-                    message: format!(
-                        "Connects to remote MCP server over unencrypted HTTP (`{url}`)"
-                    ),
-                });
+            if !candidate_urls.contains(&url) {
+                candidate_urls.push(url);
             }
+        }
+    }
+    if let Some(transport_obj) = spec.get("transport").and_then(|v| v.as_object()) {
+        for &url_field in URL_FIELDS {
+            if let Some(url) = transport_obj.get(url_field).and_then(|v| v.as_str()) {
+                if !candidate_urls.contains(&url) {
+                    candidate_urls.push(url);
+                }
+            }
+        }
+    }
+    for url in candidate_urls {
+        let trimmed = url.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let is_http = lower.starts_with("http://");
+        let is_ws = lower.starts_with("ws://");
+        if (is_http || is_ws) && !crate::plugin_audit::is_localhost_url(trimmed) {
+            let line = find_line_number(raw_file, trimmed).max(server_line);
+            let proto_label = if is_ws { "WebSocket" } else { "HTTP" };
+            out.push(McpFinding {
+                rule_id: "mcp-plaintext-http",
+                server_name: server_name.to_string(),
+                config_file: display.to_string(),
+                config_path: path.to_path_buf(),
+                line,
+                severity: Severity::High,
+                fingerprint: fingerprint_match(
+                    "mcp-plaintext-http",
+                    &format!("{display}:{server_name}:{trimmed}"),
+                ),
+                message: format!(
+                    "Connects to remote MCP server over unencrypted {proto_label} (`{trimmed}`)"
+                ),
+            });
         }
     }
 

@@ -73,7 +73,17 @@ pub fn clean_transcripts_filtered(
         ..Default::default()
     };
 
-    for path in files {
+    // Process main SQLite DB files before companion `-wal`/`-shm` files so WAL frames
+    // are checkpointed, scrubbed, and VACUUMed into the main DB atomically.
+    let mut ordered_files: Vec<&PathBuf> = files.iter().collect();
+    ordered_files.sort_by_key(|p| u8::from(is_wal_or_shm_companion(p)));
+    let mut scrubbed_sqlite_companions: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
+
+    for path in ordered_files {
+        if scrubbed_sqlite_companions.contains(path.as_path()) {
+            continue;
+        }
         if policy.is_some_and(|p| p.is_path_ignored(path)) {
             continue;
         }
@@ -86,9 +96,41 @@ pub fn clean_transcripts_filtered(
         }
         if is_sqlite_extension(path) {
             let disp = shorten_home(path);
-            let uncleaned = count_sqlite_secret_hits(path, &engine, target_fingerprint);
-            if uncleaned > 0 {
-                summary.uncleaned_sqlite_secrets += uncleaned;
+            let is_comp = is_wal_or_shm_companion(path);
+            let initial_hits = count_sqlite_secret_hits(path, &engine, target_fingerprint);
+            let wal_hits = if !is_comp {
+                let wal_p = companion_sqlite_path(path, "-wal");
+                if wal_p.is_file() {
+                    count_sqlite_secret_hits(&wal_p, &engine, target_fingerprint)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            if (initial_hits > 0 || wal_hits > 0) && !is_comp {
+                if let Ok(Some((item, remaining))) = try_scrub_sqlite_db(
+                    path,
+                    &sym_meta,
+                    &engine,
+                    apply,
+                    create_backup,
+                    target_fingerprint,
+                ) {
+                    scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-wal"));
+                    scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-shm"));
+                    summary.files_inspected += 1;
+                    summary.total_redactions += item.secrets_redacted;
+                    summary.files_modified.push(item);
+                    if remaining > 0 {
+                        summary.uncleaned_sqlite_secrets += remaining;
+                        summary.uncleaned_sqlite_files.push(disp);
+                    }
+                    continue;
+                }
+            }
+            if initial_hits > 0 {
+                summary.uncleaned_sqlite_secrets += initial_hits;
                 summary.uncleaned_sqlite_files.push(disp.clone());
             }
             summary.skipped_binary_files.push(disp);
@@ -110,9 +152,40 @@ pub fn clean_transcripts_filtered(
             ProcessOutcome::Unchanged => {}
             ProcessOutcome::SkippedSqlite => {
                 let disp = shorten_home(path);
-                let uncleaned = count_sqlite_secret_hits(path, &engine, target_fingerprint);
-                if uncleaned > 0 {
-                    summary.uncleaned_sqlite_secrets += uncleaned;
+                let is_comp = is_wal_or_shm_companion(path);
+                let initial_hits = count_sqlite_secret_hits(path, &engine, target_fingerprint);
+                let wal_hits = if !is_comp {
+                    let wal_p = companion_sqlite_path(path, "-wal");
+                    if wal_p.is_file() {
+                        count_sqlite_secret_hits(&wal_p, &engine, target_fingerprint)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                if (initial_hits > 0 || wal_hits > 0) && !is_comp {
+                    if let Ok(Some((item, remaining))) = try_scrub_sqlite_db(
+                        path,
+                        &sym_meta,
+                        &engine,
+                        apply,
+                        create_backup,
+                        target_fingerprint,
+                    ) {
+                        scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-wal"));
+                        scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-shm"));
+                        summary.total_redactions += item.secrets_redacted;
+                        summary.files_modified.push(item);
+                        if remaining > 0 {
+                            summary.uncleaned_sqlite_secrets += remaining;
+                            summary.uncleaned_sqlite_files.push(disp);
+                        }
+                        continue;
+                    }
+                }
+                if initial_hits > 0 {
+                    summary.uncleaned_sqlite_secrets += initial_hits;
                     summary.uncleaned_sqlite_files.push(disp.clone());
                 }
                 summary.skipped_binary_files.push(disp);
@@ -860,4 +933,342 @@ fn copy_file_private_perms(src: &Path, dst: &Path) -> io::Result<()> {
     let mut writer = BufWriter::new(dst_file);
     io::copy(&mut reader, &mut writer)?;
     writer.flush()
+}
+
+fn is_wal_or_shm_companion(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    lower.ends_with("-wal") || lower.ends_with("-shm") || lower.ends_with("-journal")
+}
+
+fn companion_sqlite_path(base: &Path, suffix: &str) -> PathBuf {
+    let mut os = base.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+fn scrub_sqlite_cell_string(
+    raw: &str,
+    engine: &RuleEngine,
+    path: &Path,
+    target_fingerprint: Option<&str>,
+) -> Option<(String, usize)> {
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(mut parsed) = serde_json::from_str::<Value>(raw) {
+            let json_hits = scrub_json_value(&mut parsed, engine, path, target_fingerprint);
+            if json_hits > 0 {
+                if let Ok(serialized) = serde_json::to_string(&parsed) {
+                    return Some((serialized, json_hits));
+                }
+            }
+        }
+    }
+
+    let hints = crate::rules::DocHints::from_text(raw);
+    let matches: Vec<_> = engine
+        .scan_text_with_hints(raw, Some(path), hints)
+        .into_iter()
+        .filter(|m| target_fingerprint.is_none_or(|fp| m.fingerprint == fp))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let mut out = raw.to_string();
+    let mut count = 0usize;
+    for m in matches.iter().rev() {
+        if m.end <= out.len() && out.is_char_boundary(m.start) && out.is_char_boundary(m.end) {
+            let secret_slice = &out[m.start..m.end];
+            let repl = redact_replacement(&m.rule_id, secret_slice);
+            out.replace_range(m.start..m.end, &repl);
+            count += 1;
+        }
+    }
+    if count > 0 {
+        Some((out, count))
+    } else {
+        None
+    }
+}
+
+const SQLITE_DUMP_PY: &str = r#"
+import json, sqlite3, sys
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path, timeout=2.0)
+cur = conn.cursor()
+tables = [r[0] for r in cur.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+).fetchall()]
+for tbl in tables:
+    q_tbl = '"' + tbl.replace('"', '""') + '"'
+    try:
+        cols_info = cur.execute(f"PRAGMA table_info({q_tbl})").fetchall()
+    except Exception:
+        continue
+    cand_cols = [c[1] for c in cols_info if int(c[5] or 0) == 0]
+    if not cand_cols:
+        continue
+    pk_expr = None
+    pk_raw = False
+    for rk in ("_rowid_", "rowid", "oid"):
+        try:
+            cur.execute(f"SELECT {rk} FROM {q_tbl} LIMIT 1")
+            pk_expr = rk
+            pk_raw = True
+            break
+        except Exception:
+            continue
+    if pk_expr is None:
+        pk_cols = [c[1] for c in cols_info if int(c[5] or 0) > 0]
+        if len(pk_cols) == 1:
+            pk_expr = pk_cols[0]
+            pk_raw = False
+    if pk_expr is None:
+        continue
+    q_pk = pk_expr if pk_raw else ('"' + pk_expr.replace('"', '""') + '"')
+    sel_cols = ", ".join('"' + c.replace('"', '""') + '"' for c in cand_cols)
+    for row in cur.execute(f"SELECT {q_pk}, {sel_cols} FROM {q_tbl}"):
+        rid = row[0]
+        if not isinstance(rid, (int, str)):
+            continue
+        for col_name, val in zip(cand_cols, row[1:]):
+            if isinstance(val, str) and len(val) >= 8:
+                print(json.dumps({"t": tbl, "pk": pk_expr, "pk_raw": pk_raw, "id": rid, "c": col_name, "k": "s", "v": val}))
+            elif isinstance(val, (bytes, bytearray)) and len(val) >= 8:
+                try:
+                    s = bytes(val).decode("utf-8")
+                    print(json.dumps({"t": tbl, "pk": pk_expr, "pk_raw": pk_raw, "id": rid, "c": col_name, "k": "b", "v": s}))
+                except Exception:
+                    pass
+conn.close()
+"#;
+
+const SQLITE_APPLY_PY: &str = r#"
+import json, sqlite3, sys
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path, timeout=5.0)
+cur = conn.cursor()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    item = json.loads(line)
+    q_tbl = '"' + item["t"].replace('"', '""') + '"'
+    q_col = '"' + item["c"].replace('"', '""') + '"'
+    q_pk = item["pk"] if item.get("pk_raw") else ('"' + item["pk"].replace('"', '""') + '"')
+    new_val = item["v"].encode("utf-8") if item["k"] == "b" else item["v"]
+    cur.execute(f"UPDATE {q_tbl} SET {q_col} = ? WHERE {q_pk} = ?", (new_val, item["id"]))
+conn.commit()
+try:
+    cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+except Exception:
+    pass
+conn.isolation_level = None
+cur.execute("VACUUM")
+chk = cur.execute("PRAGMA integrity_check").fetchone()
+conn.close()
+if not chk or chk[0] != "ok":
+    sys.exit(2)
+"#;
+
+fn find_python_for_sqlite() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|&cand| {
+        std::process::Command::new(cand)
+            .args(["-c", "import sqlite3"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+fn cleanup_temp_sqlite_family(tmp_db: &Path) {
+    let _ = fs::remove_file(tmp_db);
+    let _ = fs::remove_file(companion_sqlite_path(tmp_db, "-wal"));
+    let _ = fs::remove_file(companion_sqlite_path(tmp_db, "-shm"));
+    let _ = fs::remove_file(companion_sqlite_path(tmp_db, "-journal"));
+}
+
+fn try_scrub_sqlite_db(
+    path: &Path,
+    orig_meta: &fs::Metadata,
+    engine: &RuleEngine,
+    apply: bool,
+    create_backup: bool,
+    target_fingerprint: Option<&str>,
+) -> io::Result<Option<(CleanedFileSummary, usize)>> {
+    let Some(py_bin) = find_python_for_sqlite() else {
+        return Ok(None);
+    };
+
+    let (tmp_db, tmp_file) = create_unique_temp_file(path, orig_meta)?;
+    // Copy main SQLite DB bytes into the unique `0600` sibling temp file
+    let copy_res = (|| -> io::Result<()> {
+        let mut src = BufReader::new(File::open(path)?);
+        let mut dst = BufWriter::new(tmp_file);
+        io::copy(&mut src, &mut dst)?;
+        dst.flush()?;
+        dst.into_inner().map_err(|e| e.into_error())?.sync_all()
+    })();
+    if copy_res.is_err() {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(None);
+    }
+
+    // Copy any companion `-wal` / `-shm` regular files so uncommitted WAL transactions are preserved and scrubbed
+    for suffix in ["-wal", "-shm"] {
+        let comp_src = companion_sqlite_path(path, suffix);
+        if let Ok(cm) = fs::symlink_metadata(&comp_src) {
+            if cm.file_type().is_file() && !cm.file_type().is_symlink() {
+                let comp_dst = companion_sqlite_path(&tmp_db, suffix);
+                if copy_file_private_perms(&comp_src, &comp_dst).is_err() {
+                    cleanup_temp_sqlite_family(&tmp_db);
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    let Ok(mut dump_child) = std::process::Command::new(py_bin)
+        .arg("-c")
+        .arg(SQLITE_DUMP_PY)
+        .arg(&tmp_db)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(None);
+    };
+
+    let mut updates_jsonl = Vec::<u8>::new();
+    let mut total_redactions = 0usize;
+
+    if let Some(stdout) = dump_child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        for line_res in reader.lines() {
+            let Ok(line) = line_res else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(mut row_obj) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(cell_val) = row_obj.get("v").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some((scrubbed, count)) =
+                scrub_sqlite_cell_string(cell_val, engine, path, target_fingerprint)
+            {
+                if let Some(map) = row_obj.as_object_mut() {
+                    map.insert("v".to_string(), Value::String(scrubbed));
+                    if let Ok(mut encoded) = serde_json::to_vec(&Value::Object(map.clone())) {
+                        encoded.push(b'\n');
+                        updates_jsonl.extend_from_slice(&encoded);
+                        total_redactions += count;
+                    }
+                }
+            }
+        }
+    }
+    let dump_ok = dump_child.wait().is_ok_and(|s| s.success());
+    if !dump_ok || total_redactions == 0 {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(None);
+    }
+
+    let display_file = shorten_home(path);
+    if !apply {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(Some((
+            CleanedFileSummary {
+                display_file,
+                secrets_redacted: total_redactions,
+                backup_file: None,
+            },
+            0,
+        )));
+    }
+
+    let Ok(mut apply_child) = std::process::Command::new(py_bin)
+        .arg("-c")
+        .arg(SQLITE_APPLY_PY)
+        .arg(&tmp_db)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(None);
+    };
+
+    if let Some(mut stdin) = apply_child.stdin.take() {
+        if stdin.write_all(&updates_jsonl).is_err() {
+            let _ = apply_child.wait();
+            cleanup_temp_sqlite_family(&tmp_db);
+            return Ok(None);
+        }
+    }
+    if !apply_child.wait().is_ok_and(|s| s.success()) {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(None);
+    }
+
+    // Remove temporary companion `-wal`/`-shm` files left next to `tmp_db` before scanning `tmp_db`
+    let _ = fs::remove_file(companion_sqlite_path(&tmp_db, "-wal"));
+    let _ = fs::remove_file(companion_sqlite_path(&tmp_db, "-shm"));
+    let _ = fs::remove_file(companion_sqlite_path(&tmp_db, "-journal"));
+
+    let remaining = count_sqlite_secret_hits(&tmp_db, engine, target_fingerprint);
+
+    let pre_write_meta = fs::symlink_metadata(path)?;
+    if pre_write_meta.file_type().is_symlink() || !pre_write_meta.file_type().is_file() {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to clean non-regular SQLite file or symlink",
+        ));
+    }
+
+    let mut backup_display = None;
+    if create_backup {
+        let bak_path = companion_sqlite_path(path, ".leaktap.bak");
+        copy_file_private_perms(path, &bak_path)?;
+        let wal_src = companion_sqlite_path(path, "-wal");
+        if let Ok(wm) = fs::symlink_metadata(&wal_src) {
+            if wm.file_type().is_file() && !wm.file_type().is_symlink() {
+                let wal_bak = companion_sqlite_path(&wal_src, ".leaktap.bak");
+                let _ = copy_file_private_perms(&wal_src, &wal_bak);
+            }
+        }
+        backup_display = Some(shorten_home(&bak_path));
+    }
+
+    if let Err(rename_err) = fs::rename(&tmp_db, path) {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Err(rename_err);
+    }
+
+    // Since all WAL frames were checkpointed and VACUUMed into `path`, remove stale `-wal`/`-shm`
+    for suffix in ["-wal", "-shm"] {
+        let comp = companion_sqlite_path(path, suffix);
+        if let Ok(cm) = fs::symlink_metadata(&comp) {
+            if cm.file_type().is_file() && !cm.file_type().is_symlink() {
+                let _ = fs::remove_file(&comp);
+            }
+        }
+    }
+
+    Ok(Some((
+        CleanedFileSummary {
+            display_file,
+            secrets_redacted: total_redactions,
+            backup_file: backup_display,
+        },
+        remaining,
+    )))
 }

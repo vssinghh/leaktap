@@ -10,6 +10,8 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct PolicyFile {
     #[serde(default)]
+    pub fingerprint_salt: Option<String>,
+    #[serde(default)]
     pub allowlist: AllowlistSpec,
     #[serde(default)]
     pub rules: Vec<CustomRuleSpec>,
@@ -17,6 +19,8 @@ pub struct PolicyFile {
 
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct AllowlistSpec {
+    #[serde(default)]
+    pub fingerprint_salt: Option<String>,
     #[serde(default)]
     pub fingerprints: Vec<String>,
     #[serde(default)]
@@ -132,6 +136,7 @@ impl ScopedPolicy {
 
 #[derive(Debug, Default, Clone)]
 pub struct PolicyConfig {
+    pub fingerprint_salt: Option<String>,
     pub disabled_rules: HashSet<String>,
     pub ignored_fingerprints: HashSet<String>,
     pub stopwords_lower: Vec<String>,
@@ -169,6 +174,7 @@ impl PolicyConfig {
         trust_project_config: bool,
         no_config: bool,
     ) -> Result<Self, String> {
+        crate::rules::set_configured_fingerprint_salt(None);
         if no_config {
             if explicit_config.is_some() || policy_git_ref.is_some() {
                 return Err(
@@ -389,6 +395,15 @@ impl PolicyConfig {
         file: PolicyFile,
         anchor_dirs: &[PathBuf],
     ) -> Result<(), String> {
+        if let Some(salt) = file
+            .fingerprint_salt
+            .or(file.allowlist.fingerprint_salt)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            self.fingerprint_salt = Some(salt.clone());
+            crate::rules::set_configured_fingerprint_salt(Some(salt));
+        }
         for r in file.allowlist.rules {
             let trimmed = r.trim();
             if !trimmed.is_empty() {
@@ -469,6 +484,17 @@ impl PolicyConfig {
         file: PolicyFile,
         proj_root: &Path,
     ) -> Result<(), String> {
+        if self.fingerprint_salt.is_none() && self.ignored_fingerprints.is_empty() {
+            if let Some(salt) = file
+                .fingerprint_salt
+                .or(file.allowlist.fingerprint_salt)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                self.fingerprint_salt = Some(salt.clone());
+                crate::rules::set_configured_fingerprint_salt(Some(salt));
+            }
+        }
         let validated = Self::validate_custom_rules(file.rules)?;
         let scoped = self.get_or_create_scoped(proj_root);
         for r in file.allowlist.rules {

@@ -554,7 +554,7 @@ fn walk_path(path: &Path, ctx: &mut WalkContext<'_>, in_customization_tree: bool
     if meta.is_file() {
         let file_in_cust = in_customization_tree
             || has_customization_ancestor(path)
-            || path.parent().is_some_and(is_plugin_or_skill_root);
+            || has_plugin_or_skill_root_ancestor(path);
         classify_file(path, ctx, file_in_cust, true);
         return;
     }
@@ -695,12 +695,28 @@ fn has_customization_ancestor(path: &Path) -> bool {
     false
 }
 
-fn is_plugin_or_skill_root(dir: &Path) -> bool {
+pub fn is_plugin_or_skill_root(dir: &Path) -> bool {
     dir.join("plugin.json").is_file()
         || dir.join(".claude-plugin").is_dir()
         || dir.join(".codex-plugin").is_dir()
         || dir.join("gemini-extension.json").is_file()
         || dir.join("SKILL.md").is_file()
+}
+
+pub fn has_plugin_or_skill_root_ancestor(path: &Path) -> bool {
+    let home = home_dir();
+    for anc in path.ancestors().skip(1).take(6) {
+        if anc.as_os_str().is_empty() || anc.parent().is_none() {
+            break;
+        }
+        if home.as_deref() == Some(anc) {
+            break;
+        }
+        if is_plugin_or_skill_root(anc) {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_temporary_leaktap_artifact(file_name: &str) -> bool {
@@ -837,6 +853,7 @@ pub fn is_safe_default_clean_target(path: &Path) -> bool {
     if is_mcp_config_filename(path, file_name)
         || is_top_level_instruction_or_plugin_file(path, file_name)
         || has_customization_ancestor(path)
+        || has_plugin_or_skill_root_ancestor(path)
     {
         return false;
     }

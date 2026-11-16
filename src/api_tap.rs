@@ -110,6 +110,10 @@ pub struct LocalApiTap {
     pub anthropic_base_url: String,
     pub openai_base_url: String,
     pub gemini_base_url: String,
+    pub openrouter_base_url: String,
+    pub deepseek_base_url: String,
+    pub xai_base_url: String,
+    pub groq_base_url: String,
     stop: Arc<AtomicBool>,
     pool: UpstreamPool,
 }
@@ -132,7 +136,12 @@ struct UpstreamTargets {
     chatgpt: String,
     openai_explicit: bool,
     gemini: String,
+    openrouter: String,
+    deepseek: String,
+    xai: String,
+    groq: String,
     block_secrets: bool,
+    redact_secrets: bool,
     pool: UpstreamPool,
 }
 
@@ -194,8 +203,48 @@ pub fn start_local_api_tap(
     header_auditor: Arc<HeaderAuditor>,
     emit: TapCallback,
 ) -> io::Result<LocalApiTap> {
+    start_local_api_tap_with_options(
+        anthropic_upstream,
+        openai_upstream,
+        chatgpt_upstream,
+        openai_explicit,
+        gemini_upstream,
+        block_secrets,
+        false,
+        engine,
+        header_auditor,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start_local_api_tap_with_options(
+    anthropic_upstream: String,
+    openai_upstream: String,
+    chatgpt_upstream: String,
+    openai_explicit: bool,
+    gemini_upstream: String,
+    block_secrets: bool,
+    redact_secrets: bool,
+    engine: Arc<RuleEngine>,
+    header_auditor: Arc<HeaderAuditor>,
+    emit: TapCallback,
+) -> io::Result<LocalApiTap> {
     let v4_listener = TcpListener::bind("127.0.0.1:0")?;
     let port = v4_listener.local_addr()?.port();
+
+    let openrouter_upstream = std::env::var("LEAKTAP_UPSTREAM_OPENROUTER_URL")
+        .or_else(|_| std::env::var("OPENROUTER_BASE_URL"))
+        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+    let deepseek_upstream = std::env::var("LEAKTAP_UPSTREAM_DEEPSEEK_URL")
+        .or_else(|_| std::env::var("DEEPSEEK_BASE_URL"))
+        .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
+    let xai_upstream = std::env::var("LEAKTAP_UPSTREAM_XAI_URL")
+        .or_else(|_| std::env::var("XAI_BASE_URL"))
+        .unwrap_or_else(|_| "https://api.x.ai/v1".to_string());
+    let groq_upstream = std::env::var("LEAKTAP_UPSTREAM_GROQ_URL")
+        .or_else(|_| std::env::var("GROQ_BASE_URL"))
+        .unwrap_or_else(|_| "https://api.groq.com".to_string());
 
     let stop = Arc::new(AtomicBool::new(false));
     let active_conns = Arc::new(AtomicUsize::new(0));
@@ -206,7 +255,12 @@ pub fn start_local_api_tap(
         chatgpt: chatgpt_upstream.trim_end_matches('/').to_string(),
         openai_explicit,
         gemini: gemini_upstream.trim_end_matches('/').to_string(),
+        openrouter: openrouter_upstream.trim_end_matches('/').to_string(),
+        deepseek: deepseek_upstream.trim_end_matches('/').to_string(),
+        xai: xai_upstream.trim_end_matches('/').to_string(),
+        groq: groq_upstream.trim_end_matches('/').to_string(),
         block_secrets,
+        redact_secrets,
         pool: Arc::clone(&pool),
     };
 
@@ -237,6 +291,10 @@ pub fn start_local_api_tap(
         anthropic_base_url: format!("http://127.0.0.1:{port}/_anthropic"),
         openai_base_url: format!("http://127.0.0.1:{port}/_openai"),
         gemini_base_url: format!("http://localhost:{port}/_gemini"),
+        openrouter_base_url: format!("http://127.0.0.1:{port}/_openrouter"),
+        deepseek_base_url: format!("http://127.0.0.1:{port}/_deepseek"),
+        xai_base_url: format!("http://127.0.0.1:{port}/_xai"),
+        groq_base_url: format!("http://127.0.0.1:{port}/_groq"),
         stop,
         pool,
     })
@@ -467,37 +525,57 @@ fn handle_client(
         Vec::new()
     };
 
-    let (provider, upstream_provider, target_url) =
+    let (provider, upstream_provider, mut target_url) =
         if let Some(rest) = raw_path.strip_prefix("/_anthropic") {
-            let suffix = if rest.is_empty() { "/" } else { rest };
             (
                 "anthropic",
                 UpstreamProvider::Anthropic,
-                format!("{}{suffix}", upstreams.anthropic),
+                join_upstream_path(&upstreams.anthropic, rest),
             )
         } else if let Some(rest) = raw_path.strip_prefix("/_openai") {
             if has_chatgpt_account_id && !upstreams.openai_explicit {
                 let stripped = rest.strip_prefix("/v1").unwrap_or(rest);
-                let suffix = if stripped.is_empty() { "/" } else { stripped };
                 (
                     "openai",
                     UpstreamProvider::OpenAi,
-                    format!("{}{suffix}", upstreams.chatgpt),
+                    join_upstream_path(&upstreams.chatgpt, stripped),
                 )
             } else {
-                let suffix = if rest.is_empty() { "/" } else { rest };
                 (
                     "openai",
                     UpstreamProvider::OpenAi,
-                    format!("{}{suffix}", upstreams.openai),
+                    join_upstream_path(&upstreams.openai, rest),
                 )
             }
         } else if let Some(rest) = raw_path.strip_prefix("/_gemini") {
-            let suffix = if rest.is_empty() { "/" } else { rest };
             (
                 "gemini",
                 UpstreamProvider::Gemini,
-                format!("{}{suffix}", upstreams.gemini),
+                join_upstream_path(&upstreams.gemini, rest),
+            )
+        } else if let Some(rest) = raw_path.strip_prefix("/_openrouter") {
+            (
+                "openrouter",
+                UpstreamProvider::OpenRouter,
+                join_upstream_path(&upstreams.openrouter, rest),
+            )
+        } else if let Some(rest) = raw_path.strip_prefix("/_deepseek") {
+            (
+                "deepseek",
+                UpstreamProvider::DeepSeek,
+                join_upstream_path(&upstreams.deepseek, rest),
+            )
+        } else if let Some(rest) = raw_path.strip_prefix("/_xai") {
+            (
+                "xai",
+                UpstreamProvider::Xai,
+                join_upstream_path(&upstreams.xai, rest),
+            )
+        } else if let Some(rest) = raw_path.strip_prefix("/_groq") {
+            (
+                "groq",
+                UpstreamProvider::Groq,
+                join_upstream_path(&upstreams.groq, rest),
             )
         } else {
             let suffix = if raw_path.starts_with('/') {
@@ -525,6 +603,8 @@ fn handle_client(
     );
 
     let mut blocked_summary: Option<(String, String, &'static str)> = None;
+    let redact_active = upstreams.redact_secrets && !upstreams.block_secrets;
+    let mut redacted_total: usize = 0;
 
     // 1. Audit outgoing request URL path and query string (exempting Gemini's auth `key=` parameter)
     let url_inspect_target = sanitize_request_path_for_scan(&raw_path, provider);
@@ -542,7 +622,11 @@ fn handle_client(
                 }
             }
         }
+        let mut url_had_secret = false;
         for m in url_matches {
+            if m.category == RuleCategory::Secret {
+                url_had_secret = true;
+            }
             if upstreams.block_secrets
                 && m.category == RuleCategory::Secret
                 && blocked_summary.is_none()
@@ -568,11 +652,22 @@ fn handle_client(
                 ),
             );
         }
+        if redact_active && url_had_secret {
+            let (new_url, cnt) = redact_target_url_secrets(&target_url, provider, engine);
+            if cnt > 0 {
+                target_url = new_url;
+                redacted_total += cnt;
+            }
+        }
     }
 
     // 2. Audit outgoing HTTP headers (`User-Agent` email leaks, hostname/OS user, cross-provider/leaked keys)
-    for (k, v) in &headers {
+    for (k, v) in &mut headers {
+        let mut header_had_secret_leak = false;
         for hf in auditor.inspect_header_for_provider(k, v, Some(upstream_provider), engine) {
+            if hf.rule_id == "header-secret-leak" {
+                header_had_secret_leak = true;
+            }
             if upstreams.block_secrets
                 && hf.rule_id == "header-secret-leak"
                 && blocked_summary.is_none()
@@ -590,6 +685,11 @@ fn handle_client(
                 hf.severity.as_str(),
                 hf.detail,
             );
+        }
+        if redact_active && header_had_secret_leak {
+            let (scrubbed_hdr, cnt) = redact_header_value_secrets(v, engine);
+            *v = scrubbed_hdr;
+            redacted_total += cnt;
         }
     }
 
@@ -637,6 +737,7 @@ fn handle_client(
                 }
 
                 let first_non_ws = inspect_bytes.iter().find(|b| !b.is_ascii_whitespace());
+                let mut parsed_json_body: Option<serde_json::Value> = None;
                 if matches!(first_non_ws, Some(b'{' | b'[')) {
                     if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(inspect_bytes)
                     {
@@ -657,10 +758,15 @@ fn handle_client(
                                 }
                             }
                         }
+                        parsed_json_body = Some(json_val);
                     }
                 }
 
+                let mut body_had_secret = false;
                 for m in body_matches {
+                    if m.category == RuleCategory::Secret {
+                        body_had_secret = true;
+                    }
                     if upstreams.block_secrets
                         && m.category == RuleCategory::Secret
                         && blocked_summary.is_none()
@@ -687,14 +793,43 @@ fn handle_client(
                     );
                 }
 
-                decoded_body_override = decoded;
+                if redact_active && body_had_secret {
+                    if let Some(mut json_doc) = parsed_json_body {
+                        let cnt = redact_json_secrets_in_place(&mut json_doc, 0, engine);
+                        if cnt > 0 {
+                            if let Ok(redacted_bytes) = serde_json::to_vec(&json_doc) {
+                                decoded_body_override = Some(redacted_bytes);
+                                redacted_total += cnt;
+                            } else {
+                                decoded_body_override = decoded;
+                            }
+                        } else {
+                            let (scrubbed_str, raw_cnt) = redact_text_secrets(&body_text, engine);
+                            if raw_cnt > 0
+                                && serde_json::from_str::<serde_json::Value>(&scrubbed_str).is_ok()
+                            {
+                                decoded_body_override = Some(scrubbed_str.into_bytes());
+                                redacted_total += raw_cnt;
+                            } else {
+                                decoded_body_override = decoded;
+                            }
+                        }
+                    } else {
+                        let (scrubbed_str, cnt) = redact_text_secrets(&body_text, engine);
+                        if cnt > 0 {
+                            decoded_body_override = Some(scrubbed_str.into_bytes());
+                            redacted_total += cnt;
+                        } else {
+                            decoded_body_override = decoded;
+                        }
+                    }
+                } else {
+                    decoded_body_override = decoded;
+                }
             }
             Err(decode_err) => {
-                let sev = if upstreams.block_secrets {
-                    "CRITICAL"
-                } else {
-                    "HIGH"
-                };
+                let enforce_closed = upstreams.block_secrets || upstreams.redact_secrets;
+                let sev = if enforce_closed { "CRITICAL" } else { "HIGH" };
                 emit(
                     "http-body",
                     "uninspectable_body",
@@ -704,7 +839,7 @@ fn handle_client(
                         "Could not decompress `{content_encoding}` {provider} API body ({decode_err})"
                     ),
                 );
-                if upstreams.block_secrets && blocked_summary.is_none() {
+                if enforce_closed && blocked_summary.is_none() {
                     blocked_summary = Some((
                         "uninspectable-content-encoding".to_string(),
                         format!(
@@ -744,6 +879,18 @@ fn handle_client(
         );
         let _ = client.flush();
         return Ok(());
+    }
+
+    if redact_active && redacted_total > 0 {
+        emit(
+            "http-body",
+            "secret_redacted",
+            "secret-redacted",
+            "HIGH",
+            format!(
+                "Redacted {redacted_total} secret(s) in-transit before forwarding {provider} API request"
+            ),
+        );
     }
 
     // 4. Forward exact inspected canonical plaintext upstream (eliminating compression smuggling differentials)
@@ -1772,11 +1919,37 @@ fn decode_single_layer(
     Ok(out)
 }
 
+fn join_upstream_path(base: &str, rest: &str) -> String {
+    if rest.is_empty() {
+        return format!("{base}/");
+    }
+    let mut trimmed_base = base;
+    for prefix in ["/api/v1", "/openai/v1", "/v1"] {
+        if trimmed_base.ends_with(prefix)
+            && (rest == prefix
+                || rest.starts_with(&format!("{prefix}/"))
+                || rest.starts_with(&format!("{prefix}?")))
+        {
+            trimmed_base = trimmed_base.strip_suffix(prefix).unwrap_or(trimmed_base);
+            break;
+        }
+    }
+    if rest.starts_with('/') {
+        format!("{trimmed_base}{rest}")
+    } else {
+        format!("{trimmed_base}/{rest}")
+    }
+}
+
 fn sanitize_request_path_for_scan(raw_path: &str, provider: &str) -> String {
     let stripped = raw_path
         .strip_prefix("/_anthropic")
         .or_else(|| raw_path.strip_prefix("/_openai"))
         .or_else(|| raw_path.strip_prefix("/_gemini"))
+        .or_else(|| raw_path.strip_prefix("/_openrouter"))
+        .or_else(|| raw_path.strip_prefix("/_deepseek"))
+        .or_else(|| raw_path.strip_prefix("/_xai"))
+        .or_else(|| raw_path.strip_prefix("/_groq"))
         .unwrap_or(raw_path);
     if provider != "gemini" {
         return stripped.to_string();
@@ -1793,11 +1966,11 @@ fn sanitize_request_path_for_scan(raw_path: &str, provider: &str) -> String {
             if !k.eq_ignore_ascii_case("key") {
                 return true;
             }
-            // Only exempt legitimate Google Gemini API keys (`AIza` + 35 `[A-Za-z0-9_-]` chars)
+            // Only exempt legitimate Google Gemini API keys (`AIza` + `[A-Za-z0-9_-]` chars)
             let decoded_v = percent_decode(v);
             let tv = decoded_v.trim();
             !(tv.starts_with("AIza")
-                && tv.len() == 39
+                && (35..=49).contains(&tv.len())
                 && tv
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
@@ -1808,6 +1981,428 @@ fn sanitize_request_path_for_scan(raw_path: &str, provider: &str) -> String {
     } else {
         format!("{path_only}?{}", kept.join("&"))
     }
+}
+
+fn redact_text_secrets(input: &str, engine: &RuleEngine) -> (String, usize) {
+    let hints = crate::rules::DocHints::from_text(input);
+    let matches: Vec<_> = engine
+        .scan_text_with_hints(input, None, hints)
+        .into_iter()
+        .filter(|m| m.category == RuleCategory::Secret)
+        .collect();
+    if !matches.is_empty() {
+        let mut out = input.to_string();
+        let mut count = 0usize;
+        for m in matches.iter().rev() {
+            if m.end <= out.len() && out.is_char_boundary(m.start) && out.is_char_boundary(m.end) {
+                let repl = crate::rules::redact_replacement(&m.rule_id, &out[m.start..m.end]);
+                out.replace_range(m.start..m.end, &repl);
+                count += 1;
+            }
+        }
+        if count > 0 {
+            return (out, count);
+        }
+    }
+    if input.contains('%') {
+        let pct = percent_decode(input);
+        if pct != input {
+            let pct_hints = crate::rules::DocHints::from_text(&pct);
+            let pct_matches: Vec<_> = engine
+                .scan_text_with_hints(&pct, None, pct_hints)
+                .into_iter()
+                .filter(|m| m.category == RuleCategory::Secret)
+                .collect();
+            if !pct_matches.is_empty() {
+                let mut out = pct;
+                let mut count = 0usize;
+                for m in pct_matches.iter().rev() {
+                    if m.end <= out.len()
+                        && out.is_char_boundary(m.start)
+                        && out.is_char_boundary(m.end)
+                    {
+                        let repl =
+                            crate::rules::redact_replacement(&m.rule_id, &out[m.start..m.end]);
+                        out.replace_range(m.start..m.end, &repl);
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    return (out, count);
+                }
+            }
+        }
+    }
+    (input.to_string(), 0)
+}
+
+fn redact_header_value_secrets(val: &str, engine: &RuleEngine) -> (String, usize) {
+    let (scrubbed, cnt) = redact_text_secrets(val, engine);
+    if cnt > 0 {
+        return (scrubbed, cnt);
+    }
+    let trimmed = val.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+    {
+        if !rest.trim().is_empty() {
+            return ("Bearer [REDACTED:header-secret-leak]".to_string(), 1);
+        }
+    }
+    ("[REDACTED:header-secret-leak]".to_string(), 1)
+}
+
+fn redact_target_url_secrets(
+    target_url: &str,
+    provider: &str,
+    engine: &RuleEngine,
+) -> (String, usize) {
+    let Some(scheme_sep) = target_url.find("://") else {
+        return (target_url.to_string(), 0);
+    };
+    let after_scheme = &target_url[scheme_sep + 3..];
+    let Some(path_idx) = after_scheme.find('/') else {
+        return (target_url.to_string(), 0);
+    };
+    let origin = &target_url[..scheme_sep + 3 + path_idx];
+    let path_and_query = &after_scheme[path_idx..];
+
+    if provider == "gemini" {
+        if let Some((path_only, query)) = path_and_query.split_once('?') {
+            let (new_path, mut total) = redact_text_secrets(path_only, engine);
+            let mut new_pairs: Vec<String> = Vec::new();
+            for pair in query.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    let decoded_v = percent_decode(v);
+                    let tv = decoded_v.trim();
+                    let is_legit_gemini_key = k.eq_ignore_ascii_case("key")
+                        && tv.starts_with("AIza")
+                        && (35..=49).contains(&tv.len())
+                        && tv
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+                    if is_legit_gemini_key {
+                        new_pairs.push(pair.to_string());
+                        continue;
+                    }
+                    let (sv, c) = redact_text_secrets(v, engine);
+                    total += c;
+                    new_pairs.push(format!("{k}={sv}"));
+                } else {
+                    let (sp, c) = redact_text_secrets(pair, engine);
+                    total += c;
+                    new_pairs.push(sp);
+                }
+            }
+            if total > 0 {
+                return (format!("{origin}{new_path}?{}", new_pairs.join("&")), total);
+            }
+            return (target_url.to_string(), 0);
+        }
+    }
+
+    let (scrubbed_pq, cnt) = redact_text_secrets(path_and_query, engine);
+    if cnt > 0 {
+        (format!("{origin}{scrubbed_pq}"), cnt)
+    } else {
+        (target_url.to_string(), 0)
+    }
+}
+
+fn redact_json_secrets_in_place(
+    val: &mut serde_json::Value,
+    depth: usize,
+    engine: &RuleEngine,
+) -> usize {
+    if depth > 64 {
+        return 0;
+    }
+    match val {
+        serde_json::Value::String(s) => {
+            let mut count = 0usize;
+            if depth <= 24 {
+                let first_non_ws = s.as_bytes().iter().find(|b| !b.is_ascii_whitespace());
+                if matches!(first_non_ws, Some(b'{' | b'[')) {
+                    if let Ok(mut inner) = serde_json::from_str::<serde_json::Value>(s) {
+                        let inner_cnt = redact_json_secrets_in_place(&mut inner, depth + 1, engine);
+                        if inner_cnt > 0 {
+                            if let Ok(reencoded) = serde_json::to_string(&inner) {
+                                *s = reencoded;
+                                count += inner_cnt;
+                            }
+                        }
+                    }
+                }
+            }
+            let (scrubbed, direct_cnt) = redact_text_secrets(s, engine);
+            if direct_cnt > 0 {
+                *s = scrubbed;
+                count += direct_cnt;
+            }
+            count
+        }
+        serde_json::Value::Array(arr) => arr
+            .iter_mut()
+            .map(|item| redact_json_secrets_in_place(item, depth + 1, engine))
+            .sum(),
+        serde_json::Value::Object(map) => {
+            let mut count = 0usize;
+            let is_gcp_sa_obj = map
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|t| t == "service_account")
+                || map
+                    .get("client_email")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|e| e.contains(".iam.gserviceaccount.com"));
+            if is_gcp_sa_obj {
+                if let Some(serde_json::Value::String(pk_id)) = map.get_mut("private_key_id") {
+                    let probe = format!("\"private_key_id\": \"{pk_id}\"");
+                    if engine
+                        .scan_text_with_doc_hint(&probe, None, true)
+                        .iter()
+                        .any(|m| m.rule_id == "gcp-service-account-key")
+                    {
+                        *pk_id = crate::rules::redact_replacement("gcp-service-account-key", pk_id);
+                        count += 1;
+                    }
+                }
+            }
+            let kty = map
+                .get("kty")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let has_d = map.contains_key("d");
+            if matches!(kty.as_str(), "RSA" | "EC" | "OKP" | "oct") {
+                let jwk_hints = crate::rules::DocHints {
+                    has_jwk_asymmetric_kty: matches!(kty.as_str(), "RSA" | "EC" | "OKP"),
+                    has_jwk_d_param: has_d,
+                    has_jwk_oct_kty: kty == "oct",
+                    ..Default::default()
+                };
+                for jwk_field in ["d", "p", "q", "dp", "dq", "qi", "k"] {
+                    if let Some(serde_json::Value::String(secret_val)) = map.get_mut(jwk_field) {
+                        let probe = format!("\"{jwk_field}\": \"{secret_val}\"");
+                        if engine
+                            .scan_text_with_hints(&probe, None, jwk_hints)
+                            .iter()
+                            .any(|m| m.rule_id == "jwk-private-key")
+                        {
+                            *secret_val =
+                                crate::rules::redact_replacement("jwk-private-key", secret_val);
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            for v in map.values_mut() {
+                count += redact_json_secrets_in_place(v, depth + 1, engine);
+            }
+            count
+        }
+        _ => 0,
+    }
+}
+
+/// Performs a bounded single HTTP/1.1 request/response exchange (supporting TLS via `rustls` and
+/// `HTTP_PROXY`/`HTTPS_PROXY`) with strict `timeout` enforcement for `--verify` and `--inspect-mcp`.
+pub(crate) type HttpExchangeResponse = (u16, Vec<(String, String)>, String);
+
+pub(crate) fn simple_http_exchange(
+    method: &str,
+    target_url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> io::Result<HttpExchangeResponse> {
+    const MAX_EXCHANGE_RESP_BYTES: usize = 2 * 1024 * 1024;
+
+    let parsed = parse_target_url(target_url)?;
+    let proxy = proxy_for_url(target_url, &parsed.host);
+    let mut up_reader = open_fresh_upstream(&parsed, &proxy, timeout)?;
+    let _ = up_reader
+        .get_ref()
+        .tcp_ref()
+        .set_read_timeout(Some(timeout));
+    let _ = up_reader
+        .get_ref()
+        .tcp_ref()
+        .set_write_timeout(Some(timeout));
+
+    let (request_target, extra_proxy_auth) = match (&proxy, parsed.is_https) {
+        (Some(p), false) => (target_url.to_string(), p.basic_auth.clone()),
+        _ => (parsed.origin_target.clone(), None),
+    };
+
+    let default_port = if parsed.is_https { 443 } else { 80 };
+    let host_hdr = if parsed.host.contains(':') {
+        if parsed.port == default_port {
+            format!("[{}]", parsed.host)
+        } else {
+            format!("[{}]:{}", parsed.host, parsed.port)
+        }
+    } else if parsed.port == default_port {
+        parsed.host.clone()
+    } else {
+        format!("{}:{}", parsed.host, parsed.port)
+    };
+
+    let payload = body.unwrap_or(&[]);
+    let mut req_buf = Vec::with_capacity(384 + payload.len());
+    write!(req_buf, "{method} {request_target} HTTP/1.1\r\n")?;
+    write!(req_buf, "Host: {host_hdr}\r\n")?;
+    if let Some(auth) = extra_proxy_auth {
+        write!(req_buf, "Proxy-Authorization: Basic {auth}\r\n")?;
+    }
+    let mut has_user_agent = false;
+    for &(k, v) in headers {
+        if k.eq_ignore_ascii_case("user-agent") {
+            has_user_agent = true;
+        }
+        if matches!(
+            k.to_ascii_lowercase().as_str(),
+            "host" | "content-length" | "connection" | "accept-encoding"
+        ) {
+            continue;
+        }
+        write!(req_buf, "{k}: {v}\r\n")?;
+    }
+    if !has_user_agent {
+        write!(
+            req_buf,
+            "User-Agent: leaktap/{}\r\n",
+            env!("CARGO_PKG_VERSION")
+        )?;
+    }
+    write!(req_buf, "Accept-Encoding: identity\r\n")?;
+    if body.is_some() || matches!(method, "POST" | "PUT" | "PATCH") {
+        write!(req_buf, "Content-Length: {}\r\n", payload.len())?;
+    }
+    write!(req_buf, "Connection: close\r\n\r\n")?;
+    req_buf.extend_from_slice(payload);
+
+    up_reader.get_mut().write_all(&req_buf)?;
+    up_reader.get_mut().flush()?;
+
+    let status_line = match read_bounded_line(&mut up_reader, MAX_HEADER_LINE_BYTES)? {
+        BoundedLine::Line(l) => l,
+        BoundedLine::Eof => {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "upstream closed before status line",
+            ))
+        }
+        BoundedLine::TooLong => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "upstream status line too long",
+            ))
+        }
+    };
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
+    let mut resp_chunked = false;
+    let mut resp_content_length: Option<usize> = None;
+    let mut is_event_stream = false;
+
+    for _ in 0..(MAX_HEADER_COUNT * 2) {
+        let line = match read_bounded_line(&mut up_reader, MAX_HEADER_LINE_BYTES * 2)? {
+            BoundedLine::Eof => break,
+            BoundedLine::TooLong => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upstream response header too long",
+                ))
+            }
+            BoundedLine::Line(l) => l,
+        };
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_string();
+            let val = v.trim().to_string();
+            if key.eq_ignore_ascii_case("transfer-encoding")
+                && val.to_ascii_lowercase().contains("chunked")
+            {
+                resp_chunked = true;
+            } else if key.eq_ignore_ascii_case("content-length") {
+                resp_content_length = val.parse::<usize>().ok();
+            } else if key.eq_ignore_ascii_case("content-type")
+                && val.to_ascii_lowercase().contains("text/event-stream")
+            {
+                is_event_stream = true;
+            }
+            resp_headers.push((key, val));
+        }
+    }
+
+    let body_bytes = if method.eq_ignore_ascii_case("HEAD") || matches!(status_code, 204 | 304) {
+        Vec::new()
+    } else if is_event_stream && !resp_chunked {
+        let mut acc = Vec::new();
+        for _ in 0..256 {
+            match read_bounded_line(&mut up_reader, 64 * 1024) {
+                Ok(BoundedLine::Line(l)) => {
+                    acc.extend_from_slice(l.as_bytes());
+                    if l.contains("\"tools\"") || acc.len() >= MAX_EXCHANGE_RESP_BYTES {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        acc
+    } else if resp_chunked {
+        if is_event_stream {
+            let mut acc = Vec::new();
+            while let Ok(BoundedLine::Line(size_line)) = read_bounded_line(&mut up_reader, 4096) {
+                let hex = size_line.trim().split(';').next().unwrap_or("0").trim();
+                let Ok(chunk_len) = usize::from_str_radix(hex, 16) else {
+                    break;
+                };
+                if chunk_len == 0 || acc.len().saturating_add(chunk_len) > MAX_EXCHANGE_RESP_BYTES {
+                    break;
+                }
+                let mut chunk = vec![0u8; chunk_len];
+                if up_reader.read_exact(&mut chunk).is_err() {
+                    break;
+                }
+                let _ = read_bounded_line(&mut up_reader, 4);
+                acc.extend_from_slice(&chunk);
+                if String::from_utf8_lossy(&chunk).contains("\"tools\"") {
+                    break;
+                }
+            }
+            acc
+        } else {
+            read_chunked_body(&mut up_reader, MAX_EXCHANGE_RESP_BYTES)?.unwrap_or_default()
+        }
+    } else if let Some(cl) = resp_content_length {
+        let cap = cl.min(MAX_EXCHANGE_RESP_BYTES);
+        let mut out = Vec::with_capacity(cap.min(65536));
+        let _ = (&mut up_reader).take(cap as u64).read_to_end(&mut out);
+        out
+    } else {
+        let mut out = Vec::new();
+        let _ = (&mut up_reader)
+            .take(MAX_EXCHANGE_RESP_BYTES as u64)
+            .read_to_end(&mut out);
+        out
+    };
+
+    Ok((
+        status_code,
+        resp_headers,
+        String::from_utf8_lossy(&body_bytes).into_owned(),
+    ))
 }
 
 fn collect_json_value_strings(val: &serde_json::Value, depth: usize, out: &mut String) {

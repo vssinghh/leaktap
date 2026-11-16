@@ -72,10 +72,15 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
     let mut out = String::new();
 
     let version = env!("CARGO_PKG_VERSION");
+    let mode_subtitle = if report.active_checks {
+        "— local audit + opt-in active verification/MCP checks"
+    } else {
+        "— local offline audit (0 network requests)"
+    };
     out.push_str(&format!(
         "{} {}\n",
         st.bold(&format!("leaktap v{version}")),
-        st.dim("— local offline audit (0 network requests)")
+        st.dim(mode_subtitle)
     ));
 
     let total_files = report.transcripts.files_scanned + report.mcp_files_scanned;
@@ -132,6 +137,11 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
                 Some(key) if !key.is_empty() => format!("{} ({key})", f.rule_name),
                 _ => f.rule_name.clone(),
             };
+            let ver_tag = match f.verified {
+                Some(true) => format!(" {}", st.red("[VERIFIED ACTIVE]")),
+                Some(false) => format!(" {}", st.dim("[unverified/inactive]")),
+                None => String::new(),
+            };
             let meta_note = if f.distinct_files > 1 {
                 format!(
                     " ({}x across {} files) [{sev_str}] [fp:{}]",
@@ -143,12 +153,13 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
                 format!(" [{sev_str}] [fp:{}]", f.fingerprint)
             };
             out.push_str(&format!(
-                "  {branch} {:<20} {:<22} {}:{}{}\n",
+                "  {branch} {:<20} {:<22} {}:{}{}{}\n",
                 rule_label,
                 st.yellow(&f.masked),
                 f.first_file,
                 f.first_line,
-                st.dim(&meta_note)
+                st.dim(&meta_note),
+                ver_tag
             ));
         }
         if report.transcripts.secret_findings.len() > max_rows {
@@ -273,15 +284,16 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
                     }
                 }
             }
-            if has_text_secret {
-                out.push_str("  • Preview & scrub local logs:    leaktap clean --apply\n");
+            if has_text_secret || has_sqlite_secret {
+                out.push_str("  • Preview & scrub local logs/DBs: leaktap clean --apply\n");
             }
-            if has_sqlite_secret {
-                out.push_str("  • Purge SQLite chat state:       clear session history inside the IDE/CLI (binary DBs are not rewritten in place)\n");
-            }
+            out.push_str(&format!(
+                "  • {} scrubbing local files does NOT revoke exposed keys — rotate leaked credentials at the provider immediately\n",
+                st.yellow("Rotate exposed credentials:")
+            ));
         }
         out.push_str(
-            "  • Start a watched CLI session:   leaktap --block-secrets claude   (or `codex` / `agy`)\n",
+            "  • Start a watched CLI session:   leaktap --block-secrets claude   (or `--redact-secrets`)\n",
         );
     }
 
@@ -295,7 +307,7 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
     if summary.total_redactions == 0 {
         if summary.uncleaned_sqlite_secrets > 0 {
             out.push_str(&format!(
-                "{} 0 text files modified, but {} secret(s) remain inside {} binary SQLite/WAL file(s):\n",
+                "{} 0 text/table rows modified, but {} secret(s) remain inside {} binary SQLite/WAL file(s):\n",
                 st.yellow("! Warning —"),
                 summary.uncleaned_sqlite_secrets,
                 summary.uncleaned_sqlite_files.len()
@@ -309,7 +321,7 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
                 out.push_str(&format!("  {branch} {file}\n"));
             }
             out.push_str(
-                "SQLite state databases are not rewritten as raw text to avoid corrupting B-tree page offsets. Clear chat/session history inside the IDE/CLI (or remove the local state DB while the app is closed).\n",
+                "Close the IDE/CLI so the SQLite database is unlocked and re-run `leaktap clean --apply`, or clear chat history inside the app. Also rotate exposed credentials at the provider immediately.\n",
             );
             return out;
         }
@@ -364,7 +376,7 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
 
     if summary.uncleaned_sqlite_secrets > 0 {
         out.push_str(&format!(
-            "\n{} {} secret(s) still remain inside {} binary SQLite/WAL file(s) ({}) — clear chat/session history inside the IDE/CLI to purge binary DB rows.\n",
+            "\n{} {} secret(s) still remain inside {} binary SQLite/WAL file(s) ({}) — close the IDE/CLI or clear session history inside the app to purge remaining binary DB pages.\n",
             st.yellow("! Warning:"),
             summary.uncleaned_sqlite_secrets,
             summary.uncleaned_sqlite_files.len(),
@@ -374,12 +386,17 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
         out.push_str(&format!(
             "\n{}\n",
             st.dim(&format!(
-                "Note: skipped {} binary/SQLite file(s) ({}) — use CLI session clear commands to purge binary DB rows.",
+                "Note: skipped {} binary/SQLite file(s) ({}) with 0 uncleaned secrets.",
                 summary.skipped_binary_files.len(),
                 summary.skipped_binary_files.join(", ")
             ))
         ));
     }
+
+    out.push_str(&format!(
+        "\n{} Scrubbing local transcripts or SQLite databases does NOT revoke exposed keys — rotate any leaked credentials at the provider immediately.\n",
+        st.yellow("! Security reminder:")
+    ));
 
     if !summary.applied {
         out.push_str(&format!(

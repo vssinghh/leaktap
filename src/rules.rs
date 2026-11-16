@@ -1141,7 +1141,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "client-secret",
             "access-token",
         ],
-        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passwd|_pass|_token|-secret|-api-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|ApiKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password)|API_KEY|APIKEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSWD|SECRET|TOKEN|api_key|apikey|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passwd|apiKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?]{12,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"|\\+u002[27]|["'])?([A-Za-z0-9/+=\-_!@#$%^&*~.?]{16,180})(?:\\+"|\\+u002[27]|["'])?)"#,
+        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passwd|_pass|_token|-secret|-api-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|ApiKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password)|API_KEY|APIKEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSWD|SECRET|TOKEN|api_key|apikey|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passwd|apiKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?(),;]{12,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"([^\s"\\]{12,180})\\+"|"([^\s"\\]{12,180})"|'([^\s'\\]{12,180})'|\\+u0022([^\s"'\\]{12,180})\\+u0022|\\+u0027([^\s"'\\]{12,180})\\+u0027|([A-Za-z0-9/+=\-_!@#$%^&*~.?]{12,180})))"#,
         secret_group: 1,
         min_entropy: 3.30,
     },
@@ -1637,7 +1637,7 @@ impl RuleEngine {
 
                 for caps in rule.regex.captures_iter(text) {
                     let m = if rule.id == "dotenv-generic-secret" {
-                        caps.get(1).or_else(|| caps.get(2))
+                        (1..=7).find_map(|g| caps.get(g))
                     } else {
                         caps.get(rule.secret_group)
                     };
@@ -2276,12 +2276,14 @@ impl RuleEngine {
             .iter()
             .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
             .count();
-        if printable * 10 < decoded.len() * 8 {
-            return None;
-        }
-        let decoded_cow = match std::str::from_utf8(&decoded) {
-            Ok(s) => std::borrow::Cow::Borrowed(s),
-            Err(_) => String::from_utf8_lossy(&decoded),
+        let decoded_cow: std::borrow::Cow<'_, str> = if printable * 10 >= decoded.len() * 8 {
+            match std::str::from_utf8(&decoded) {
+                Ok(s) => std::borrow::Cow::Borrowed(s),
+                Err(_) => String::from_utf8_lossy(&decoded),
+            }
+        } else {
+            let u16_str = decode_utf16_if_printable(&decoded)?;
+            std::borrow::Cow::Owned(u16_str)
         };
         let inner_hints = DocHints::from_text(&decoded_cow);
         self.scan_text_inner(
@@ -3394,6 +3396,14 @@ fn passes_post_filter(
             // secrets that start with `/`.
             if lower_val.starts_with("http://")
                 || lower_val.starts_with("https://")
+                || val.contains("://")
+                || val.starts_with('$')
+                || val.contains("${")
+                || val.contains("$(")
+                || val.contains("{{")
+                || val.contains("}}")
+                || (val.starts_with('^') && val.ends_with('$'))
+                || (val.starts_with('<') && val.ends_with('>'))
                 || looks_like_filesystem_path(val)
                 || is_uuid_like(&lower_val)
                 || val.contains("....")
@@ -3407,8 +3417,11 @@ fn passes_post_filter(
                     return false;
                 }
             }
-            let is_val_quoted =
-                match_start > 0 && matches!(full_text.as_bytes()[match_start - 1], b'"' | b'\'');
+            let prefix_before_val = &full_text[..match_start];
+            let is_val_quoted = (match_start > 0
+                && matches!(full_text.as_bytes()[match_start - 1], b'"' | b'\''))
+                || prefix_before_val.ends_with("u0022")
+                || prefix_before_val.ends_with("u0027");
             // Reject unquoted code member chains (`process.env.SECRET_KEY`, `self.config.api_key`)
             // and unquoted pure-alphabetic type names (`token: AuthenticationTokenService`)
             if !is_val_quoted {
@@ -3426,10 +3439,27 @@ fn passes_post_filter(
             }
             let is_pure_hex = val.bytes().all(|b| b.is_ascii_hexdigit());
             let ent = shannon_entropy(val);
-            let has_pw_complexity = val.bytes().any(|b| b.is_ascii_uppercase())
-                && val.bytes().any(|b| b.is_ascii_lowercase())
-                && val.bytes().any(|b| b.is_ascii_digit())
+            let has_upper = val.bytes().any(|b| b.is_ascii_uppercase());
+            let has_lower = val.bytes().any(|b| b.is_ascii_lowercase());
+            let has_digit = val.bytes().any(|b| b.is_ascii_digit());
+            let has_pw_symbol = val
+                .bytes()
+                .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'_' | b'-' | b'.' | b'/'));
+            let has_pw_complexity = has_upper
+                && has_lower
+                && has_digit
                 && val.bytes().any(|b| !b.is_ascii_alphanumeric());
+            if val.len() < 16 {
+                let class_count = u8::from(has_upper)
+                    + u8::from(has_lower)
+                    + u8::from(has_digit)
+                    + u8::from(has_pw_symbol);
+                let ok_short = (class_count >= 3 && has_pw_symbol && ent >= 3.30)
+                    || (has_upper && has_lower && has_digit && ent >= 3.55);
+                if !ok_short {
+                    return false;
+                }
+            }
             if !is_pure_hex && !has_pw_complexity && ent < 3.50 {
                 return false;
             }
@@ -3751,14 +3781,28 @@ pub fn is_likely_placeholder(val: &str) -> bool {
         let has_pw_symbol = val.bytes().any(|b| {
             matches!(
                 b,
-                b'!' | b'#' | b'$' | b'%' | b'^' | b'&' | b'*' | b'@' | b'?' | b'~'
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'^'
+                    | b'&'
+                    | b'*'
+                    | b'@'
+                    | b'?'
+                    | b'~'
+                    | b'('
+                    | b')'
+                    | b';'
+                    | b','
+                    | b'+'
+                    | b'='
             )
         });
         let has_upper = val.bytes().any(|b| b.is_ascii_uppercase());
         let has_lower = val.bytes().any(|b| b.is_ascii_lowercase());
         let has_digit = val.bytes().any(|b| b.is_ascii_digit());
         let ent = shannon_entropy(val);
-        if (has_pw_symbol && has_upper && has_lower && has_digit && val.len() >= 16 && ent >= 3.85)
+        if (has_pw_symbol && has_upper && has_lower && has_digit && val.len() >= 12 && ent >= 3.45)
             || (val.len() >= 32 && ent >= 4.5)
         {
             return false;
@@ -3976,12 +4020,83 @@ pub fn redact_replacement(rule_id: &str, raw: &str) -> String {
     "[REDACTED_BY_LEAKTAP]".to_string()
 }
 
-pub fn fingerprint_match(rule_id: &str, raw: &str) -> String {
+fn decode_utf16_if_printable(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 24 || !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    for is_le in [true, false] {
+        let mut units = Vec::with_capacity(bytes.len() / 2);
+        for &[b0, b1] in bytes.as_chunks::<2>().0 {
+            let u = if is_le {
+                u16::from_le_bytes([b0, b1])
+            } else {
+                u16::from_be_bytes([b0, b1])
+            };
+            units.push(u);
+        }
+        let slice = if units.first() == Some(&0xFEFF) {
+            &units[1..]
+        } else {
+            &units[..]
+        };
+        if let Ok(s) = String::from_utf16(slice) {
+            if s.len() >= 12 && !s.contains('\0') {
+                let ascii_print = s
+                    .bytes()
+                    .filter(|&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+                    .count();
+                if ascii_print * 10 >= s.len() * 8 {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
+static CONFIGURED_FINGERPRINT_SALT: std::sync::RwLock<Option<String>> =
+    std::sync::RwLock::new(None);
+
+pub fn set_configured_fingerprint_salt(salt: Option<String>) {
+    let cleaned = salt.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Ok(mut guard) = CONFIGURED_FINGERPRINT_SALT.write() {
+        *guard = cleaned;
+    }
+}
+
+pub fn active_fingerprint_salt() -> Option<String> {
+    if let Ok(env_salt) = std::env::var("LEAKTAP_FINGERPRINT_SALT") {
+        let trimmed = env_salt.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    CONFIGURED_FINGERPRINT_SALT
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+pub fn has_active_fingerprint_salt() -> bool {
+    active_fingerprint_salt().is_some()
+}
+
+pub fn fingerprint_match_with_salt(rule_id: &str, raw: &str, salt: Option<&str>) -> String {
     let mut hasher = Sha256::new();
+    if let Some(s) = salt.map(str::trim).filter(|s| !s.is_empty()) {
+        hasher.update(b"leaktap-salt-v1:");
+        hasher.update(s.as_bytes());
+        hasher.update(b"\0");
+    }
     hasher.update(rule_id.as_bytes());
     hasher.update(b":");
     hasher.update(raw.as_bytes());
     let digest = hasher.finalize();
     // 16 hex chars (64 bits) is collision-free for local dedup + SARIF partialFingerprints
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn fingerprint_match(rule_id: &str, raw: &str) -> String {
+    let salt = active_fingerprint_salt();
+    fingerprint_match_with_salt(rule_id, raw, salt.as_deref())
 }

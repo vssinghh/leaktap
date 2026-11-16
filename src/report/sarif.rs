@@ -56,8 +56,8 @@ pub const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
     ),
     (
         "mcp-plaintext-http",
-        "MCP Plaintext HTTP Transport",
-        "Remote MCP server connects over unencrypted http:// transport.",
+        "MCP Plaintext HTTP or WebSocket Transport",
+        "Remote MCP server connects over unencrypted http:// or ws:// transport.",
         Severity::High,
     ),
     (
@@ -65,6 +65,18 @@ pub const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         "MCP Outbound Telemetry Endpoint",
         "MCP configuration references a third-party analytics or telemetry endpoint.",
         Severity::Medium,
+    ),
+    (
+        "mcp-tool-poisoning",
+        "MCP Live Tool Poisoning",
+        "MCP tools/list schema or description contains prompt injection, stealth instructions, credential reads, or external exfiltration URLs.",
+        Severity::Critical,
+    ),
+    (
+        "mcp-tool-rugpull",
+        "MCP Live Tool Schema Rug-Pull",
+        "MCP tools/list schema or description changed silently since its recorded local pin.",
+        Severity::High,
     ),
     (
         "plugin-remote-code-exec",
@@ -178,6 +190,12 @@ pub const BUILTIN_LIVE_RULES: &[(&str, &str, &str, Severity)] = &[
         Severity::Medium,
     ),
     (
+        "secret-redacted",
+        "In-Transit Outgoing Secret Redacted",
+        "Detected secret in outgoing LLM API URL, header, or body was scrubbed to `[REDACTED:...]` before forwarding upstream (`--redact-secrets`).",
+        Severity::High,
+    ),
+    (
         "tcp-connection",
         "Outbound TCP Socket",
         "Outbound TCP connection opened by the wrapped CLI or child MCP/hook process (with PID & scrubbed cmdline).",
@@ -286,11 +304,14 @@ pub fn render_scan_sarif_with_rules(report: &FullScanReport, engine: &RuleEngine
     let mut results = Vec::new();
     let mut referenced_rules: HashSet<String> = HashSet::new();
 
-    for f in report
+    let has_salt = crate::rules::has_active_fingerprint_salt();
+
+    for (f, is_pii) in report
         .transcripts
         .secret_findings
         .iter()
-        .chain(report.transcripts.pii_findings.iter())
+        .map(|f| (f, false))
+        .chain(report.transcripts.pii_findings.iter().map(|f| (f, true)))
     {
         referenced_rules.insert(f.rule_id.clone());
 
@@ -319,6 +340,11 @@ pub fn render_scan_sarif_with_rules(report: &FullScanReport, engine: &RuleEngine
             Some(k) if !k.is_empty() => format!("{} `{k}`", f.rule_name),
             _ => f.rule_name.clone(),
         };
+        let verify_suffix = match f.verified {
+            Some(true) => " [VERIFIED ACTIVE]",
+            Some(false) => " [unverified/inactive]",
+            None => "",
+        };
 
         for (disp_str, loc_path, loc_line, loc_col) in loc_quads {
             let (loc_val, uri_str) = sarif_location(
@@ -330,21 +356,15 @@ pub fn render_scan_sarif_with_rules(report: &FullScanReport, engine: &RuleEngine
                 &extra_roots,
             );
             let commit_sha = extract_git_commit_sha(disp_str);
-            let loc_fp_seed = if let Some(sha) = commit_sha {
-                format!("{}:{sha}:{uri_str}:{loc_line}:{loc_col}", f.fingerprint)
-            } else {
-                format!("{}:{uri_str}:{loc_line}:{loc_col}", f.fingerprint)
-            };
-            let loc_fp = fingerprint_match(&f.rule_id, &loc_fp_seed);
             let msg_text = if let Some(sha) = commit_sha {
                 format!(
-                    "{} ({}) detected in git commit {} ({})",
-                    title_with_key, f.masked, sha, uri_str
+                    "{} ({}){} detected in git commit {} ({})",
+                    title_with_key, f.masked, verify_suffix, sha, uri_str
                 )
             } else {
                 format!(
-                    "{} ({}) detected in local file or agent session transcript",
-                    title_with_key, f.masked
+                    "{} ({}){} detected in local file or agent session transcript",
+                    title_with_key, f.masked, verify_suffix
                 )
             };
             let mut res_obj = json!({
@@ -353,19 +373,44 @@ pub fn render_scan_sarif_with_rules(report: &FullScanReport, engine: &RuleEngine
                 "message": {
                     "text": msg_text
                 },
-                "locations": [loc_val],
-                "partialFingerprints": {
-                    "leaktapFingerprint/v1": f.fingerprint,
-                    "leaktapLocationFingerprint/v1": loc_fp
-                }
+                "locations": [loc_val]
             });
-            if commit_sha.is_some() || f.secret_key.is_some() {
+            // Privacy boundary: omit unsalted value hashes (`partialFingerprints`) on low-entropy
+            // PII findings (emails, SSNs, phone numbers, IPv4s) unless a fingerprint salt is active.
+            if !is_pii || has_salt {
+                let loc_fp_seed = if let Some(sha) = commit_sha {
+                    format!("{}:{sha}:{uri_str}:{loc_line}:{loc_col}", f.fingerprint)
+                } else {
+                    format!("{}:{uri_str}:{loc_line}:{loc_col}", f.fingerprint)
+                };
+                let loc_fp = fingerprint_match(&f.rule_id, &loc_fp_seed);
+                if let Some(map) = res_obj.as_object_mut() {
+                    map.insert(
+                        "partialFingerprints".to_string(),
+                        json!({
+                            "leaktapFingerprint/v1": f.fingerprint,
+                            "leaktapLocationFingerprint/v1": loc_fp
+                        }),
+                    );
+                }
+            }
+            if commit_sha.is_some()
+                || f.secret_key.is_some()
+                || f.verified.is_some()
+                || f.verification_detail.is_some()
+            {
                 let mut props = serde_json::Map::new();
                 if let Some(sha) = commit_sha {
                     props.insert("commitSha".to_string(), json!(sha));
                 }
                 if let Some(ref key) = f.secret_key {
                     props.insert("secretKey".to_string(), json!(key));
+                }
+                if let Some(ver) = f.verified {
+                    props.insert("verified".to_string(), json!(ver));
+                }
+                if let Some(ref det) = f.verification_detail {
+                    props.insert("verificationDetail".to_string(), json!(det));
                 }
                 if let Some(map) = res_obj.as_object_mut() {
                     map.insert("properties".to_string(), Value::Object(props));
