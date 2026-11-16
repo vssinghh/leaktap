@@ -72,14 +72,29 @@ impl HeaderAuditor {
             return findings;
         }
 
-        // Standard API auth headers are expected on direct provider calls; skip noisy alerts on them
-        // unless someone stuffed an email or unrelated secret inside a non-auth header.
+        // Standard API auth headers carry LLM provider tokens (`sk-ant-...`, `sk-proj-...`, `AIza...`, OAuth/JWT);
+        // non-LLM secrets (`sk_live_...`, `AKIA...`, `ghp_...`, DB URIs, PEM keys) must still be flagged and blocked!
         let is_standard_auth_header = matches!(
             lower_name.as_str(),
             "authorization" | "x-api-key" | "anthropic-api-key" | "api-key" | "x-goog-api-key"
         );
 
-        for m in engine.scan_text(trimmed_val) {
+        let mut header_matches = engine.scan_text(trimmed_val);
+        if trimmed_val.contains('%') {
+            let decoded = percent_decode_header(trimmed_val);
+            if decoded != trimmed_val {
+                for dm in engine.scan_text(&decoded) {
+                    if !header_matches
+                        .iter()
+                        .any(|m| m.rule_id == dm.rule_id && m.fingerprint == dm.fingerprint)
+                    {
+                        header_matches.push(dm);
+                    }
+                }
+            }
+        }
+
+        for m in header_matches {
             match m.category {
                 RuleCategory::Pii if m.rule_id == "pii-email" => {
                     findings.push(HeaderFinding {
@@ -103,16 +118,30 @@ impl HeaderAuditor {
                         ),
                     });
                 }
-                RuleCategory::Secret if !is_standard_auth_header => {
-                    findings.push(HeaderFinding {
-                        rule_id: "header-secret-leak",
-                        severity: Severity::Critical,
-                        header_name: name.to_string(),
-                        detail: format!(
-                            "{} ({}) sent in non-auth HTTP header `{name}`",
-                            m.rule_name, m.masked
-                        ),
-                    });
+                RuleCategory::Secret => {
+                    let is_expected_llm_auth = is_standard_auth_header
+                        && matches!(
+                            m.rule_id.as_str(),
+                            "anthropic-api-key"
+                                | "openai-api-key"
+                                | "gcp-api-key"
+                                | "google-oauth-token"
+                                | "jwt-token"
+                                | "http-bearer-token"
+                                | "groq-api-key"
+                                | "perplexity-api-key"
+                        );
+                    if !is_expected_llm_auth {
+                        findings.push(HeaderFinding {
+                            rule_id: "header-secret-leak",
+                            severity: Severity::Critical,
+                            header_name: name.to_string(),
+                            detail: format!(
+                                "{} ({}) sent in HTTP header `{name}`",
+                                m.rule_name, m.masked
+                            ),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -186,4 +215,34 @@ fn detect_hostname() -> Option<String> {
         }
     }
     None
+}
+
+fn percent_decode_header(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = match bytes[i + 1] {
+                b'0'..=b'9' => Some(bytes[i + 1] - b'0'),
+                b'a'..=b'f' => Some(bytes[i + 1] - b'a' + 10),
+                b'A'..=b'F' => Some(bytes[i + 1] - b'A' + 10),
+                _ => None,
+            };
+            let lo = match bytes[i + 2] {
+                b'0'..=b'9' => Some(bytes[i + 2] - b'0'),
+                b'a'..=b'f' => Some(bytes[i + 2] - b'a' + 10),
+                b'A'..=b'F' => Some(bytes[i + 2] - b'A' + 10),
+                _ => None,
+            };
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

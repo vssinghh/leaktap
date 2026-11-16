@@ -92,7 +92,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
     }
 
     let roots_label = if report.roots.is_empty() {
-        "workspace MCP configs".to_string()
+        "workspace MCP & instruction configs".to_string()
     } else {
         report.roots.join(", ")
     };
@@ -102,14 +102,18 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         total_files, size_str, ms, roots_label
     ));
 
-    // Section 1: Leaked secrets in transcripts
+    // Section 1: Leaked secrets
     if !report.transcripts.secret_findings.is_empty() {
         let count = report.transcripts.secret_findings.len();
-        out.push_str(&format!(
-            "{}  {} unique secret(s) found in local agent transcripts\n",
-            st.red("CRITICAL"),
-            count
-        ));
+        let max_sec_sev = report
+            .transcripts
+            .secret_findings
+            .iter()
+            .map(|f| f.severity)
+            .max()
+            .unwrap_or(Severity::High);
+        let sec_badge = format_severity_badge(&st, max_sec_sev);
+        out.push_str(&format!("{sec_badge}  {count} unique secret(s) found\n"));
 
         let max_rows = 20usize;
         let shown = report.transcripts.secret_findings.len().min(max_rows);
@@ -123,18 +127,28 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             } else {
                 "├─"
             };
-            let repeat_note = if f.occurrences > 1 {
-                format!(" ({}x)", f.occurrences)
+            let sev_str = f.severity.as_str();
+            let rule_label = match f.secret_key.as_deref() {
+                Some(key) if !key.is_empty() => format!("{} ({key})", f.rule_name),
+                _ => f.rule_name.clone(),
+            };
+            let meta_note = if f.distinct_files > 1 {
+                format!(
+                    " ({}x across {} files) [{sev_str}] [fp:{}]",
+                    f.occurrences, f.distinct_files, f.fingerprint
+                )
+            } else if f.occurrences > 1 {
+                format!(" ({}x) [{sev_str}] [fp:{}]", f.occurrences, f.fingerprint)
             } else {
-                String::new()
+                format!(" [{sev_str}] [fp:{}]", f.fingerprint)
             };
             out.push_str(&format!(
                 "  {branch} {:<20} {:<22} {}:{}{}\n",
-                f.rule_name,
+                rule_label,
                 st.yellow(&f.masked),
                 f.first_file,
                 f.first_line,
-                st.dim(&repeat_note)
+                st.dim(&meta_note)
             ));
         }
         if report.transcripts.secret_findings.len() > max_rows {
@@ -148,15 +162,13 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
 
     // Section 2: MCP server, plugin, hook, and skill issues
     if !report.mcp_findings.is_empty() {
-        let has_crit = report
+        let max_mcp_sev = report
             .mcp_findings
             .iter()
-            .any(|m| m.severity == Severity::Critical);
-        let badge = if has_crit {
-            st.red("CRITICAL")
-        } else {
-            st.yellow("HIGH    ")
-        };
+            .map(|m| m.severity)
+            .max()
+            .unwrap_or(Severity::Medium);
+        let badge = format_severity_badge(&st, max_mcp_sev);
         out.push_str(&format!(
             "{badge}  {} MCP / plugin risk(s) detected\n",
             report.mcp_findings.len()
@@ -166,10 +178,20 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             let is_last = idx + 1 == report.mcp_findings.len();
             let branch = if is_last { "└─" } else { "├─" };
             let cont = if is_last { "   " } else { "│  " };
+            let loc_str = if m.line > 0 {
+                format!("{}:{}", m.config_file, m.line)
+            } else {
+                m.config_file.clone()
+            };
             out.push_str(&format!(
                 "  {branch} {} {}\n",
                 st.bold(&m.server_name),
-                st.dim(&format!("({})", m.config_file))
+                st.dim(&format!(
+                    "({loc_str}) [{} · {}] [fp:{}]",
+                    m.severity.as_str(),
+                    m.rule_id,
+                    m.fingerprint
+                ))
             ));
             out.push_str(&format!("  {cont}  {}\n", m.message));
         }
@@ -190,6 +212,11 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             .iter()
             .filter(|f| f.rule_id == "internal-hostname")
             .count();
+        let other_count = report
+            .transcripts
+            .pii_findings
+            .len()
+            .saturating_sub(email_count + host_count);
         let total_hits: usize = report
             .transcripts
             .pii_findings
@@ -198,7 +225,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             .sum();
 
         out.push_str(&format!(
-            "{}  Identity & internal metadata in outbound context\n",
+            "{}  Identity & internal metadata in scanned files\n",
             st.cyan("MEDIUM  ")
         ));
         let mut parts = Vec::new();
@@ -208,8 +235,11 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         if host_count > 0 {
             parts.push(format!("{host_count} internal hostname(s)"));
         }
+        if other_count > 0 {
+            parts.push(format!("{other_count} custom metadata match(es)"));
+        }
         out.push_str(&format!(
-            "  └─ {} appeared across {} transcript hit(s)\n\n",
+            "  └─ {} appeared across {} hit(s)\n\n",
             parts.join(" + "),
             total_hits
         ));
@@ -224,9 +254,35 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         out.push_str(&format!("{}\n", st.bold("Next steps:")));
         out.push_str("  • Open interactive dashboard:    leaktap ui\n");
         if !report.transcripts.secret_findings.is_empty() {
-            out.push_str("  • Preview & scrub local logs:    leaktap clean --apply\n");
+            let mut has_text_secret = false;
+            let mut has_sqlite_secret = false;
+            for f in &report.transcripts.secret_findings {
+                if f.locations.is_empty() {
+                    if crate::scanner::is_sqlite_extension(&f.first_path) {
+                        has_sqlite_secret = true;
+                    } else {
+                        has_text_secret = true;
+                    }
+                } else {
+                    for loc in &f.locations {
+                        if crate::scanner::is_sqlite_extension(&loc.path) {
+                            has_sqlite_secret = true;
+                        } else {
+                            has_text_secret = true;
+                        }
+                    }
+                }
+            }
+            if has_text_secret {
+                out.push_str("  • Preview & scrub local logs:    leaktap clean --apply\n");
+            }
+            if has_sqlite_secret {
+                out.push_str("  • Purge SQLite chat state:       clear session history inside the IDE/CLI (binary DBs are not rewritten in place)\n");
+            }
         }
-        out.push_str("  • Start a watched CLI session: leaktap claude   (or `codex` / `agy`)\n");
+        out.push_str(
+            "  • Start a watched CLI session:   leaktap --block-secrets claude   (or `codex` / `agy`)\n",
+        );
     }
 
     out
@@ -237,11 +293,40 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
     let mut out = String::new();
 
     if summary.total_redactions == 0 {
+        if summary.uncleaned_sqlite_secrets > 0 {
+            out.push_str(&format!(
+                "{} 0 text files modified, but {} secret(s) remain inside {} binary SQLite/WAL file(s):\n",
+                st.yellow("! Warning —"),
+                summary.uncleaned_sqlite_secrets,
+                summary.uncleaned_sqlite_files.len()
+            ));
+            for (idx, file) in summary.uncleaned_sqlite_files.iter().enumerate() {
+                let branch = if idx + 1 == summary.uncleaned_sqlite_files.len() {
+                    "└─"
+                } else {
+                    "├─"
+                };
+                out.push_str(&format!("  {branch} {file}\n"));
+            }
+            out.push_str(
+                "SQLite state databases are not rewritten as raw text to avoid corrupting B-tree page offsets. Clear chat/session history inside the IDE/CLI (or remove the local state DB while the app is closed).\n",
+            );
+            return out;
+        }
         out.push_str(&format!(
             "{} Inspected {} file(s); 0 exposed secrets needed redaction.\n",
             st.green("✓ Clean —"),
             summary.files_inspected
         ));
+        if !summary.skipped_binary_files.is_empty() {
+            out.push_str(&format!(
+                "{}\n",
+                st.dim(&format!(
+                    "Note: skipped {} binary/SQLite file(s) during text redaction.",
+                    summary.skipped_binary_files.len()
+                ))
+            ));
+        }
         return out;
     }
 
@@ -267,7 +352,7 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
         let bak_note = item
             .backup_file
             .as_ref()
-            .map(|b| format!(" (backup: {b})"))
+            .map(|b| format!(" (0600 backup: {b})"))
             .unwrap_or_default();
         out.push_str(&format!(
             "  {branch} {} — {} secret(s){}\n",
@@ -277,9 +362,28 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
         ));
     }
 
+    if summary.uncleaned_sqlite_secrets > 0 {
+        out.push_str(&format!(
+            "\n{} {} secret(s) still remain inside {} binary SQLite/WAL file(s) ({}) — clear chat/session history inside the IDE/CLI to purge binary DB rows.\n",
+            st.yellow("! Warning:"),
+            summary.uncleaned_sqlite_secrets,
+            summary.uncleaned_sqlite_files.len(),
+            summary.uncleaned_sqlite_files.join(", ")
+        ));
+    } else if !summary.skipped_binary_files.is_empty() {
+        out.push_str(&format!(
+            "\n{}\n",
+            st.dim(&format!(
+                "Note: skipped {} binary/SQLite file(s) ({}) — use CLI session clear commands to purge binary DB rows.",
+                summary.skipped_binary_files.len(),
+                summary.skipped_binary_files.join(", ")
+            ))
+        ));
+    }
+
     if !summary.applied {
         out.push_str(&format!(
-            "\nRun {} to write these redactions to disk (creates `.leaktap.bak` backups by default).\n",
+            "\nRun {} to scrub these files in place without leaving plaintext backup copies on disk (pass `--backup` if you want `0600` `.leaktap.bak` copies).\n",
             st.bold("`leaktap clean --apply`")
         ));
     }
@@ -292,14 +396,14 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{}\n\n",
-        st.bold("Built-in Detection Rules (Transcripts & Live Wiretap)")
+        st.bold("Detection Rules (Transcripts, SQLite State & Live Wiretap)")
     ));
     for r in engine.rules() {
         out.push_str(&format!(
-            "  {:<9} {:<24} {}\n",
+            "  {:<9} {:<27} {}\n",
             r.severity.as_str(),
             r.id,
-            st.dim(r.description)
+            st.dim(&r.description)
         ));
     }
     out.push_str(&format!(
@@ -310,22 +414,37 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         (
             "CRITICAL",
             "mcp-hardcoded-secret",
-            "Plaintext secret or token stored inside MCP `env` or `headers`.",
+            "Plaintext secret or token stored inside MCP `env`, `args`, or `headers`.",
+        ),
+        (
+            "CRITICAL",
+            "mcp-remote-code-exec",
+            "MCP server command downloads and executes remote payloads (`curl | sh`, `eval`, etc.).",
+        ),
+        (
+            "CRITICAL",
+            "mcp-credential-harvest",
+            "MCP server command directly reads `~/.ssh`, `~/.aws`, keychain, or CLI auth stores.",
+        ),
+        (
+            "HIGH",
+            "mcp-inline-code-exec",
+            "MCP server executes inline `npx -c` / `python -c` / `node -e` code.",
         ),
         (
             "HIGH",
             "mcp-unpinned-package",
-            "Unpinned `npx -y` / `uvx` package executing latest remote registry code.",
+            "Unpinned `npx -y` / `uvx` / `uv run --with` / `bunx` package executing mutable registry code.",
         ),
         (
             "HIGH",
             "mcp-unrestricted-shell",
-            "MCP server exposing raw unrestricted shell execution.",
+            "MCP server exposing raw unrestricted shell execution or privileged container flags.",
         ),
         (
             "HIGH",
             "mcp-broad-filesystem",
-            "MCP server granted root (`/`) or full home (`~`) directory access.",
+            "MCP server granted `/`, `~`, or sensitive directories (`~/.ssh`, `~/.aws`, `/etc`, `docker.sock`).",
         ),
         (
             "HIGH",
@@ -334,23 +453,48 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         ),
         (
             "HIGH",
+            "mcp-oversized-config",
+            "MCP config exceeding the 16 MiB structured AST limit.",
+        ),
+        (
+            "MEDIUM",
             "mcp-telemetry-endpoint",
             "MCP config referencing known third-party telemetry/analytics endpoints.",
         ),
         (
             "CRITICAL",
             "plugin-remote-code-exec",
-            "Plugin, hook, or skill executing piped or base64-decoded remote shell payloads.",
+            "Plugin, hook, or skill executing piped, encoded, or dynamically fetched remote code.",
         ),
         (
             "CRITICAL",
             "plugin-credential-harvest",
-            "Plugin, hook, or skill reading `~/.ssh`, `~/.aws`, keychain, or CLI auth files.",
+            "Plugin, hook, or skill reading `~/.ssh`, `~/.aws`, `~/.npmrc`, `~/.config/gh`, or keychain.",
+        ),
+        (
+            "CRITICAL",
+            "plugin-env-exfiltration",
+            "Plugin, hook, MCP script, or skill exfiltrating `process.env` / `os.environ` / API keys over the network.",
         ),
         (
             "CRITICAL",
             "plugin-hardcoded-secret",
             "Live API key or credential bundled inside an installed plugin, hook, or skill.",
+        ),
+        (
+            "CRITICAL",
+            "plugin-env-code-exec",
+            "Settings overriding `NODE_OPTIONS`, `LD_PRELOAD`, `BASH_ENV`, `GIT_SSH_COMMAND`, or workspace `PATH`.",
+        ),
+        (
+            "CRITICAL",
+            "plugin-api-base-override",
+            "Settings redirecting LLM base URLs, `HTTPS_PROXY`, custom CA bundles, or disabling TLS checks.",
+        ),
+        (
+            "HIGH",
+            "plugin-workspace-hook-exec",
+            "Workspace settings registering an automatic shell or helper command hook.",
         ),
         (
             "HIGH",
@@ -360,7 +504,12 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         (
             "HIGH",
             "plugin-prompt-injection",
-            "Skill or rule markdown containing stealth override instructions or hidden HTML/Unicode payloads.",
+            "Skill or instruction file (`SKILL.md`, `CLAUDE.md`, `.cursorrules`, `.windsurf/rules`, `.clinerules`) with stealth overrides or exfil commands.",
+        ),
+        (
+            "HIGH",
+            "plugin-oversized-config",
+            "Plugin or workspace JSON config exceeding the 16 MiB structured AST limit.",
         ),
         (
             "HIGH",
@@ -369,18 +518,18 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         ),
     ];
     for (sev, id, desc) in mcp_rules {
-        out.push_str(&format!("  {sev:<9} {id:<24} {}\n", st.dim(desc)));
+        out.push_str(&format!("  {sev:<9} {id:<27} {}\n", st.dim(desc)));
     }
 
     out.push_str(&format!(
         "\n{}\n\n",
-        st.bold("Built-in Live HTTP Header & Socket Wiretap Rules (`tap`)")
+        st.bold("Built-in Live HTTP Header, Prompt Blocking & Socket Wiretap Rules (`tap`)")
     ));
     let live_rules = [
         (
             "CRITICAL",
             "header-secret-leak",
-            "API key or token sent inside a non-auth HTTP header.",
+            "Non-provider secret or leaked token sent inside an outgoing HTTP header (blocked under `--block-secrets`).",
         ),
         (
             "HIGH",
@@ -400,13 +549,26 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         (
             "MEDIUM",
             "tcp-connection",
-            "Outbound TCP connection opened by the wrapped agent or child MCP process.",
+            "Outbound TCP connection opened by the wrapped CLI or child MCP/hook process (with PID & cmdline).",
+        ),
+        (
+            "MEDIUM",
+            "udp-connection",
+            "Connected outbound UDP socket opened by the wrapped CLI or child MCP/hook process (with PID & cmdline).",
         ),
     ];
     for (sev, id, desc) in live_rules {
-        out.push_str(&format!("  {sev:<9} {id:<24} {}\n", st.dim(desc)));
+        out.push_str(&format!("  {sev:<9} {id:<27} {}\n", st.dim(desc)));
     }
     out
+}
+
+fn format_severity_badge(st: &Style, sev: Severity) -> String {
+    match sev {
+        Severity::Critical => st.red("CRITICAL"),
+        Severity::High => st.yellow("HIGH    "),
+        Severity::Medium => st.cyan("MEDIUM  "),
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

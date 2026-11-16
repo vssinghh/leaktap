@@ -1,6 +1,6 @@
 {
   "name": "leaktap",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "description": "See what your AI coding CLIs leak. Offline secret, MCP & plugin auditor, interactive terminal UI, and live CLI wiretap.",
   "license": "MIT",
   "repository": {
@@ -31,10 +31,10 @@
     "node": ">=18.0.0"
   },
   "optionalDependencies": {
-    "@leaktap/darwin-arm64": "0.2.8",
-    "@leaktap/darwin-x64": "0.2.8",
-    "@leaktap/linux-x64": "0.2.8",
-    "@leaktap/linux-arm64": "0.2.8",
-    "@leaktap/win32-x64": "0.2.8"
+    "@leaktap/darwin-arm64": "0.3.0",
+    "@leaktap/darwin-x64": "0.3.0",
+    "@leaktap/linux-x64": "0.3.0",
+    "@leaktap/linux-arm64": "0.3.0",
+    "@leaktap/win32-x64": "0.3.0"
   }
 }

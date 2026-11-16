@@ -17,15 +17,27 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Configure Rust stable toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
+      - name: Validate npm launcher syntax
+        if: matrix.os == 'ubuntu-latest'
+        run: node --check npm/leaktap/bin/leaktap.js
+      - name: Install cargo-audit
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-audit
+      - name: Audit Cargo.lock against RustSec Advisory DB
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo audit
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run unit and integration tests
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets

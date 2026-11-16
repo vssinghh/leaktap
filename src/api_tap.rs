@@ -1,22 +1,125 @@
 use crate::header_audit::HeaderAuditor;
 use crate::rules::{RuleCategory, RuleEngine};
+use flate2::bufread::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const MAX_CONCURRENT_TAP_CONNS: usize = 64;
+const MAX_REQUEST_LINE_BYTES: usize = 16 * 1024;
+const MAX_HEADER_LINE_BYTES: usize = 16 * 1024;
+const MAX_TOTAL_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HEADER_COUNT: usize = 128;
+const MAX_IDLE_CONNS_PER_ORIGIN: usize = 8;
+const MAX_TOTAL_IDLE_CONNS: usize = 64;
+const IDLE_CONN_TTL: Duration = Duration::from_secs(45);
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct PoolKey {
+    is_https: bool,
+    host: String,
+    port: u16,
+    proxy_tag: String,
+}
+
+struct IdleUpstreamConn {
+    reader: BufReader<UpstreamStream>,
+    parked_at: Instant,
+}
+
+type UpstreamPool = Arc<Mutex<HashMap<PoolKey, VecDeque<IdleUpstreamConn>>>>;
+
+struct ConnSlotGuard(Arc<AtomicUsize>);
+
+impl Drop for ConnSlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+enum BoundedLine {
+    Line(String),
+    Eof,
+    TooLong,
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<BoundedLine> {
+    let mut buf = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if buf.is_empty() {
+                return Ok(BoundedLine::Eof);
+            }
+            return Ok(BoundedLine::Line(
+                String::from_utf8_lossy(&buf).into_owned(),
+            ));
+        }
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            let take_len = newline_pos + 1;
+            if buf.len().saturating_add(take_len) > max_bytes {
+                reader.consume(take_len);
+                return Ok(BoundedLine::TooLong);
+            }
+            buf.extend_from_slice(&available[..take_len]);
+            reader.consume(take_len);
+            return Ok(BoundedLine::Line(
+                String::from_utf8_lossy(&buf).into_owned(),
+            ));
+        }
+        let chunk_len = available.len();
+        if buf.len().saturating_add(chunk_len) > max_bytes {
+            reader.consume(chunk_len);
+            return Ok(BoundedLine::TooLong);
+        }
+        buf.extend_from_slice(available);
+        reader.consume(chunk_len);
+    }
+}
+
+fn write_json_error_response(
+    client: &mut TcpStream,
+    status_line: &str,
+    code: &str,
+    message: &str,
+) -> io::Result<()> {
+    let payload = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": code,
+            "message": message,
+        }
+    })
+    .to_string();
+    write!(
+        client,
+        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        payload.len(),
+        payload
+    )?;
+    client.flush()
+}
 
 pub struct LocalApiTap {
+    pub port: u16,
     pub anthropic_base_url: String,
     pub openai_base_url: String,
     pub gemini_base_url: String,
     stop: Arc<AtomicBool>,
+    pool: UpstreamPool,
 }
 
 impl LocalApiTap {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut guard) = self.pool.lock() {
+            guard.clear();
+        }
     }
 }
 
@@ -29,11 +132,14 @@ struct UpstreamTargets {
     chatgpt: String,
     openai_explicit: bool,
     gemini: String,
+    block_secrets: bool,
+    pool: UpstreamPool,
 }
 
 fn spawn_accept_loop(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
+    active_conns: Arc<AtomicUsize>,
     upstreams: UpstreamTargets,
     engine: Arc<RuleEngine>,
     header_auditor: Arc<HeaderAuditor>,
@@ -43,13 +149,27 @@ fn spawn_accept_loop(
     thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((mut stream, _addr)) => {
                     let _ = stream.set_nonblocking(false);
+                    let prev = active_conns.fetch_add(1, Ordering::AcqRel);
+                    if prev >= MAX_CONCURRENT_TAP_CONNS {
+                        active_conns.fetch_sub(1, Ordering::AcqRel);
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                        let _ = write_json_error_response(
+                            &mut stream,
+                            "503 Service Unavailable",
+                            "leaktap_too_many_connections",
+                            "[leaktap] Too many concurrent local API tap connections.",
+                        );
+                        continue;
+                    }
+                    let slot_guard = ConnSlotGuard(Arc::clone(&active_conns));
                     let engine = Arc::clone(&engine);
                     let auditor = Arc::clone(&header_auditor);
                     let emit = Arc::clone(&emit);
                     let targets = upstreams.clone();
                     thread::spawn(move || {
+                        let _guard = slot_guard;
                         let _ = handle_client(stream, &targets, &engine, &auditor, &emit);
                     });
                 }
@@ -69,6 +189,7 @@ pub fn start_local_api_tap(
     chatgpt_upstream: String,
     openai_explicit: bool,
     gemini_upstream: String,
+    block_secrets: bool,
     engine: Arc<RuleEngine>,
     header_auditor: Arc<HeaderAuditor>,
     emit: TapCallback,
@@ -77,29 +198,33 @@ pub fn start_local_api_tap(
     let port = v4_listener.local_addr()?.port();
 
     let stop = Arc::new(AtomicBool::new(false));
+    let active_conns = Arc::new(AtomicUsize::new(0));
+    let pool: UpstreamPool = Arc::new(Mutex::new(HashMap::new()));
     let upstreams = UpstreamTargets {
         anthropic: anthropic_upstream.trim_end_matches('/').to_string(),
         openai: openai_upstream.trim_end_matches('/').to_string(),
         chatgpt: chatgpt_upstream.trim_end_matches('/').to_string(),
         openai_explicit,
         gemini: gemini_upstream.trim_end_matches('/').to_string(),
+        block_secrets,
+        pool: Arc::clone(&pool),
     };
 
     spawn_accept_loop(
         v4_listener,
         Arc::clone(&stop),
+        Arc::clone(&active_conns),
         upstreams.clone(),
         Arc::clone(&engine),
         Arc::clone(&header_auditor),
         Arc::clone(&emit),
     );
 
-    // Also bind IPv6 loopback `[::1]:port` when available so `http://localhost:<port>`
-    // (required by Gemini CLI for plain HTTP) connects immediately on IPv6-first systems.
     if let Ok(v6_listener) = TcpListener::bind(("[::1]", port)) {
         spawn_accept_loop(
             v6_listener,
             Arc::clone(&stop),
+            active_conns,
             upstreams,
             engine,
             header_auditor,
@@ -108,10 +233,12 @@ pub fn start_local_api_tap(
     }
 
     Ok(LocalApiTap {
+        port,
         anthropic_base_url: format!("http://127.0.0.1:{port}/_anthropic"),
         openai_base_url: format!("http://127.0.0.1:{port}/_openai"),
         gemini_base_url: format!("http://localhost:{port}/_gemini"),
         stop,
+        pool,
     })
 }
 
@@ -122,13 +249,24 @@ fn handle_client(
     auditor: &HeaderAuditor,
     emit: &TapCallback,
 ) -> io::Result<()> {
+    let _ = client.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = client.set_write_timeout(Some(Duration::from_secs(30)));
     let cloned = client.try_clone()?;
     let mut reader = BufReader::new(cloned);
 
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
-    }
+    let request_line = match read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES)? {
+        BoundedLine::Eof => return Ok(()),
+        BoundedLine::TooLong => {
+            let _ = write_json_error_response(
+                &mut client,
+                "414 URI Too Long",
+                "leaktap_uri_too_long",
+                "[leaktap] Request line exceeds 16 KiB limit.",
+            );
+            return Ok(());
+        }
+        BoundedLine::Line(l) => l,
+    };
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
         return Ok(());
@@ -137,40 +275,121 @@ fn handle_client(
     let raw_path = parts[1].to_string();
 
     let mut headers: Vec<(String, String)> = Vec::new();
-    let mut content_length: usize = 0;
+    let mut seen_content_length: Option<usize> = None;
+    let mut seen_transfer_encoding = false;
     let mut is_chunked = false;
     let mut content_encoding = String::new();
     let mut is_websocket_upgrade = false;
     let mut has_chatgpt_account_id = false;
+    let mut total_header_bytes: usize = 0;
+    let mut framing_error: Option<&'static str> = None;
 
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 || line == "\r\n" || line == "\n" {
+        let line = match read_bounded_line(&mut reader, MAX_HEADER_LINE_BYTES)? {
+            BoundedLine::Eof => break,
+            BoundedLine::TooLong => {
+                let _ = write_json_error_response(
+                    &mut client,
+                    "431 Request Header Fields Too Large",
+                    "leaktap_headers_too_large",
+                    "[leaktap] Individual HTTP header exceeds 16 KiB limit.",
+                );
+                return Ok(());
+            }
+            BoundedLine::Line(l) => l,
+        };
+        if line == "\r\n" || line == "\n" {
             break;
         }
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim().to_string();
-            let val = v.trim().to_string();
-            if key.eq_ignore_ascii_case("content-length") {
-                content_length = val.parse::<usize>().unwrap_or(0);
-            } else if key.eq_ignore_ascii_case("transfer-encoding")
-                && val.to_ascii_lowercase().contains("chunked")
-            {
-                is_chunked = true;
-            } else if key.eq_ignore_ascii_case("content-encoding") {
-                content_encoding = val.to_ascii_lowercase();
-            } else if key.eq_ignore_ascii_case("upgrade") && val.eq_ignore_ascii_case("websocket") {
-                is_websocket_upgrade = true;
-            } else if key.eq_ignore_ascii_case("chatgpt-account-id") && !val.is_empty() {
-                has_chatgpt_account_id = true;
-            }
-            headers.push((key, val));
+        total_header_bytes = total_header_bytes.saturating_add(line.len());
+        if total_header_bytes > MAX_TOTAL_HEADER_BYTES || headers.len() >= MAX_HEADER_COUNT {
+            let _ = write_json_error_response(
+                &mut client,
+                "431 Request Header Fields Too Large",
+                "leaktap_headers_too_large",
+                "[leaktap] HTTP headers exceed size or count limits.",
+            );
+            return Ok(());
         }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            framing_error = Some("obsolete folded HTTP header lines are not allowed");
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            framing_error = Some("malformed HTTP header line");
+            continue;
+        };
+        let key = k.trim().to_string();
+        if key.is_empty() || key.bytes().any(|b| b.is_ascii_whitespace()) {
+            framing_error = Some("invalid HTTP header field name");
+            continue;
+        }
+        let val = v.trim().to_string();
+        if key.eq_ignore_ascii_case("content-length") {
+            if seen_content_length.is_some() {
+                framing_error = Some("duplicate Content-Length headers are not allowed");
+            } else if val.is_empty() || !val.bytes().all(|b| b.is_ascii_digit()) {
+                framing_error = Some("invalid Content-Length header value");
+            } else {
+                match val.parse::<usize>() {
+                    Ok(len) => seen_content_length = Some(len),
+                    Err(_) => framing_error = Some("Content-Length value overflow"),
+                }
+            }
+        } else if key.eq_ignore_ascii_case("transfer-encoding") {
+            seen_transfer_encoding = true;
+            let tokens: Vec<String> = val
+                .split(',')
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if tokens.len() == 1 && tokens[0] == "chunked" && !is_chunked {
+                is_chunked = true;
+            } else {
+                framing_error = Some("unsupported or duplicate Transfer-Encoding header");
+            }
+        } else if key.eq_ignore_ascii_case("content-encoding") {
+            let enc_lc = val.to_ascii_lowercase();
+            if !enc_lc.is_empty() {
+                if content_encoding.is_empty() {
+                    content_encoding = enc_lc;
+                } else {
+                    content_encoding.push_str(", ");
+                    content_encoding.push_str(&enc_lc);
+                }
+            }
+        } else if key.eq_ignore_ascii_case("upgrade") && val.eq_ignore_ascii_case("websocket") {
+            is_websocket_upgrade = true;
+        } else if key.eq_ignore_ascii_case("chatgpt-account-id") && !val.is_empty() {
+            has_chatgpt_account_id = true;
+        }
+        headers.push((key, val));
     }
 
-    // Decline WebSocket upgrade probes immediately with HTTP 426 so clients like Codex CLI
-    // fall straight back to standard HTTP/SSE without retry delays or duplicate probe alerts.
+    if seen_transfer_encoding && seen_content_length.is_some() {
+        framing_error =
+            Some("simultaneous Transfer-Encoding and Content-Length headers are not allowed");
+    }
+
+    if let Some(reason) = framing_error {
+        emit(
+            "http",
+            "framing_rejected",
+            "http-invalid-framing",
+            "HIGH",
+            format!("Rejected ambiguous or malformed HTTP request ({reason})"),
+        );
+        let _ = write_json_error_response(
+            &mut client,
+            "400 Bad Request",
+            "leaktap_invalid_framing",
+            &format!("[leaktap] Invalid HTTP request framing: {reason}."),
+        );
+        return Ok(());
+    }
+
+    let content_length = seen_content_length.unwrap_or(0);
+
     if is_websocket_upgrade {
         let _ = write!(
             client,
@@ -180,18 +399,74 @@ fn handle_client(
         return Ok(());
     }
 
+    const MAX_TAP_BODY_BYTES: usize = 32 * 1024 * 1024;
+    const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+
+    if !is_chunked && content_length > MAX_TAP_BODY_BYTES {
+        emit(
+            "http-body",
+            "payload_too_large",
+            "tap-body-limit",
+            "HIGH",
+            format!(
+                "Rejected oversized API request ({content_length} bytes > {MAX_TAP_BODY_BYTES} byte tap limit)"
+            ),
+        );
+        let _ = write_json_error_response(
+            &mut client,
+            "413 Payload Too Large",
+            "leaktap_payload_too_large",
+            "[leaktap] Request body exceeds 32 MiB inspection limit.",
+        );
+        return Ok(());
+    }
+
     let body = if is_chunked {
-        read_chunked_body(&mut reader)?
+        match read_chunked_body(&mut reader, MAX_TAP_BODY_BYTES) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                emit(
+                    "http-body",
+                    "payload_too_large",
+                    "tap-body-limit",
+                    "HIGH",
+                    format!(
+                        "Rejected oversized chunked API request (> {MAX_TAP_BODY_BYTES} byte tap limit)"
+                    ),
+                );
+                let _ = write_json_error_response(
+                    &mut client,
+                    "413 Payload Too Large",
+                    "leaktap_payload_too_large",
+                    "[leaktap] Chunked request body exceeds 32 MiB inspection limit.",
+                );
+                return Ok(());
+            }
+            Err(chunk_err) => {
+                emit(
+                    "http",
+                    "framing_rejected",
+                    "http-invalid-framing",
+                    "HIGH",
+                    format!("Rejected malformed chunked HTTP body ({chunk_err})"),
+                );
+                let _ = write_json_error_response(
+                    &mut client,
+                    "400 Bad Request",
+                    "leaktap_invalid_framing",
+                    "[leaktap] Malformed chunked request body.",
+                );
+                return Ok(());
+            }
+        }
     } else if content_length > 0 {
-        let capped = content_length.min(32 * 1024 * 1024);
-        let mut buf = vec![0u8; capped];
+        let mut buf = vec![0u8; content_length];
         reader.read_exact(&mut buf)?;
         buf
     } else {
         Vec::new()
     };
 
-    // Route prefix (`/_anthropic/...`, `/_openai/...`, or `/_gemini/...`)
     let (provider, target_url) = if let Some(rest) = raw_path.strip_prefix("/_anthropic") {
         let suffix = if rest.is_empty() { "/" } else { rest };
         ("anthropic", format!("{}{suffix}", upstreams.anthropic))
@@ -228,9 +503,65 @@ fn handle_client(
         ),
     );
 
-    // 1. Audit outgoing HTTP headers (`User-Agent` email leaks, hostname/OS user, leaked keys)
+    let mut blocked_summary: Option<(String, String, &'static str)> = None;
+
+    // 1. Audit outgoing request URL path and query string (exempting Gemini's auth `key=` parameter)
+    let url_inspect_target = sanitize_request_path_for_scan(&raw_path, provider);
+    if !url_inspect_target.is_empty() {
+        let mut url_matches = engine.scan_text(&url_inspect_target);
+        let decoded_url = percent_decode(&url_inspect_target);
+        if decoded_url != url_inspect_target {
+            let mut seen_fps: HashSet<(String, String)> = url_matches
+                .iter()
+                .map(|m| (m.rule_id.clone(), m.fingerprint.clone()))
+                .collect();
+            for m in engine.scan_text(&decoded_url) {
+                if seen_fps.insert((m.rule_id.clone(), m.fingerprint.clone())) {
+                    url_matches.push(m);
+                }
+            }
+        }
+        for m in url_matches {
+            if upstreams.block_secrets
+                && m.category == RuleCategory::Secret
+                && blocked_summary.is_none()
+            {
+                blocked_summary = Some((
+                    m.rule_id.clone(),
+                    format!("URL query/path {} ({})", m.rule_name, m.masked),
+                    "leaktap_secret_blocked",
+                ));
+            }
+            let kind = match m.category {
+                RuleCategory::Secret => "secret_in_url",
+                RuleCategory::Pii => "pii_in_url",
+            };
+            emit(
+                "http-url",
+                kind,
+                &m.rule_id,
+                m.severity.as_str(),
+                format!(
+                    "{} ({}) sent in outgoing {provider} API URL",
+                    m.rule_name, m.masked
+                ),
+            );
+        }
+    }
+
+    // 2. Audit outgoing HTTP headers (`User-Agent` email leaks, hostname/OS user, leaked keys)
     for (k, v) in &headers {
         for hf in auditor.inspect_header(k, v, engine) {
+            if upstreams.block_secrets
+                && hf.rule_id == "header-secret-leak"
+                && blocked_summary.is_none()
+            {
+                blocked_summary = Some((
+                    hf.rule_id.to_string(),
+                    format!("non-auth HTTP header `{k}` ({})", hf.detail),
+                    "leaktap_secret_blocked",
+                ));
+            }
             emit(
                 "http-header",
                 "header_leak",
@@ -241,35 +572,171 @@ fn handle_client(
         }
     }
 
-    // 2. Audit outgoing request body (decompressing zstd payloads such as Codex CLI `/responses`)
+    // 3. Audit outgoing request body (decompressing zstd, br, multi-member gzip + RFC 1952 headers, deflate,
+    // multi-layer encodings, percent-encoded payloads, and deep JSON strings/keys)
+    let mut decoded_body_override: Option<Vec<u8>> = None;
     if !body.is_empty() {
-        let decoded_zstd = if content_encoding == "zstd" {
-            decompress_zstd_capped(&body, 32 * 1024 * 1024)
-        } else {
-            None
-        };
-        let inspect_bytes: &[u8] = decoded_zstd.as_deref().unwrap_or(&body);
-        let body_text = String::from_utf8_lossy(inspect_bytes);
-        for m in engine.scan_text(&body_text) {
-            let kind = match m.category {
-                RuleCategory::Secret => "secret_in_prompt",
-                RuleCategory::Pii => "pii_in_prompt",
-            };
-            emit(
-                "http-body",
-                kind,
-                m.rule_id,
-                m.severity.as_str(),
-                format!(
-                    "{} ({}) sent in outgoing {provider} API body",
-                    m.rule_name, m.masked
-                ),
-            );
+        match decompress_request_body(&body, &content_encoding, MAX_DECOMPRESSED_BYTES) {
+            Ok((decoded, aux_metadata)) => {
+                let inspect_bytes: &[u8] = decoded.as_deref().unwrap_or(&body);
+                let body_text = String::from_utf8_lossy(inspect_bytes);
+                let mut body_matches = engine.scan_text(&body_text);
+                let mut seen_fps: HashSet<(String, String)> = body_matches
+                    .iter()
+                    .map(|m| (m.rule_id.clone(), m.fingerprint.clone()))
+                    .collect();
+
+                if !aux_metadata.is_empty() {
+                    for m in engine.scan_text(&aux_metadata) {
+                        if seen_fps.insert((m.rule_id.clone(), m.fingerprint.clone())) {
+                            body_matches.push(m);
+                        }
+                    }
+                }
+
+                if body_text.contains('%') {
+                    let pct1 = percent_decode(&body_text);
+                    if pct1 != body_text {
+                        for m in engine.scan_text(&pct1) {
+                            if seen_fps.insert((m.rule_id.clone(), m.fingerprint.clone())) {
+                                body_matches.push(m);
+                            }
+                        }
+                        if pct1.contains('%') {
+                            let pct2 = percent_decode(&pct1);
+                            if pct2 != pct1 {
+                                for m in engine.scan_text(&pct2) {
+                                    if seen_fps.insert((m.rule_id.clone(), m.fingerprint.clone())) {
+                                        body_matches.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let first_non_ws = inspect_bytes.iter().find(|b| !b.is_ascii_whitespace());
+                if matches!(first_non_ws, Some(b'{' | b'[')) {
+                    if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(inspect_bytes)
+                    {
+                        let mut flattened = String::with_capacity(inspect_bytes.len().min(65536));
+                        collect_json_value_strings(&json_val, 0, &mut flattened);
+                        for m in engine.scan_text(&flattened) {
+                            if seen_fps.insert((m.rule_id.clone(), m.fingerprint.clone())) {
+                                body_matches.push(m);
+                            }
+                        }
+                        if flattened.contains('%') {
+                            let pct_flat = percent_decode(&flattened);
+                            if pct_flat != flattened {
+                                for m in engine.scan_text(&pct_flat) {
+                                    if seen_fps.insert((m.rule_id.clone(), m.fingerprint.clone())) {
+                                        body_matches.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for m in body_matches {
+                    if upstreams.block_secrets
+                        && m.category == RuleCategory::Secret
+                        && blocked_summary.is_none()
+                    {
+                        blocked_summary = Some((
+                            m.rule_id.clone(),
+                            format!("{} ({})", m.rule_name, m.masked),
+                            "leaktap_secret_blocked",
+                        ));
+                    }
+                    let kind = match m.category {
+                        RuleCategory::Secret => "secret_in_prompt",
+                        RuleCategory::Pii => "pii_in_prompt",
+                    };
+                    emit(
+                        "http-body",
+                        kind,
+                        &m.rule_id,
+                        m.severity.as_str(),
+                        format!(
+                            "{} ({}) sent in outgoing {provider} API body",
+                            m.rule_name, m.masked
+                        ),
+                    );
+                }
+
+                decoded_body_override = decoded;
+            }
+            Err(decode_err) => {
+                let sev = if upstreams.block_secrets {
+                    "CRITICAL"
+                } else {
+                    "HIGH"
+                };
+                emit(
+                    "http-body",
+                    "uninspectable_body",
+                    "uninspectable-content-encoding",
+                    sev,
+                    format!(
+                        "Could not decompress `{content_encoding}` {provider} API body ({decode_err})"
+                    ),
+                );
+                if upstreams.block_secrets && blocked_summary.is_none() {
+                    blocked_summary = Some((
+                        "uninspectable-content-encoding".to_string(),
+                        format!(
+                            "uninspectable Content-Encoding `{content_encoding}` ({decode_err})"
+                        ),
+                        "leaktap_uninspectable_payload",
+                    ));
+                }
+            }
         }
     }
 
-    // 3. Forward upstream and stream response back chunk-by-chunk (preserving SSE streaming)
-    if let Err(err) = forward_upstream(&mut client, &method, &target_url, &headers, &body) {
+    if let Some((rule_id, summary, err_code)) = blocked_summary {
+        emit(
+            "http-body",
+            "secret_blocked",
+            &rule_id,
+            "CRITICAL",
+            format!("Blocked outgoing {provider} API request: {summary}"),
+        );
+        let err_json = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": err_code,
+                "message": format!(
+                    "[leaktap] Blocked outgoing {provider} API request: {summary}. Remove or redact the secret before retrying."
+                )
+            }
+        })
+        .to_string();
+        let _ = write!(
+            client,
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            err_json.len(),
+            err_json
+        );
+        let _ = client.flush();
+        return Ok(());
+    }
+
+    // 4. Forward exact inspected canonical plaintext upstream (eliminating compression smuggling differentials)
+    let strip_content_encoding = decoded_body_override.is_some();
+    let forward_body: &[u8] = decoded_body_override.as_deref().unwrap_or(&body);
+    if let Err(err) = forward_upstream(
+        &mut client,
+        &method,
+        &target_url,
+        &headers,
+        forward_body,
+        strip_content_encoding,
+        &upstreams.pool,
+    ) {
         let msg = format!("{{\"error\":\"leaktap upstream transport error: {err}\"}}");
         let _ = write!(
             client,
@@ -385,6 +852,32 @@ enum UpstreamStream {
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
+impl UpstreamStream {
+    fn tcp_ref(&self) -> &TcpStream {
+        match self {
+            Self::Plain(s) => s,
+            Self::Tls(s) => s.get_ref(),
+        }
+    }
+
+    fn is_stale_or_dirty(&self) -> bool {
+        let is_plain = matches!(self, Self::Plain(_));
+        let tcp = self.tcp_ref();
+        if tcp.set_nonblocking(true).is_err() {
+            return true;
+        }
+        let mut probe = [0u8; 1];
+        let stale = match tcp.peek(&mut probe) {
+            Ok(0) => true,
+            Ok(_) => is_plain,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(_) => true,
+        };
+        let _ = tcp.set_nonblocking(false);
+        stale
+    }
+}
+
 impl Read for UpstreamStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -414,31 +907,77 @@ impl Write for UpstreamStream {
     }
 }
 
+fn take_pooled_upstream(pool: &UpstreamPool, key: &PoolKey) -> Option<BufReader<UpstreamStream>> {
+    loop {
+        let cand = {
+            let mut map = pool.lock().ok()?;
+            let queue = map.get_mut(key)?;
+            let mut found = None;
+            while let Some(entry) = queue.pop_back() {
+                if entry.parked_at.elapsed() < IDLE_CONN_TTL {
+                    found = Some(entry.reader);
+                    break;
+                }
+            }
+            if queue.is_empty() {
+                map.remove(key);
+            }
+            found
+        }?;
+        if cand.buffer().is_empty() && !cand.get_ref().is_stale_or_dirty() {
+            return Some(cand);
+        }
+    }
+}
+
+fn return_pooled_upstream(pool: &UpstreamPool, key: PoolKey, reader: BufReader<UpstreamStream>) {
+    if !reader.buffer().is_empty() || reader.get_ref().is_stale_or_dirty() {
+        return;
+    }
+    let Ok(mut map) = pool.lock() else {
+        return;
+    };
+    map.retain(|_, q| {
+        q.retain(|c| c.parked_at.elapsed() < IDLE_CONN_TTL);
+        !q.is_empty()
+    });
+    let total_idle: usize = map.values().map(VecDeque::len).sum();
+    if total_idle >= MAX_TOTAL_IDLE_CONNS {
+        return;
+    }
+    let queue = map.entry(key).or_default();
+    while queue.len() >= MAX_IDLE_CONNS_PER_ORIGIN {
+        queue.pop_front();
+    }
+    queue.push_back(IdleUpstreamConn {
+        reader,
+        parked_at: Instant::now(),
+    });
+}
+
 fn connect_tcp_timeout(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     use std::net::ToSocketAddrs;
     let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
     let mut last_err = None;
     for addr in addrs {
         match TcpStream::connect_timeout(&addr, timeout) {
-            Ok(s) => return Ok(s),
+            Ok(s) => {
+                let _ = s.set_read_timeout(Some(Duration::from_secs(300)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(60)));
+                return Ok(s);
+            }
             Err(e) => last_err = Some(e),
         }
     }
     Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DNS lookup empty")))
 }
 
-fn forward_upstream(
-    client: &mut TcpStream,
-    method: &str,
-    target_url: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> io::Result<()> {
-    let parsed = parse_target_url(target_url)?;
-    let proxy = proxy_for_url(target_url, &parsed.host);
-    let timeout = Duration::from_secs(15);
-
-    let (mut upstream, request_target, extra_proxy_auth) = match (&proxy, parsed.is_https) {
+fn open_fresh_upstream(
+    parsed: &ParsedUrl,
+    proxy: &Option<ProxyConfig>,
+    timeout: Duration,
+) -> io::Result<BufReader<UpstreamStream>> {
+    let stream = match (proxy, parsed.is_https) {
         (Some(p), true) => {
             let mut tcp = connect_tcp_timeout(&p.host, p.port, timeout)?;
             let authority = if parsed.host.contains(':') {
@@ -454,23 +993,40 @@ fn forward_upstream(
             tcp.flush()?;
 
             let mut connect_reader = BufReader::new(tcp);
-            let mut status_line = String::new();
-            if connect_reader.read_line(&mut status_line)? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "proxy closed during CONNECT",
-                ));
-            }
+            let status_line = match read_bounded_line(&mut connect_reader, MAX_HEADER_LINE_BYTES)? {
+                BoundedLine::Line(l) => l,
+                BoundedLine::Eof => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "proxy closed during CONNECT",
+                    ))
+                }
+                BoundedLine::TooLong => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "proxy CONNECT status line too long",
+                    ))
+                }
+            };
             let code = status_line
                 .split_whitespace()
                 .nth(1)
                 .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or(0);
-            loop {
-                let mut hdr = String::new();
-                let n = connect_reader.read_line(&mut hdr)?;
-                if n == 0 || hdr == "\r\n" || hdr == "\n" {
-                    break;
+            for _ in 0..MAX_HEADER_COUNT {
+                match read_bounded_line(&mut connect_reader, MAX_HEADER_LINE_BYTES)? {
+                    BoundedLine::Eof => break,
+                    BoundedLine::TooLong => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "proxy CONNECT header too long",
+                        ))
+                    }
+                    BoundedLine::Line(hdr) => {
+                        if hdr == "\r\n" || hdr == "\n" {
+                            break;
+                        }
+                    }
                 }
             }
             if !(200..300).contains(&code) {
@@ -483,19 +1039,11 @@ fn forward_upstream(
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
             let tls_conn = rustls::ClientConnection::new(shared_tls_config(), sni)
                 .map_err(|e| io::Error::other(e.to_string()))?;
-            (
-                UpstreamStream::Tls(Box::new(rustls::StreamOwned::new(tls_conn, tcp))),
-                parsed.origin_target.clone(),
-                None,
-            )
+            UpstreamStream::Tls(Box::new(rustls::StreamOwned::new(tls_conn, tcp)))
         }
         (Some(p), false) => {
             let tcp = connect_tcp_timeout(&p.host, p.port, timeout)?;
-            (
-                UpstreamStream::Plain(tcp),
-                target_url.to_string(),
-                p.basic_auth.clone(),
-            )
+            UpstreamStream::Plain(tcp)
         }
         (None, true) => {
             let tcp = connect_tcp_timeout(&parsed.host, parsed.port, timeout)?;
@@ -503,20 +1051,52 @@ fn forward_upstream(
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
             let tls_conn = rustls::ClientConnection::new(shared_tls_config(), sni)
                 .map_err(|e| io::Error::other(e.to_string()))?;
-            (
-                UpstreamStream::Tls(Box::new(rustls::StreamOwned::new(tls_conn, tcp))),
-                parsed.origin_target.clone(),
-                None,
-            )
+            UpstreamStream::Tls(Box::new(rustls::StreamOwned::new(tls_conn, tcp)))
         }
         (None, false) => {
             let tcp = connect_tcp_timeout(&parsed.host, parsed.port, timeout)?;
-            (
-                UpstreamStream::Plain(tcp),
+            UpstreamStream::Plain(tcp)
+        }
+    };
+    Ok(BufReader::new(stream))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_upstream(
+    client: &mut TcpStream,
+    method: &str,
+    target_url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    strip_content_encoding: bool,
+    pool: &UpstreamPool,
+) -> io::Result<()> {
+    let _ = client.set_write_timeout(Some(Duration::from_secs(300)));
+    let parsed = parse_target_url(target_url)?;
+    let proxy = proxy_for_url(target_url, &parsed.host);
+    let timeout = Duration::from_secs(15);
+
+    let (request_target, extra_proxy_auth, proxy_tag, can_pool_origin) =
+        match (&proxy, parsed.is_https) {
+            (Some(p), true) => (
                 parsed.origin_target.clone(),
                 None,
-            )
-        }
+                format!("connect:{}:{}", p.host.to_ascii_lowercase(), p.port),
+                true,
+            ),
+            (Some(p), false) => (
+                target_url.to_string(),
+                p.basic_auth.clone(),
+                format!("http:{}:{}", p.host.to_ascii_lowercase(), p.port),
+                false,
+            ),
+            (None, _) => (parsed.origin_target.clone(), None, String::new(), true),
+        };
+    let pool_key = PoolKey {
+        is_https: parsed.is_https,
+        host: parsed.host.to_ascii_lowercase(),
+        port: parsed.port,
+        proxy_tag,
     };
 
     let default_port = if parsed.is_https { 443 } else { 80 };
@@ -538,7 +1118,19 @@ fn forward_upstream(
     if let Some(auth) = extra_proxy_auth {
         write!(req_buf, "Proxy-Authorization: Basic {auth}\r\n")?;
     }
+    let mut merged_content_encoding = String::new();
     for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-encoding") {
+            if !strip_content_encoding && !v.trim().is_empty() {
+                if merged_content_encoding.is_empty() {
+                    merged_content_encoding.push_str(v.trim());
+                } else {
+                    merged_content_encoding.push_str(", ");
+                    merged_content_encoding.push_str(v.trim());
+                }
+            }
+            continue;
+        }
         if matches!(
             k.to_ascii_lowercase().as_str(),
             "host"
@@ -552,38 +1144,135 @@ fn forward_upstream(
         }
         write!(req_buf, "{k}: {v}\r\n")?;
     }
+    if !strip_content_encoding && !merged_content_encoding.is_empty() {
+        write!(req_buf, "Content-Encoding: {merged_content_encoding}\r\n")?;
+    }
     write!(req_buf, "Accept-Encoding: identity\r\n")?;
     if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
         write!(req_buf, "Content-Length: {}\r\n", body.len())?;
     }
-    write!(req_buf, "Connection: close\r\n\r\n")?;
+    if can_pool_origin {
+        write!(req_buf, "Connection: keep-alive\r\n\r\n")?;
+    } else {
+        write!(req_buf, "Connection: close\r\n\r\n")?;
+    }
     req_buf.extend_from_slice(body);
 
-    upstream.write_all(&req_buf)?;
-    upstream.flush()?;
+    let send_and_read_status =
+        |reader: &mut BufReader<UpstreamStream>, payload: &[u8]| -> io::Result<BoundedLine> {
+            reader.get_mut().write_all(payload)?;
+            reader.get_mut().flush()?;
+            read_bounded_line(reader, MAX_HEADER_LINE_BYTES)
+        };
 
-    let mut up_reader = BufReader::new(upstream);
-    let mut resp_status = String::new();
-    if up_reader.read_line(&mut resp_status)? == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "upstream closed before sending status line",
-        ));
-    }
+    let (mut up_reader, resp_status) = if can_pool_origin {
+        if let Some(mut pooled) = take_pooled_upstream(pool, &pool_key) {
+            match send_and_read_status(&mut pooled, &req_buf) {
+                Ok(BoundedLine::Line(line)) => (pooled, line),
+                Ok(BoundedLine::TooLong) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "upstream status line exceeds limit",
+                    ));
+                }
+                Ok(BoundedLine::Eof) | Err(_) => {
+                    let mut fresh = open_fresh_upstream(&parsed, &proxy, timeout)?;
+                    match send_and_read_status(&mut fresh, &req_buf)? {
+                        BoundedLine::Line(l) => (fresh, l),
+                        BoundedLine::Eof => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "upstream closed before sending status line",
+                            ))
+                        }
+                        BoundedLine::TooLong => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "upstream status line exceeds limit",
+                            ))
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut fresh = open_fresh_upstream(&parsed, &proxy, timeout)?;
+            match send_and_read_status(&mut fresh, &req_buf)? {
+                BoundedLine::Line(l) => (fresh, l),
+                BoundedLine::Eof => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "upstream closed before sending status line",
+                    ))
+                }
+                BoundedLine::TooLong => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "upstream status line exceeds limit",
+                    ))
+                }
+            }
+        }
+    } else {
+        let mut fresh = open_fresh_upstream(&parsed, &proxy, timeout)?;
+        match send_and_read_status(&mut fresh, &req_buf)? {
+            BoundedLine::Line(l) => (fresh, l),
+            BoundedLine::Eof => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "upstream closed before sending status line",
+                ))
+            }
+            BoundedLine::TooLong => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upstream status line exceeds limit",
+                ))
+            }
+        }
+    };
     client.write_all(resp_status.as_bytes())?;
+
+    let status_code = resp_status
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let is_http_10 = resp_status.starts_with("HTTP/1.0");
 
     let mut resp_chunked = false;
     let mut resp_content_length: Option<usize> = None;
-    loop {
-        let mut line = String::new();
-        let n = up_reader.read_line(&mut line)?;
-        if n == 0 || line == "\r\n" || line == "\n" {
+    let mut resp_conn_close = false;
+    let mut resp_explicit_keep_alive = false;
+    let mut headers_terminated_cleanly = false;
+    for _ in 0..(MAX_HEADER_COUNT * 2) {
+        let line = match read_bounded_line(&mut up_reader, MAX_HEADER_LINE_BYTES * 2)? {
+            BoundedLine::Eof => break,
+            BoundedLine::TooLong => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upstream response header exceeds limit",
+                ))
+            }
+            BoundedLine::Line(l) => l,
+        };
+        if line == "\r\n" || line == "\n" {
+            headers_terminated_cleanly = true;
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
             let key_lc = k.trim().to_ascii_lowercase();
             let val_trim = v.trim();
-            if key_lc == "connection" || key_lc == "keep-alive" || key_lc == "proxy-connection" {
+            if key_lc == "connection" || key_lc == "proxy-connection" {
+                for tok in val_trim.split(',').map(str::trim) {
+                    if tok.eq_ignore_ascii_case("close") {
+                        resp_conn_close = true;
+                    } else if tok.eq_ignore_ascii_case("keep-alive") {
+                        resp_explicit_keep_alive = true;
+                    }
+                }
+                continue;
+            }
+            if key_lc == "keep-alive" {
                 continue;
             }
             if key_lc == "transfer-encoding" && val_trim.to_ascii_lowercase().contains("chunked") {
@@ -598,35 +1287,55 @@ fn forward_upstream(
     write!(client, "Connection: close\r\n\r\n")?;
     client.flush()?;
 
-    if method.eq_ignore_ascii_case("HEAD") {
-        return Ok(());
-    }
-
-    if resp_chunked {
-        loop {
-            let mut size_line = String::new();
-            if up_reader.read_line(&mut size_line)? == 0 {
-                break;
-            }
-            client.write_all(size_line.as_bytes())?;
-            let hex = size_line.trim().split(';').next().unwrap_or("0").trim();
-            let chunk_len = usize::from_str_radix(hex, 16).unwrap_or(0);
-            if chunk_len == 0 {
-                loop {
-                    let mut trailer = String::new();
-                    let n = up_reader.read_line(&mut trailer)?;
+    let body_complete_and_framed =
+        if method.eq_ignore_ascii_case("HEAD") || matches!(status_code, 204 | 304) {
+            true
+        } else if resp_chunked {
+            let mut clean_chunked = false;
+            let mut premature_eof = false;
+            loop {
+                let mut size_line = String::new();
+                if up_reader.read_line(&mut size_line)? == 0 {
+                    break;
+                }
+                client.write_all(size_line.as_bytes())?;
+                let hex = size_line.trim().split(';').next().unwrap_or("0").trim();
+                let chunk_len = usize::from_str_radix(hex, 16).unwrap_or(0);
+                if chunk_len == 0 {
+                    loop {
+                        let mut trailer = String::new();
+                        let n = up_reader.read_line(&mut trailer)?;
+                        if n == 0 {
+                            break;
+                        }
+                        client.write_all(trailer.as_bytes())?;
+                        if trailer == "\r\n" || trailer == "\n" {
+                            clean_chunked = !premature_eof;
+                            break;
+                        }
+                    }
+                    client.flush()?;
+                    break;
+                }
+                let mut remaining = chunk_len + 2; // chunk bytes + trailing CRLF
+                let mut buf = [0u8; 8192];
+                while remaining > 0 {
+                    let to_read = remaining.min(buf.len());
+                    let n = up_reader.read(&mut buf[..to_read])?;
                     if n == 0 {
+                        premature_eof = true;
                         break;
                     }
-                    client.write_all(trailer.as_bytes())?;
-                    if trailer == "\r\n" || trailer == "\n" {
-                        break;
-                    }
+                    client.write_all(&buf[..n])?;
+                    remaining -= n;
                 }
                 client.flush()?;
-                break;
+                if premature_eof {
+                    break;
+                }
             }
-            let mut remaining = chunk_len + 2; // chunk bytes + trailing CRLF
+            clean_chunked
+        } else if let Some(mut remaining) = resp_content_length {
             let mut buf = [0u8; 8192];
             while remaining > 0 {
                 let to_read = remaining.min(buf.len());
@@ -635,32 +1344,31 @@ fn forward_upstream(
                     break;
                 }
                 client.write_all(&buf[..n])?;
+                client.flush()?;
                 remaining -= n;
             }
-            client.flush()?;
-        }
-    } else if let Some(mut remaining) = resp_content_length {
-        let mut buf = [0u8; 8192];
-        while remaining > 0 {
-            let to_read = remaining.min(buf.len());
-            let n = up_reader.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
+            remaining == 0
+        } else {
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = up_reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                client.write_all(&buf[..n])?;
+                client.flush()?;
             }
-            client.write_all(&buf[..n])?;
-            client.flush()?;
-            remaining -= n;
-        }
-    } else {
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = up_reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            client.write_all(&buf[..n])?;
-            client.flush()?;
-        }
+            false
+        };
+
+    let allow_keep_alive = can_pool_origin
+        && headers_terminated_cleanly
+        && status_code >= 200
+        && !resp_conn_close
+        && (!is_http_10 || resp_explicit_keep_alive)
+        && body_complete_and_framed;
+    if allow_keep_alive {
+        return_pooled_upstream(pool, pool_key, up_reader);
     }
 
     Ok(())
@@ -673,9 +1381,7 @@ fn shared_tls_config() -> Arc<rustls::ClientConfig> {
             let mut root_store = rustls::RootCertStore {
                 roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
             };
-            if let Ok(native_certs) = rustls_native_certs::load_native_certs() {
-                root_store.add_parsable_certificates(native_certs);
-            }
+            root_store.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
             let config = rustls::ClientConfig::builder_with_provider(
                 rustls::crypto::ring::default_provider().into(),
             )
@@ -791,37 +1497,345 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn read_chunked_body<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
+fn read_chunked_body<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<Option<Vec<u8>>> {
     let mut out = Vec::new();
     loop {
-        let mut size_line = String::new();
-        if reader.read_line(&mut size_line)? == 0 {
+        let size_line = match read_bounded_line(reader, 4096)? {
+            BoundedLine::Eof => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF in chunked body",
+                ))
+            }
+            BoundedLine::TooLong => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "chunk size line exceeds 4 KiB",
+                ))
+            }
+            BoundedLine::Line(l) => l,
+        };
+        let hex = size_line.trim().split(';').next().unwrap_or("").trim();
+        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid hexadecimal chunk size",
+            ));
+        }
+        let chunk_len = usize::from_str_radix(hex, 16)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk size overflow"))?;
+        if chunk_len == 0 {
+            for _ in 0..32 {
+                match read_bounded_line(reader, MAX_HEADER_LINE_BYTES)? {
+                    BoundedLine::Eof => break,
+                    BoundedLine::TooLong => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "chunk trailer line too long",
+                        ))
+                    }
+                    BoundedLine::Line(trailer) => {
+                        if trailer == "\r\n" || trailer == "\n" {
+                            break;
+                        }
+                    }
+                }
+            }
             break;
         }
-        let hex = size_line.trim().split(';').next().unwrap_or("0").trim();
-        let chunk_len = usize::from_str_radix(hex, 16).unwrap_or(0);
-        if chunk_len == 0 {
-            let mut trailer = String::new();
-            let _ = reader.read_line(&mut trailer);
-            break;
+        if out.len().saturating_add(chunk_len) > max_bytes {
+            return Ok(None);
         }
         let mut buf = vec![0u8; chunk_len];
         reader.read_exact(&mut buf)?;
         out.extend_from_slice(&buf);
-        let mut crlf = [0u8; 2];
-        let _ = reader.read_exact(&mut crlf);
-        if out.len() > 32 * 1024 * 1024 {
-            break;
+        let crlf_line = match read_bounded_line(reader, 4)? {
+            BoundedLine::Line(l) => l,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing CRLF after chunk payload",
+                ))
+            }
+        };
+        if crlf_line != "\r\n" && crlf_line != "\n" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid chunk boundary delimiter",
+            ));
         }
     }
+    Ok(Some(out))
+}
+
+fn decompress_request_body(
+    compressed: &[u8],
+    content_encoding: &str,
+    max_bytes: u64,
+) -> Result<(Option<Vec<u8>>, String), String> {
+    let layers: Vec<&str> = content_encoding
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("identity"))
+        .collect();
+
+    if layers.is_empty() {
+        return Ok((None, String::new()));
+    }
+    if layers.len() > 4 {
+        return Err("more than 4 nested Content-Encoding layers".to_string());
+    }
+
+    let mut current: Vec<u8> = compressed.to_vec();
+    let mut aux_metadata = String::new();
+    // HTTP Content-Encoding is applied in order; peel in reverse order (`deflate, gzip` -> `gzip` then `deflate`)
+    for enc_raw in layers.into_iter().rev() {
+        let enc = enc_raw.to_ascii_lowercase();
+        current = decode_single_layer(&current, &enc, max_bytes, &mut aux_metadata)?;
+    }
+
+    Ok((Some(current), aux_metadata))
+}
+
+fn decode_single_layer(
+    input: &[u8],
+    enc: &str,
+    max_bytes: u64,
+    aux_metadata: &mut String,
+) -> Result<Vec<u8>, String> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cap = max_bytes.saturating_add(1);
+    let mut out = Vec::new();
+
+    match enc {
+        "br" => {
+            let mut available_in = input.len();
+            let mut input_offset = 0usize;
+            let mut output_buf = [0u8; 8192];
+            while available_in > 0 {
+                let prev_avail = available_in;
+                let mut state = brotli::BrotliState::new(
+                    brotli::HeapAlloc::default(),
+                    brotli::HeapAlloc::default(),
+                    brotli::HeapAlloc::default(),
+                );
+                loop {
+                    let mut available_out = output_buf.len();
+                    let mut output_offset = 0usize;
+                    let mut total_out = 0usize;
+                    let res = brotli::BrotliDecompressStream(
+                        &mut available_in,
+                        &mut input_offset,
+                        input,
+                        &mut available_out,
+                        &mut output_offset,
+                        &mut output_buf,
+                        &mut total_out,
+                        &mut state,
+                    );
+                    if output_offset > 0 {
+                        out.extend_from_slice(&output_buf[..output_offset]);
+                    }
+                    if out.len() as u64 > max_bytes {
+                        return Err(format!(
+                            "decompressed payload exceeds {} MiB limit",
+                            max_bytes / (1024 * 1024)
+                        ));
+                    }
+                    match res {
+                        brotli::BrotliResult::ResultSuccess => break,
+                        brotli::BrotliResult::NeedsMoreOutput => continue,
+                        brotli::BrotliResult::NeedsMoreInput => {
+                            return Err(
+                                "truncated brotli stream or trailing unconsumed bytes".to_string()
+                            );
+                        }
+                        brotli::BrotliResult::ResultFailure => {
+                            return Err(
+                                "invalid brotli stream or trailing unconsumed bytes".to_string()
+                            );
+                        }
+                    }
+                }
+                if available_in == prev_avail {
+                    return Err("trailing unconsumed bytes after brotli stream".to_string());
+                }
+            }
+        }
+        "zstd" => {
+            let mut slice: &[u8] = input;
+            let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut slice)
+                .map_err(|e| format!("invalid zstd stream: {e}"))?;
+            (&mut dec)
+                .take(cap)
+                .read_to_end(&mut out)
+                .map_err(|e| format!("corrupt zstd frame: {e}"))?;
+            if (out.len() as u64) <= max_bytes && !slice.is_empty() {
+                return Err(format!(
+                    "zstd payload contains {} trailing unconsumed non-zstd byte(s)",
+                    slice.len()
+                ));
+            }
+        }
+        "gzip" | "x-gzip" => {
+            // Decode each concatenated RFC 1952 gzip member individually via `bufread::GzDecoder`
+            // so we extract `FEXTRA` / `FNAME` / `FCOMMENT` headers AND reject any trailing non-gzip bytes.
+            let mut slice: &[u8] = input;
+            while !slice.is_empty() {
+                let prev_len = slice.len();
+                let rem_cap = cap.saturating_sub(out.len() as u64);
+                let mut dec = GzDecoder::new(&mut slice);
+                (&mut dec)
+                    .take(rem_cap)
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("invalid gzip stream: {e}"))?;
+                if let Some(hdr) = dec.header() {
+                    if let Some(extra) = hdr.extra() {
+                        aux_metadata.push_str(&String::from_utf8_lossy(extra));
+                        aux_metadata.push('\n');
+                    }
+                    if let Some(fname) = hdr.filename() {
+                        aux_metadata.push_str(&String::from_utf8_lossy(fname));
+                        aux_metadata.push('\n');
+                    }
+                    if let Some(comment) = hdr.comment() {
+                        aux_metadata.push_str(&String::from_utf8_lossy(comment));
+                        aux_metadata.push('\n');
+                    }
+                }
+                if out.len() as u64 > max_bytes {
+                    break;
+                }
+                if slice.len() == prev_len {
+                    return Err("trailing unconsumed bytes after gzip stream".to_string());
+                }
+            }
+        }
+        "deflate" => {
+            let mut zlib_slice: &[u8] = input;
+            let zlib_ok = {
+                let mut dec = ZlibDecoder::new(&mut zlib_slice);
+                (&mut dec).take(cap).read_to_end(&mut out).is_ok()
+            };
+            if zlib_ok {
+                if (out.len() as u64) <= max_bytes && !zlib_slice.is_empty() {
+                    return Err("trailing unconsumed bytes after zlib deflate stream".to_string());
+                }
+            } else {
+                out.clear();
+                let mut def_slice: &[u8] = input;
+                let mut dec = DeflateDecoder::new(&mut def_slice);
+                (&mut dec)
+                    .take(cap)
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("invalid deflate stream: {e}"))?;
+                if (out.len() as u64) <= max_bytes && !def_slice.is_empty() {
+                    return Err("trailing unconsumed bytes after raw deflate stream".to_string());
+                }
+            }
+        }
+        other => {
+            return Err(format!("unsupported Content-Encoding `{other}`"));
+        }
+    }
+
+    if out.len() as u64 > max_bytes {
+        return Err(format!(
+            "decompressed payload exceeds {} MiB limit",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+
     Ok(out)
 }
 
-fn decompress_zstd_capped(compressed: &[u8], max_bytes: u64) -> Option<Vec<u8>> {
-    let decoder = ruzstd::StreamingDecoder::new(compressed).ok()?;
-    let mut out = Vec::new();
-    decoder.take(max_bytes).read_to_end(&mut out).ok()?;
-    Some(out)
+fn sanitize_request_path_for_scan(raw_path: &str, provider: &str) -> String {
+    let stripped = raw_path
+        .strip_prefix("/_anthropic")
+        .or_else(|| raw_path.strip_prefix("/_openai"))
+        .or_else(|| raw_path.strip_prefix("/_gemini"))
+        .unwrap_or(raw_path);
+    if provider != "gemini" {
+        return stripped.to_string();
+    }
+    let Some((path_only, query)) = stripped.split_once('?') else {
+        return stripped.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            let Some((k, v)) = pair.split_once('=') else {
+                return true;
+            };
+            if !k.eq_ignore_ascii_case("key") {
+                return true;
+            }
+            // Only exempt legitimate Google Gemini API keys (`AIza` + 35 `[A-Za-z0-9_-]` chars)
+            let decoded_v = percent_decode(v);
+            let tv = decoded_v.trim();
+            !(tv.starts_with("AIza")
+                && tv.len() == 39
+                && tv
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        })
+        .collect();
+    if kept.is_empty() {
+        path_only.to_string()
+    } else {
+        format!("{path_only}?{}", kept.join("&"))
+    }
+}
+
+fn collect_json_value_strings(val: &serde_json::Value, depth: usize, out: &mut String) {
+    if depth > 64 || out.len() > 72 * 1024 * 1024 {
+        return;
+    }
+    match val {
+        serde_json::Value::String(s) => {
+            out.push_str(s);
+            out.push('\n');
+            // Unpack nested stringified JSON (e.g. tool/function call `arguments` or `input` payloads)
+            if depth <= 24 {
+                let first_non_ws = s.as_bytes().iter().find(|b| !b.is_ascii_whitespace());
+                if matches!(first_non_ws, Some(b'{' | b'[')) {
+                    if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
+                        collect_json_value_strings(&inner, depth + 1, out);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_json_value_strings(item, depth + 1, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                out.push_str(k);
+                out.push('=');
+                if let serde_json::Value::String(s) = v {
+                    out.push('"');
+                    out.push_str(s);
+                    out.push_str("\"\n");
+                    if depth <= 24 {
+                        let first_non_ws = s.as_bytes().iter().find(|b| !b.is_ascii_whitespace());
+                        if matches!(first_non_ws, Some(b'{' | b'[')) {
+                            if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
+                                collect_json_value_strings(&inner, depth + 1, out);
+                            }
+                        }
+                    }
+                } else {
+                    out.push('\n');
+                    collect_json_value_strings(v, depth + 1, out);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn strip_query(url: &str) -> &str {
