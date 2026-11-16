@@ -34,7 +34,7 @@ Prebuilt binaries for macOS, Linux, and Windows are on [GitHub Releases](https:/
 ```text
 $ leaktap scan
 
-leaktap v0.2.5 — local offline audit (0 network requests)
+leaktap v0.2.6 — local offline audit (0 network requests)
 Scanned 142 file(s) (49.0 MB) in 119ms across ~/.claude, ~/.codex, ~/.gemini
 
 CRITICAL  3 unique secret(s) found in local agent transcripts
@@ -71,7 +71,7 @@ OS file sandboxes like `sandbox-exec` and `bubblewrap` are good at blocking fold
 
 ### Scan local logs and MCP configs
 
-Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`, and MCP config files like `.mcp.json` and `.agents/mcp_config.json` in your current directory:
+Runs offline. Checks `~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`, and MCP config files like `.mcp.json`, `.codex/config.toml`, and `.agents/mcp_config.json` in your current directory:
 
 ```bash
 # Default scan
@@ -115,7 +115,7 @@ leaktap clean --apply --no-backup
 Wraps `claude`, `codex`, `agy`, `gemini`, or an MCP server command:
 
 - `--scrub-env` strips extra secret variables from your shell like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` before starting the command, while keeping the CLI's own API key.
-- `--inspect-api` points `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_GEMINI_BASE_URL` at a local port on `localhost` so `leaktap` can check outgoing HTTP headers and prompt bodies before forwarding requests over HTTPS. For Antigravity CLI, Google sign-in skips `GOOGLE_GEMINI_BASE_URL`; pass `--settings '{"modelProvider":"gemini"}'` with `GEMINI_API_KEY` set when using `--inspect-api`.
+- `--inspect-api` routes outgoing API calls from `claude`, `codex`, `agy`, and `gemini` through a local port on `localhost` so `leaktap` can check HTTP headers and prompt bodies before forwarding requests over HTTPS. For Antigravity CLI, Google sign-in skips `GOOGLE_GEMINI_BASE_URL`; pass `--settings '{"modelProvider":"gemini"}'` with `GEMINI_API_KEY` set when using `--inspect-api`.
 - Outbound TCP connections opened by the CLI and its child processes are logged automatically without `sudo`.
 
 ```bash

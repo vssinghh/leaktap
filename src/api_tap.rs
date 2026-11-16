@@ -26,6 +26,8 @@ pub type TapCallback = Arc<dyn Fn(&str, &str, &str, &str, String) + Send + Sync 
 struct UpstreamTargets {
     anthropic: String,
     openai: String,
+    chatgpt: String,
+    openai_explicit: bool,
     gemini: String,
 }
 
@@ -60,9 +62,12 @@ fn spawn_accept_loop(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_local_api_tap(
     anthropic_upstream: String,
     openai_upstream: String,
+    chatgpt_upstream: String,
+    openai_explicit: bool,
     gemini_upstream: String,
     engine: Arc<RuleEngine>,
     header_auditor: Arc<HeaderAuditor>,
@@ -75,6 +80,8 @@ pub fn start_local_api_tap(
     let upstreams = UpstreamTargets {
         anthropic: anthropic_upstream.trim_end_matches('/').to_string(),
         openai: openai_upstream.trim_end_matches('/').to_string(),
+        chatgpt: chatgpt_upstream.trim_end_matches('/').to_string(),
+        openai_explicit,
         gemini: gemini_upstream.trim_end_matches('/').to_string(),
     };
 
@@ -132,6 +139,9 @@ fn handle_client(
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length: usize = 0;
     let mut is_chunked = false;
+    let mut content_encoding = String::new();
+    let mut is_websocket_upgrade = false;
+    let mut has_chatgpt_account_id = false;
 
     loop {
         let mut line = String::new();
@@ -144,14 +154,30 @@ fn handle_client(
             let val = v.trim().to_string();
             if key.eq_ignore_ascii_case("content-length") {
                 content_length = val.parse::<usize>().unwrap_or(0);
-            }
-            if key.eq_ignore_ascii_case("transfer-encoding")
+            } else if key.eq_ignore_ascii_case("transfer-encoding")
                 && val.to_ascii_lowercase().contains("chunked")
             {
                 is_chunked = true;
+            } else if key.eq_ignore_ascii_case("content-encoding") {
+                content_encoding = val.to_ascii_lowercase();
+            } else if key.eq_ignore_ascii_case("upgrade") && val.eq_ignore_ascii_case("websocket") {
+                is_websocket_upgrade = true;
+            } else if key.eq_ignore_ascii_case("chatgpt-account-id") && !val.is_empty() {
+                has_chatgpt_account_id = true;
             }
             headers.push((key, val));
         }
+    }
+
+    // Decline WebSocket upgrade probes immediately with HTTP 426 so clients like Codex CLI
+    // fall straight back to standard HTTP/SSE without retry delays or duplicate probe alerts.
+    if is_websocket_upgrade {
+        let _ = write!(
+            client,
+            "HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = client.flush();
+        return Ok(());
     }
 
     let body = if is_chunked {
@@ -170,8 +196,14 @@ fn handle_client(
         let suffix = if rest.is_empty() { "/" } else { rest };
         ("anthropic", format!("{}{suffix}", upstreams.anthropic))
     } else if let Some(rest) = raw_path.strip_prefix("/_openai") {
-        let suffix = if rest.is_empty() { "/" } else { rest };
-        ("openai", format!("{}{suffix}", upstreams.openai))
+        if has_chatgpt_account_id && !upstreams.openai_explicit {
+            let stripped = rest.strip_prefix("/v1").unwrap_or(rest);
+            let suffix = if stripped.is_empty() { "/" } else { stripped };
+            ("openai", format!("{}{suffix}", upstreams.chatgpt))
+        } else {
+            let suffix = if rest.is_empty() { "/" } else { rest };
+            ("openai", format!("{}{suffix}", upstreams.openai))
+        }
     } else if let Some(rest) = raw_path.strip_prefix("/_gemini") {
         let suffix = if rest.is_empty() { "/" } else { rest };
         ("gemini", format!("{}{suffix}", upstreams.gemini))
@@ -209,9 +241,15 @@ fn handle_client(
         }
     }
 
-    // 2. Audit outgoing request body (prompt context + tool outputs)
+    // 2. Audit outgoing request body (decompressing zstd payloads such as Codex CLI `/responses`)
     if !body.is_empty() {
-        let body_text = String::from_utf8_lossy(&body);
+        let decoded_zstd = if content_encoding == "zstd" {
+            decompress_zstd_capped(&body, 32 * 1024 * 1024)
+        } else {
+            None
+        };
+        let inspect_bytes: &[u8] = decoded_zstd.as_deref().unwrap_or(&body);
+        let body_text = String::from_utf8_lossy(inspect_bytes);
         for m in engine.scan_text(&body_text) {
             let kind = match m.category {
                 RuleCategory::Secret => "secret_in_prompt",
@@ -777,6 +815,13 @@ fn read_chunked_body<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+fn decompress_zstd_capped(compressed: &[u8], max_bytes: u64) -> Option<Vec<u8>> {
+    let decoder = ruzstd::StreamingDecoder::new(compressed).ok()?;
+    let mut out = Vec::new();
+    decoder.take(max_bytes).read_to_end(&mut out).ok()?;
+    Some(out)
 }
 
 fn strip_query(url: &str) -> &str {

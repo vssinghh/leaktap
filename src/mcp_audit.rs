@@ -63,32 +63,38 @@ fn audit_single_mcp_file(path: &Path, engine: &RuleEngine, out: &mut Vec<McpFind
     let Ok(raw) = fs::read_to_string(path) else {
         return;
     };
-    let Ok(json) = serde_json::from_str::<Value>(&raw) else {
+    let is_toml = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
+    let parsed: Option<Value> = if is_toml {
+        toml::from_str::<Value>(&raw).ok()
+    } else {
+        serde_json::from_str::<Value>(&raw).ok()
+    };
+    let Some(json) = parsed else {
         return;
     };
 
     let display = shorten_home(path);
 
-    // 1. Top-level `mcpServers` (Claude Desktop, Cursor, .mcp.json, Gemini settings.json)
-    if let Some(servers) = json.get("mcpServers").and_then(|v| v.as_object()) {
-        for (name, spec) in servers {
-            inspect_server(name, spec, path, &display, engine, out);
+    // 1. Top-level `mcpServers` (JSON), `mcp_servers` (Codex TOML), or `servers` (VS Code)
+    for top_key in ["mcpServers", "mcp_servers", "servers"] {
+        if let Some(servers) = json.get(top_key).and_then(|v| v.as_object()) {
+            for (name, spec) in servers {
+                inspect_server(name, spec, path, &display, engine, out);
+            }
         }
     }
 
-    // 2. VS Code `.vscode/mcp.json` uses top-level `servers`
-    if let Some(servers) = json.get("servers").and_then(|v| v.as_object()) {
-        for (name, spec) in servers {
-            inspect_server(name, spec, path, &display, engine, out);
-        }
-    }
-
-    // 3. Claude Code `~/.claude.json` can also nest `projects.<workspace>.mcpServers`
+    // 2. Project-scoped MCP blocks (`projects.<workspace>.mcpServers` / `mcp_servers`)
     if let Some(projects) = json.get("projects").and_then(|v| v.as_object()) {
         for (_proj_path, proj_val) in projects {
-            if let Some(servers) = proj_val.get("mcpServers").and_then(|v| v.as_object()) {
-                for (name, spec) in servers {
-                    inspect_server(name, spec, path, &display, engine, out);
+            for nested_key in ["mcpServers", "mcp_servers"] {
+                if let Some(servers) = proj_val.get(nested_key).and_then(|v| v.as_object()) {
+                    for (name, spec) in servers {
+                        inspect_server(name, spec, path, &display, engine, out);
+                    }
                 }
             }
         }
@@ -260,7 +266,7 @@ fn check_hardcoded_credentials(
     engine: &RuleEngine,
     out: &mut Vec<McpFinding>,
 ) {
-    for field in ["env", "headers"] {
+    for field in ["env", "headers", "http_headers"] {
         let Some(map) = spec.get(field).and_then(|v| v.as_object()) else {
             continue;
         };
@@ -269,64 +275,102 @@ fn check_hardcoded_credentials(
             let Some(val) = val_node.as_str() else {
                 continue;
             };
-            let trimmed = val.trim();
-            // `${VAR}` or `$VAR` interpolation references are safe best practice, not hardcoded secrets
-            if trimmed.is_empty()
-                || trimmed.starts_with("${")
-                || (trimmed.starts_with('$') && !trimmed.contains(' '))
-                || trimmed.starts_with("env:")
-            {
-                continue;
-            }
-
-            // First check known secret patterns
-            let matches = engine.scan_text(trimmed);
-            if let Some(m) = matches.iter().find(|m| m.category == RuleCategory::Secret) {
-                out.push(McpFinding {
-                    rule_id: "mcp-hardcoded-secret",
-                    server_name: server_name.to_string(),
-                    config_file: display.to_string(),
-                    config_path: path.to_path_buf(),
-                    severity: Severity::Critical,
-                    fingerprint: fingerprint_match(
-                        "mcp-hardcoded-secret",
-                        &format!("{display}:{server_name}:{key}:{trimmed}"),
-                    ),
-                    message: format!(
-                        "Hardcoded {} (`{}`) in `{field}.{key}` — use `${{{key}}}` env interpolation or a keychain",
-                        m.rule_name, m.masked
-                    ),
-                });
-                continue;
-            }
-
-            // Fallback: secret-named key with high-entropy plaintext literal
-            let upper_key = key.to_ascii_uppercase();
-            let looks_sensitive_key = SENSITIVE_ENV_KEYWORDS
-                .iter()
-                .any(|kw| upper_key.contains(kw));
-            if looks_sensitive_key
-                && trimmed.len() >= 16
-                && !is_likely_placeholder(trimmed)
-                && shannon_entropy(trimmed) >= 3.75
-            {
-                let masked = mask_value("dotenv-generic-secret", trimmed);
-                out.push(McpFinding {
-                    rule_id: "mcp-hardcoded-secret",
-                    server_name: server_name.to_string(),
-                    config_file: display.to_string(),
-                    config_path: path.to_path_buf(),
-                    severity: Severity::Critical,
-                    fingerprint: fingerprint_match(
-                        "mcp-hardcoded-secret",
-                        &format!("{display}:{server_name}:{key}:{trimmed}"),
-                    ),
-                    message: format!(
-                        "Hardcoded secret (`{masked}`) in `{field}.{key}` — avoid storing raw secrets in MCP JSON files"
-                    ),
-                });
-            }
+            inspect_credential_value(
+                server_name,
+                &format!("{field}.{key}"),
+                key,
+                val,
+                path,
+                display,
+                engine,
+                out,
+            );
         }
+    }
+
+    for direct_key in ["bearer_token", "oauth_client_secret", "api_key"] {
+        if let Some(val) = spec.get(direct_key).and_then(|v| v.as_str()) {
+            inspect_credential_value(
+                server_name,
+                direct_key,
+                direct_key,
+                val,
+                path,
+                display,
+                engine,
+                out,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_credential_value(
+    server_name: &str,
+    location_label: &str,
+    key: &str,
+    val: &str,
+    path: &Path,
+    display: &str,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+) {
+    let trimmed = val.trim();
+    // `${VAR}` or `$VAR` interpolation references are safe best practice, not hardcoded secrets
+    if trimmed.is_empty()
+        || trimmed.starts_with("${")
+        || (trimmed.starts_with('$') && !trimmed.contains(' '))
+        || trimmed.starts_with("env:")
+    {
+        return;
+    }
+
+    // First check known secret patterns
+    let matches = engine.scan_text(trimmed);
+    if let Some(m) = matches.iter().find(|m| m.category == RuleCategory::Secret) {
+        out.push(McpFinding {
+            rule_id: "mcp-hardcoded-secret",
+            server_name: server_name.to_string(),
+            config_file: display.to_string(),
+            config_path: path.to_path_buf(),
+            severity: Severity::Critical,
+            fingerprint: fingerprint_match(
+                "mcp-hardcoded-secret",
+                &format!("{display}:{server_name}:{location_label}:{trimmed}"),
+            ),
+            message: format!(
+                "Hardcoded {} (`{}`) in `{location_label}` — use `${{{key}}}` env interpolation or a keychain",
+                m.rule_name, m.masked
+            ),
+        });
+        return;
+    }
+
+    // Fallback: secret-named key with high-entropy plaintext literal
+    let upper_key = key.to_ascii_uppercase();
+    let looks_sensitive_key = SENSITIVE_ENV_KEYWORDS
+        .iter()
+        .any(|kw| upper_key.contains(kw));
+    if looks_sensitive_key
+        && trimmed.len() >= 16
+        && !is_likely_placeholder(trimmed)
+        && shannon_entropy(trimmed) >= 3.75
+    {
+        let masked = mask_value("dotenv-generic-secret", trimmed);
+        out.push(McpFinding {
+            rule_id: "mcp-hardcoded-secret",
+            server_name: server_name.to_string(),
+            config_file: display.to_string(),
+            config_path: path.to_path_buf(),
+            severity: Severity::Critical,
+            fingerprint: fingerprint_match(
+                "mcp-hardcoded-secret",
+                &format!("{display}:{server_name}:{location_label}:{trimmed}"),
+            ),
+            message: format!(
+                "Hardcoded secret (`{masked}`) in `{location_label}` — avoid storing raw secrets in MCP config files"
+            ),
+        });
     }
 }
 
