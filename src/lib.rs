@@ -15,14 +15,16 @@ pub mod tap;
 pub mod tui;
 
 use crate::cleaner::clean_transcripts_with_policy;
-use crate::cli::{CleanArgs, Cli, Commands, FailThreshold, OutputFormat, ScanArgs, TapArgs};
-use crate::config::PolicyConfig;
-use crate::discovery::{discover_clean_targets_with_policy, discover_targets_with_policy};
+use crate::cli::{
+    CleanArgs, Cli, Commands, FailThreshold, OutputFormat, RulesFormat, ScanArgs, TapArgs,
+};
+use crate::config::{is_ci_environment, PolicyConfig};
+use crate::discovery::{discover_clean_targets_with_policy, discover_targets_with_all_and_policy};
 use crate::git_scan::run_git_scan;
 use crate::mcp_audit::audit_mcp_configs_with_policy;
 use crate::plugin_audit::audit_plugin_files_with_policy;
 use crate::report::json::render_scan_json;
-use crate::report::sarif::render_scan_sarif_with_rules;
+use crate::report::sarif::{render_rules_json, render_scan_sarif_with_rules};
 use crate::report::terminal::{render_clean_terminal, render_rules_terminal, render_scan_terminal};
 use crate::report::FullScanReport;
 use crate::rules::{RuleEngine, Severity};
@@ -30,20 +32,25 @@ use crate::scanner::scan_transcripts;
 use crate::tap::run_tap;
 use crate::tui::run_ui;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub fn execute(cli: Cli) -> i32 {
     let global_config = cli.config;
+    let global_policy_git_ref = cli.policy_git_ref;
     let global_trust_project_config = cli.trust_project_config;
     let global_no_config = cli.no_config;
     let global_block_secrets = cli.block_secrets;
+    let global_scrub_ssh_agent = cli.scrub_ssh_agent;
     let global_allow_env = cli.allow_env;
 
     match cli.command.unwrap_or(Commands::Scan(ScanArgs::default())) {
         Commands::Scan(mut args) => {
             if args.config.is_none() {
                 args.config = global_config;
+            }
+            if args.policy_git_ref.is_none() {
+                args.policy_git_ref = global_policy_git_ref;
             }
             args.trust_project_config |= global_trust_project_config;
             args.no_config |= global_no_config;
@@ -53,6 +60,9 @@ pub fn execute(cli: Cli) -> i32 {
             if args.config.is_none() {
                 args.config = global_config;
             }
+            if args.policy_git_ref.is_none() {
+                args.policy_git_ref = global_policy_git_ref;
+            }
             args.trust_project_config |= global_trust_project_config;
             args.no_config |= global_no_config;
             execute_clean(&args)
@@ -61,10 +71,19 @@ pub fn execute(cli: Cli) -> i32 {
             if args.config.is_none() {
                 args.config = global_config;
             }
+            if args.policy_git_ref.is_none() {
+                args.policy_git_ref = global_policy_git_ref;
+            }
             args.trust_project_config |= global_trust_project_config;
             args.no_config |= global_no_config;
-            match PolicyConfig::load_with_options(
+            warn_ci_untrusted_project_config(
+                args.trust_project_config,
                 args.config.as_deref(),
+                args.policy_git_ref.as_deref(),
+            );
+            match PolicyConfig::load_with_git_ref(
+                args.config.as_deref(),
+                args.policy_git_ref.as_deref(),
                 &args.paths,
                 args.trust_project_config,
                 args.no_config,
@@ -87,8 +106,10 @@ pub fn execute(cli: Cli) -> i32 {
             "claude",
             args.args,
             global_block_secrets,
+            global_scrub_ssh_agent,
             global_allow_env,
             global_config,
+            global_policy_git_ref,
             global_trust_project_config,
             global_no_config,
         )),
@@ -96,8 +117,10 @@ pub fn execute(cli: Cli) -> i32 {
             "codex",
             args.args,
             global_block_secrets,
+            global_scrub_ssh_agent,
             global_allow_env,
             global_config,
+            global_policy_git_ref,
             global_trust_project_config,
             global_no_config,
         )),
@@ -105,8 +128,10 @@ pub fn execute(cli: Cli) -> i32 {
             "agy",
             args.args,
             global_block_secrets,
+            global_scrub_ssh_agent,
             global_allow_env,
             global_config,
+            global_policy_git_ref,
             global_trust_project_config,
             global_no_config,
         )),
@@ -114,13 +139,16 @@ pub fn execute(cli: Cli) -> i32 {
             "gemini",
             args.args,
             global_block_secrets,
+            global_scrub_ssh_agent,
             global_allow_env,
             global_config,
+            global_policy_git_ref,
             global_trust_project_config,
             global_no_config,
         )),
         Commands::Tap(mut args) => {
             args.block_secrets |= global_block_secrets;
+            args.scrub_ssh_agent |= global_scrub_ssh_agent;
             args.trust_project_config |= global_trust_project_config;
             args.no_config |= global_no_config;
             for v in global_allow_env {
@@ -131,11 +159,20 @@ pub fn execute(cli: Cli) -> i32 {
             if args.config.is_none() {
                 args.config = global_config;
             }
+            if args.policy_git_ref.is_none() {
+                args.policy_git_ref = global_policy_git_ref;
+            }
             execute_tap(&args)
         }
-        Commands::Rules => {
-            let policy = match PolicyConfig::load_with_options(
+        Commands::Rules(rules_args) => {
+            warn_ci_untrusted_project_config(
+                global_trust_project_config,
                 global_config.as_deref(),
+                global_policy_git_ref.as_deref(),
+            );
+            let policy = match PolicyConfig::load_with_git_ref(
+                global_config.as_deref(),
+                global_policy_git_ref.as_deref(),
                 &[],
                 global_trust_project_config,
                 global_no_config,
@@ -148,9 +185,30 @@ pub fn execute(cli: Cli) -> i32 {
             };
             warn_ignored_untrusted_configs(&policy);
             let engine = RuleEngine::with_policy(true, Some(&policy));
-            print!("{}", render_rules_terminal(&engine));
+            match rules_args.format {
+                RulesFormat::Json => println!("{}", render_rules_json(&engine)),
+                RulesFormat::Text | RulesFormat::Terminal => {
+                    print!("{}", render_rules_terminal(&engine));
+                }
+            }
             0
         }
+    }
+}
+
+fn warn_ci_untrusted_project_config(
+    trust_project_config: bool,
+    explicit_config: Option<&Path>,
+    policy_git_ref: Option<&str>,
+) {
+    if trust_project_config
+        && explicit_config.is_none()
+        && policy_git_ref.is_none()
+        && is_ci_environment()
+    {
+        eprintln!(
+            "[leaktap:warn] `--trust-project-config` is enabled in CI without `--policy-git-ref` or `--config`; untrusted pull-request branches can edit `.leaktap.toml` to self-suppress findings. Prefer `--policy-git-ref origin/main` in PR CI."
+        );
     }
 }
 
@@ -162,15 +220,23 @@ fn warn_ignored_untrusted_configs(policy: &PolicyConfig) {
             .map(|p| p.display().to_string())
             .collect();
         eprintln!(
-            "[leaktap] Note: ignored untrusted project policy file(s): {} (pass `--trust-project-config` or `--config <file>` to apply)",
+            "[leaktap] Note: ignored untrusted project policy file(s): {} (pass `--trust-project-config`, `--policy-git-ref <ref>`, or `--config <file>` to apply)",
             joined.join(", ")
         );
     }
 }
 
 fn execute_tap(args: &TapArgs) -> i32 {
-    match PolicyConfig::load_with_options(
+    if !args.quiet {
+        warn_ci_untrusted_project_config(
+            args.trust_project_config,
+            args.config.as_deref(),
+            args.policy_git_ref.as_deref(),
+        );
+    }
+    match PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
         &[],
         args.trust_project_config,
         args.no_config,
@@ -195,8 +261,9 @@ fn execute_tap(args: &TapArgs) -> i32 {
 }
 
 pub fn run_scan_report(args: &ScanArgs) -> FullScanReport {
-    let policy = PolicyConfig::load_with_options(
+    let policy = PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
         &args.paths,
         args.trust_project_config,
         args.no_config,
@@ -231,7 +298,8 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
         };
     }
 
-    let targets = discover_targets_with_policy(&args.paths, !args.no_mcp, Some(policy));
+    let targets =
+        discover_targets_with_all_and_policy(&args.paths, args.all, !args.no_mcp, Some(policy));
     let transcripts = scan_transcripts(&targets.transcript_files, &engine);
     let (mcp_findings, mcp_files_scanned, mcp_bytes_scanned) = if args.no_mcp {
         (Vec::new(), 0, 0)
@@ -283,8 +351,14 @@ fn audit_discovered_mcp_and_plugins(
 }
 
 pub fn execute_scan(args: &ScanArgs) -> i32 {
-    let policy = match PolicyConfig::load_with_options(
+    warn_ci_untrusted_project_config(
+        args.trust_project_config,
         args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
+    );
+    let policy = match PolicyConfig::load_with_git_ref(
+        args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
         &args.paths,
         args.trust_project_config,
         args.no_config,
@@ -322,8 +396,14 @@ pub fn execute_scan(args: &ScanArgs) -> i32 {
 }
 
 pub fn execute_clean(args: &CleanArgs) -> i32 {
-    let policy = match PolicyConfig::load_with_options(
+    warn_ci_untrusted_project_config(
+        args.trust_project_config,
         args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
+    );
+    let policy = match PolicyConfig::load_with_git_ref(
+        args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
         &args.paths,
         args.trust_project_config,
         args.no_config,

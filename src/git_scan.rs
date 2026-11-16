@@ -6,8 +6,10 @@ use crate::mcp_audit::{audit_mcp_file_as_with_roots, McpFinding};
 use crate::plugin_audit::audit_plugin_file_as;
 use crate::rules::{RuleCategory, RuleEngine};
 use crate::scanner::{
-    compute_line_and_column, contains_gcp_sa_markers, is_pem_or_pgp_continuation_line,
-    is_wrapped_base64_continuation_line, is_wrapped_base64_start_line, scan_single_file_as,
+    compute_line_and_column, contains_gcp_sa_markers, is_multiline_putty_header,
+    is_pem_or_pgp_continuation_line, is_putty_continuation_line,
+    is_wrapped_base64_continuation_line, is_wrapped_base64_start_line,
+    is_yaml_block_scalar_continuation, scan_single_file_as, yaml_block_scalar_parent_indent,
     FileHit, FindingLocation, TranscriptFinding, TranscriptScanResult, MULTILINE_B64_COALESCE_CAP,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -361,6 +363,9 @@ fn audit_staged_index_configs(
 
     let text = String::from_utf8_lossy(&names_bytes);
     let mut candidate_rels = Vec::new();
+    let mut candidate_set = HashSet::new();
+    let mut staged_non_cfg_rels = HashSet::new();
+
     for rel in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if has_ignored_diff_component(rel) || validate_safe_rel_path(rel).is_none() {
             continue;
@@ -372,8 +377,50 @@ fn audit_staged_index_configs(
         if policy.is_some_and(|p| p.is_path_ignored(&full)) {
             continue;
         }
-        if is_mcp_or_plugin_candidate_relpath(Path::new(rel)) {
-            candidate_rels.push(rel.to_string());
+        let norm_rel = rel.replace('\\', "/");
+        if is_mcp_or_plugin_candidate_relpath(Path::new(&norm_rel)) {
+            if candidate_set.insert(norm_rel.clone()) {
+                candidate_rels.push(norm_rel);
+            }
+        } else {
+            staged_non_cfg_rels.insert(norm_rel);
+        }
+    }
+
+    // If a staged commit modifies a local helper script or binary (`scripts/mcp.py`, `bin/hook`)
+    // without touching its parent `.mcp.json` or `hooks.json`, find tracked parent configs in the
+    // git index that reference any staged path and include them in the staged audit.
+    if !staged_non_cfg_rels.is_empty() {
+        if let Some(ls_bytes) =
+            run_git_bytes(repo_root, &["-c", "core.quotePath=false", "ls-files"])
+        {
+            let ls_text = String::from_utf8_lossy(&ls_bytes);
+            for tracked_rel in ls_text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                let norm_cfg = tracked_rel.replace('\\', "/");
+                if candidate_set.contains(&norm_cfg)
+                    || has_ignored_diff_component(&norm_cfg)
+                    || validate_safe_rel_path(&norm_cfg).is_none()
+                    || !is_hook_bearing_config_rel(&norm_cfg)
+                {
+                    continue;
+                }
+                let full_cfg = repo_root.join(&norm_cfg);
+                if policy.is_some_and(|p| p.is_path_ignored(&full_cfg)) {
+                    continue;
+                }
+                let spec = format!(":{norm_cfg}");
+                let Some(cfg_blob) =
+                    run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 2 * 1024 * 1024)
+                else {
+                    continue;
+                };
+                let refs = extract_companion_script_candidates(&norm_cfg, &cfg_blob);
+                if refs.iter().any(|r| staged_non_cfg_rels.contains(r))
+                    && candidate_set.insert(norm_cfg.clone())
+                {
+                    candidate_rels.push(norm_cfg);
+                }
+            }
         }
     }
 
@@ -404,13 +451,17 @@ fn audit_staged_index_configs(
                 continue;
             }
         }
-        let Some(blob) = run_git_bytes(repo_root, &["cat-file", "-p", &spec]) else {
+        let Some(blob) = run_git_bytes_capped(
+            repo_root,
+            &["cat-file", "-p", &spec],
+            MAX_GIT_BINARY_SCAN_BYTES as usize,
+        ) else {
             continue;
         };
         if let Some(disk_path) = sandbox.write_rel_blob(&sandbox.root, rel, &blob) {
             *mcp_bytes_scanned += blob.len() as u64;
             companion_scripts_loaded.insert(rel.clone());
-            // Materialize any relative hook handler scripts from the git index (never the unstaged working tree!)
+            // Materialize any relative hook/MCP handler scripts or binaries from the git index
             if is_hook_bearing_config_rel(rel) {
                 materialize_companion_hook_scripts(
                     repo_root,
@@ -478,6 +529,44 @@ fn audit_history_configs(
     mcp_files_scanned: &mut usize,
     mcp_bytes_scanned: &mut u64,
 ) {
+    // Seed referenced helper script -> parent config map from HEAD so commits within `--max-commits`
+    // that modify a helper script whose `.mcp.json` / `hooks.json` was added in an older commit are caught.
+    let mut script_to_configs: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut inspected_cfg_blobs: HashSet<String> = HashSet::new();
+    if let Some(head_tree) = run_git_bytes(
+        repo_root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+        ],
+    ) {
+        let head_text = String::from_utf8_lossy(&head_tree);
+        for tracked_rel in head_text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let norm_cfg = tracked_rel.replace('\\', "/");
+            if has_ignored_diff_component(&norm_cfg)
+                || validate_safe_rel_path(&norm_cfg).is_none()
+                || !is_hook_bearing_config_rel(&norm_cfg)
+            {
+                continue;
+            }
+            let spec = format!("HEAD:{norm_cfg}");
+            if let Some(cfg_blob) =
+                run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 2 * 1024 * 1024)
+            {
+                for cand_rel in extract_companion_script_candidates(&norm_cfg, &cfg_blob) {
+                    script_to_configs
+                        .entry(cand_rel)
+                        .or_default()
+                        .insert(norm_cfg.clone());
+                }
+            }
+        }
+    }
+
     let mut raw_args: Vec<String> = vec![
         "-c".into(),
         "core.quotePath=false".into(),
@@ -514,6 +603,7 @@ fn audit_history_configs(
     let mut current_commit = String::new();
     let mut seen_blobs: HashSet<(String, String)> = HashSet::new();
     let mut entries: Vec<(String, String, String)> = Vec::new();
+    let mut touched_non_cfg: Vec<(String, String, String)> = Vec::new();
 
     while let Ok(n) = read_line_bounded(&mut reader, &mut line_buf, 64 * 1024) {
         if n == 0 {
@@ -550,22 +640,39 @@ fn audit_history_configs(
         if has_ignored_diff_component(rel) || validate_safe_rel_path(rel).is_none() {
             continue;
         }
-        let full = repo_root.join(rel);
+        let norm_rel = rel.replace('\\', "/");
+        let full = repo_root.join(&norm_rel);
         if !matches_filters(&full, path_filters) {
             continue;
         }
         if policy.is_some_and(|p| p.is_path_ignored(&full)) {
             continue;
         }
-        if !is_mcp_or_plugin_candidate_relpath(Path::new(rel)) {
+        if !is_mcp_or_plugin_candidate_relpath(Path::new(&norm_rel)) {
+            if touched_non_cfg.len() < MAX_HISTORICAL_CONFIG_BLOBS {
+                touched_non_cfg.push((current_commit.clone(), new_blob_sha.to_string(), norm_rel));
+            }
             continue;
         }
-        if seen_blobs.insert((new_blob_sha.to_string(), rel.to_string())) {
-            entries.push((
-                current_commit.clone(),
-                new_blob_sha.to_string(),
-                rel.to_string(),
-            ));
+        if is_hook_bearing_config_rel(&norm_rel)
+            && inspected_cfg_blobs.len() < 512
+            && inspected_cfg_blobs.insert(new_blob_sha.to_string())
+        {
+            if let Some(cfg_blob) = run_git_bytes_capped(
+                repo_root,
+                &["cat-file", "-p", new_blob_sha],
+                2 * 1024 * 1024,
+            ) {
+                for cand_rel in extract_companion_script_candidates(&norm_rel, &cfg_blob) {
+                    script_to_configs
+                        .entry(cand_rel)
+                        .or_default()
+                        .insert(norm_rel.clone());
+                }
+            }
+        }
+        if seen_blobs.insert((new_blob_sha.to_string(), norm_rel.clone())) {
+            entries.push((current_commit.clone(), new_blob_sha.to_string(), norm_rel));
             if entries.len() >= MAX_HISTORICAL_CONFIG_BLOBS {
                 eprintln!(
                     "[leaktap:warn] Reached historical config blob cap ({MAX_HISTORICAL_CONFIG_BLOBS}) in {}; pass `--max-commits` to scope history windows.",
@@ -578,6 +685,38 @@ fn audit_history_configs(
     }
     drop(reader);
     let _ = child.wait();
+
+    // Enqueue historical commits where a referenced helper script/binary was modified even though
+    // its parent `.mcp.json` / `hooks.json` was unchanged in that commit.
+    if !script_to_configs.is_empty() {
+        for (commit_sha, script_blob_sha, script_rel) in touched_non_cfg {
+            if entries.len() >= MAX_HISTORICAL_CONFIG_BLOBS {
+                break;
+            }
+            let Some(parent_cfgs) = script_to_configs.get(&script_rel) else {
+                continue;
+            };
+            for cfg_rel in parent_cfgs {
+                let full_cfg = repo_root.join(cfg_rel);
+                if policy.is_some_and(|p| p.is_path_ignored(&full_cfg)) {
+                    continue;
+                }
+                let spec = format!("{commit_sha}:{cfg_rel}");
+                let Some(rev_bytes) = run_git_bytes(repo_root, &["rev-parse", "--verify", &spec])
+                else {
+                    continue;
+                };
+                let cfg_blob_sha = String::from_utf8_lossy(&rev_bytes).trim().to_string();
+                if cfg_blob_sha.is_empty() {
+                    continue;
+                }
+                let dedup_key = format!("{cfg_blob_sha}+{script_blob_sha}");
+                if seen_blobs.insert((dedup_key, cfg_rel.clone())) {
+                    entries.push((commit_sha.clone(), cfg_blob_sha, cfg_rel.clone()));
+                }
+            }
+        }
+    }
 
     if entries.is_empty() {
         return;
@@ -603,7 +742,11 @@ fn audit_history_configs(
                 continue;
             }
         }
-        let Some(blob) = run_git_bytes(repo_root, &["cat-file", "-p", &blob_sha]) else {
+        let Some(blob) = run_git_bytes_capped(
+            repo_root,
+            &["cat-file", "-p", &blob_sha],
+            MAX_GIT_BINARY_SCAN_BYTES as usize,
+        ) else {
             continue;
         };
         let sub_root = sandbox.root.join(format!("c{idx}"));
@@ -689,15 +832,7 @@ fn is_hook_bearing_config_rel(rel: &str) -> bool {
         })
 }
 
-fn materialize_companion_hook_scripts(
-    repo_root: &Path,
-    commit_prefix: &str,
-    config_rel: &str,
-    config_blob: &[u8],
-    sandbox: &GitBlobSandbox,
-    sub_root: &Path,
-    loaded: &mut HashSet<String>,
-) {
+fn extract_companion_script_candidates(config_rel: &str, config_blob: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(config_blob);
     let config_dir = Path::new(config_rel)
         .parent()
@@ -708,39 +843,67 @@ fn materialize_companion_hook_scripts(
         config_dir
     };
 
-    for raw_tok in text.split(['"', '\'', ' ', '\t', '\n', '\r', ';', '&', '|']) {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw_tok in text.split(['"', '\'', ' ', '\t', '\n', '\r', ';', '&', '|', ',']) {
         let tok = raw_tok.trim();
-        if tok.is_empty() || tok.len() > 240 || tok.contains("://") {
+        if tok.is_empty() || tok.len() > 240 || tok.contains("://") || tok.starts_with('-') {
             continue;
         }
-        let stripped = tok
+        let norm_tok = tok.replace('\\', "/");
+        let stripped = norm_tok
             .strip_prefix("${CLAUDE_PLUGIN_ROOT}/")
-            .or_else(|| tok.strip_prefix("$CLAUDE_PLUGIN_ROOT/"))
-            .or_else(|| tok.strip_prefix("${CLAUDE_PROJECT_DIR}/"))
-            .or_else(|| tok.strip_prefix("$CLAUDE_PROJECT_DIR/"))
-            .or_else(|| tok.strip_prefix("${workspaceFolder}/"))
-            .or_else(|| tok.strip_prefix("$workspaceFolder/"))
-            .or_else(|| tok.strip_prefix("${PWD}/"))
-            .or_else(|| tok.strip_prefix("$PWD/"))
-            .or_else(|| tok.strip_prefix("./"))
-            .unwrap_or(tok);
+            .or_else(|| norm_tok.strip_prefix("$CLAUDE_PLUGIN_ROOT/"))
+            .or_else(|| norm_tok.strip_prefix("${PLUGIN_ROOT}/"))
+            .or_else(|| norm_tok.strip_prefix("$PLUGIN_ROOT/"))
+            .or_else(|| norm_tok.strip_prefix("${CLAUDE_PROJECT_DIR}/"))
+            .or_else(|| norm_tok.strip_prefix("$CLAUDE_PROJECT_DIR/"))
+            .or_else(|| norm_tok.strip_prefix("${PROJECT_DIR}/"))
+            .or_else(|| norm_tok.strip_prefix("$PROJECT_DIR/"))
+            .or_else(|| norm_tok.strip_prefix("${workspaceFolder}/"))
+            .or_else(|| norm_tok.strip_prefix("$workspaceFolder/"))
+            .or_else(|| norm_tok.strip_prefix("${WORKSPACE_FOLDER}/"))
+            .or_else(|| norm_tok.strip_prefix("$WORKSPACE_FOLDER/"))
+            .or_else(|| norm_tok.strip_prefix("${extensionPath}/"))
+            .or_else(|| norm_tok.strip_prefix("${PWD}/"))
+            .or_else(|| norm_tok.strip_prefix("$PWD/"))
+            .or_else(|| norm_tok.strip_prefix("./"))
+            .unwrap_or(&norm_tok);
 
-        let had_path_prefix = tok != stripped || stripped.contains('/');
-        if !had_path_prefix
-            && !stripped.ends_with(".sh")
-            && !stripped.ends_with(".py")
-            && !stripped.ends_with(".js")
-            && !stripped.ends_with(".mjs")
-            && !stripped.ends_with(".cjs")
-            && !stripped.ends_with(".ts")
-            && !stripped.ends_with(".rb")
-            && !stripped.ends_with(".pl")
-            && !stripped.ends_with(".php")
-            && !stripped.ends_with(".lua")
-            && !stripped.ends_with(".ps1")
-            && !stripped.ends_with(".cmd")
-            && !stripped.ends_with(".bat")
-        {
+        let had_path_prefix = stripped != norm_tok || stripped.contains('/');
+        let has_known_ext = Path::new(stripped)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .is_some_and(|ext| {
+                matches!(
+                    ext.as_str(),
+                    "sh" | "bash"
+                        | "zsh"
+                        | "py"
+                        | "js"
+                        | "mjs"
+                        | "cjs"
+                        | "ts"
+                        | "tsx"
+                        | "jsx"
+                        | "rb"
+                        | "pl"
+                        | "php"
+                        | "lua"
+                        | "ps1"
+                        | "cmd"
+                        | "bat"
+                        | "exe"
+                        | "dll"
+                        | "so"
+                        | "dylib"
+                        | "node"
+                        | "wasm"
+                )
+            });
+        if !had_path_prefix && !has_known_ext {
             continue;
         }
 
@@ -754,25 +917,48 @@ fn materialize_companion_hook_scripts(
 
         for cand in candidate_rels {
             let norm = cand.replace('\\', "/");
-            if validate_safe_rel_path(&norm).is_none() || !loaded.insert(norm.clone()) {
-                continue;
-            }
-            let spec = if commit_prefix.is_empty() {
-                format!(":{norm}")
-            } else {
-                format!("{commit_prefix}:{norm}")
-            };
-            if let Some(sz) = git_blob_size(repo_root, &spec) {
-                if sz <= 4 * 1024 * 1024 {
-                    if let Some(script_bytes) = run_git_bytes(repo_root, &["cat-file", "-p", &spec])
-                    {
-                        let _ = sandbox.write_rel_blob(sub_root, &norm, &script_bytes);
-                    }
+            if validate_safe_rel_path(&norm).is_some() && seen.insert(norm.clone()) {
+                out.push(norm);
+                if out.len() >= 64 {
+                    return out;
                 }
             }
-            if loaded.len() >= 32 {
-                return;
+        }
+    }
+    out
+}
+
+fn materialize_companion_hook_scripts(
+    repo_root: &Path,
+    commit_prefix: &str,
+    config_rel: &str,
+    config_blob: &[u8],
+    sandbox: &GitBlobSandbox,
+    sub_root: &Path,
+    loaded: &mut HashSet<String>,
+) {
+    for norm in extract_companion_script_candidates(config_rel, config_blob) {
+        if !loaded.insert(norm.clone()) {
+            continue;
+        }
+        let spec = if commit_prefix.is_empty() {
+            format!(":{norm}")
+        } else {
+            format!("{commit_prefix}:{norm}")
+        };
+        if let Some(sz) = git_blob_size(repo_root, &spec) {
+            if sz <= MAX_GIT_BINARY_SCAN_BYTES {
+                if let Some(script_bytes) = run_git_bytes_capped(
+                    repo_root,
+                    &["cat-file", "-p", &spec],
+                    MAX_GIT_BINARY_SCAN_BYTES as usize,
+                ) {
+                    let _ = sandbox.write_rel_blob(sub_root, &norm, &script_bytes);
+                }
             }
+        }
+        if loaded.len() >= 48 {
+            return;
         }
     }
 }
@@ -1060,6 +1246,14 @@ fn scan_binary_git_blobs(
     }
 }
 
+#[derive(Clone, Copy)]
+enum DiffBlockKind {
+    Pem,
+    Putty,
+    YamlScalar(usize),
+    Hexdump,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stream_unified_diff(
     repo_root: &Path,
@@ -1094,41 +1288,42 @@ fn stream_unified_diff(
     let mut current_commit: Option<String> = None;
     let mut current_rel_file: Option<String> = None;
     let mut current_abs_file: Option<PathBuf> = None;
-    let mut current_file_has_gcp_sa = false;
-    let mut current_file_checked_gcp_blob = false;
+    let mut current_doc_hints = crate::rules::DocHints::default();
+    let mut current_checked_doc_blob = false;
+    let mut k8s_tracker = crate::rules::K8sDataTracker::default();
     let mut skip_current_file = false;
     let mut in_hunk = false;
     let mut current_new_line: usize = 1;
     let mut warned_binary_cap = false;
 
-    let mut pem_buf = String::new();
-    let mut pem_start_line = 1usize;
-    let mut in_pem = false;
+    let mut block_buf = String::new();
+    let mut block_start_line = 1usize;
+    let mut active_block: Option<DiffBlockKind> = None;
 
     let mut b64_buf = String::new();
     let mut b64_start_line = 1usize;
     let mut b64_lines = 0usize;
 
-    let flush_multiline = |pem_buf: &mut String,
-                           in_pem: &mut bool,
-                           pem_start_line: usize,
+    let flush_multiline = |block_buf: &mut String,
+                           active_block: &mut Option<DiffBlockKind>,
+                           block_start_line: usize,
                            b64_buf: &mut String,
                            b64_lines: &mut usize,
                            b64_start_line: usize,
-                           has_gcp_sa: bool,
+                           doc_hints: crate::rules::DocHints,
                            abs_file: &Option<PathBuf>,
                            rel_file: &Option<String>,
                            commit: &Option<String>,
                            hits: &mut Vec<FileHit>| {
-        if *in_pem && !pem_buf.is_empty() {
+        if active_block.is_some() && !block_buf.is_empty() {
             if let (Some(abs), Some(rel)) = (abs_file, rel_file) {
                 let disp = format_display_file(rel, commit.as_deref(), include_commit_prefix);
-                for m in engine.scan_text_with_doc_hint(pem_buf, Some(abs), has_gcp_sa) {
-                    let (rel_line, col) = compute_line_and_column(pem_buf, 1, m.start);
+                for m in engine.scan_text_with_hints(block_buf, Some(abs), doc_hints) {
+                    let (rel_line, col) = compute_line_and_column(block_buf, 1, m.start);
                     hits.push(FileHit {
                         file: abs.clone(),
                         display_file: disp.clone(),
-                        line: pem_start_line + rel_line.saturating_sub(1),
+                        line: block_start_line + rel_line.saturating_sub(1),
                         column: col,
                         rule_id: m.rule_id,
                         rule_name: m.rule_name,
@@ -1140,13 +1335,13 @@ fn stream_unified_diff(
                     });
                 }
             }
-            pem_buf.clear();
-            *in_pem = false;
+            block_buf.clear();
+            *active_block = None;
         }
         if *b64_lines >= 2 && b64_buf.len() >= 28 {
             if let (Some(abs), Some(rel)) = (abs_file, rel_file) {
                 let disp = format_display_file(rel, commit.as_deref(), include_commit_prefix);
-                for m in engine.scan_text_with_doc_hint(b64_buf, Some(abs), has_gcp_sa) {
+                for m in engine.scan_text_with_hints(b64_buf, Some(abs), doc_hints) {
                     let (_, col) = compute_line_and_column(b64_buf, 1, m.start);
                     hits.push(FileHit {
                         file: abs.clone(),
@@ -1178,13 +1373,13 @@ fn stream_unified_diff(
 
         if let Some(sha) = line.strip_prefix("LEAKTAP_COMMIT:") {
             flush_multiline(
-                &mut pem_buf,
-                &mut in_pem,
-                pem_start_line,
+                &mut block_buf,
+                &mut active_block,
+                block_start_line,
                 &mut b64_buf,
                 &mut b64_lines,
                 b64_start_line,
-                current_file_has_gcp_sa,
+                current_doc_hints,
                 &current_abs_file,
                 &current_rel_file,
                 &current_commit,
@@ -1193,21 +1388,22 @@ fn stream_unified_diff(
             current_commit = Some(sha.trim().to_string());
             current_rel_file = None;
             current_abs_file = None;
-            current_file_has_gcp_sa = false;
-            current_file_checked_gcp_blob = false;
+            current_doc_hints = crate::rules::DocHints::default();
+            current_checked_doc_blob = false;
+            k8s_tracker = crate::rules::K8sDataTracker::default();
             in_hunk = false;
             continue;
         }
 
         if line.starts_with("diff --git ") {
             flush_multiline(
-                &mut pem_buf,
-                &mut in_pem,
-                pem_start_line,
+                &mut block_buf,
+                &mut active_block,
+                block_start_line,
                 &mut b64_buf,
                 &mut b64_lines,
                 b64_start_line,
-                current_file_has_gcp_sa,
+                current_doc_hints,
                 &current_abs_file,
                 &current_rel_file,
                 &current_commit,
@@ -1215,8 +1411,9 @@ fn stream_unified_diff(
             );
             current_rel_file = None;
             current_abs_file = None;
-            current_file_has_gcp_sa = false;
-            current_file_checked_gcp_blob = false;
+            current_doc_hints = crate::rules::DocHints::default();
+            current_checked_doc_blob = false;
+            k8s_tracker = crate::rules::K8sDataTracker::default();
             skip_current_file = false;
             in_hunk = false;
             continue;
@@ -1253,8 +1450,9 @@ fn stream_unified_diff(
             }
 
             if let Some(rest) = line.strip_prefix("+++ ") {
-                current_file_has_gcp_sa = false;
-                current_file_checked_gcp_blob = false;
+                current_doc_hints = crate::rules::DocHints::default();
+                current_checked_doc_blob = false;
+                k8s_tracker = crate::rules::K8sDataTracker::default();
                 if rest == "/dev/null" {
                     current_rel_file = None;
                     current_abs_file = None;
@@ -1277,13 +1475,13 @@ fn stream_unified_diff(
 
         if line.starts_with("@@ ") {
             flush_multiline(
-                &mut pem_buf,
-                &mut in_pem,
-                pem_start_line,
+                &mut block_buf,
+                &mut active_block,
+                block_start_line,
                 &mut b64_buf,
                 &mut b64_lines,
                 b64_start_line,
-                current_file_has_gcp_sa,
+                current_doc_hints,
                 &current_abs_file,
                 &current_rel_file,
                 &current_commit,
@@ -1310,17 +1508,21 @@ fn stream_unified_diff(
             };
             let disp = format_display_file(rel, current_commit.as_deref(), include_commit_prefix);
 
-            if !current_file_has_gcp_sa
-                && (added.contains("\"service_account\"")
-                    || added.contains(".iam.gserviceaccount.com")
-                    || contains_gcp_sa_markers(added))
+            current_doc_hints = current_doc_hints.merge(crate::rules::DocHints::from_text(added));
+            if contains_gcp_sa_markers(added) {
+                current_doc_hints.has_gcp_sa = true;
+            }
+            if !current_checked_doc_blob
+                && (added.contains("\"private_key_id\"")
+                    || added.contains("\"kty\"")
+                    || added.contains("\"d\"")
+                    || added.contains("\"k\"")
+                    || added.contains("Secret")
+                    || added.contains("data:")
+                    || added.contains("stringData:")
+                    || added.contains("\"data\""))
             {
-                current_file_has_gcp_sa = true;
-            } else if !current_file_has_gcp_sa
-                && !current_file_checked_gcp_blob
-                && added.contains("\"private_key_id\"")
-            {
-                current_file_checked_gcp_blob = true;
+                current_checked_doc_blob = true;
                 let spec = match &current_commit {
                     Some(sha) => format!("{sha}:{rel}"),
                     None => format!(":{rel}"),
@@ -1329,47 +1531,55 @@ fn stream_unified_diff(
                     run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 256 * 1024)
                 {
                     let blob_text = String::from_utf8_lossy(&blob);
+                    current_doc_hints =
+                        current_doc_hints.merge(crate::rules::DocHints::from_text(&blob_text));
                     if contains_gcp_sa_markers(&blob_text) {
-                        current_file_has_gcp_sa = true;
+                        current_doc_hints.has_gcp_sa = true;
                     }
                 }
             }
 
-            if !in_pem && is_pem_header_line(added) {
-                in_pem = true;
-                pem_start_line = line_no;
-                pem_buf.clear();
-                pem_buf.push_str(added);
-                pem_buf.push('\n');
-                if added.contains("-----END ") {
-                    flush_multiline(
-                        &mut pem_buf,
-                        &mut in_pem,
-                        pem_start_line,
-                        &mut b64_buf,
-                        &mut b64_lines,
-                        b64_start_line,
-                        current_file_has_gcp_sa,
-                        &current_abs_file,
-                        &current_rel_file,
-                        &current_commit,
-                        hits,
-                    );
-                }
-                continue;
-            } else if in_pem {
-                if is_pem_or_pgp_continuation_line(added.as_bytes()) {
-                    pem_buf.push_str(added);
-                    pem_buf.push('\n');
-                    if added.contains("-----END ") || pem_buf.len() > 32 * 1024 {
+            let mut line_hints = current_doc_hints;
+            if line_hints.is_k8s_secret_manifest
+                || k8s_tracker.is_tracking()
+                || added.contains("kind:")
+                || added.contains("\"kind\"")
+            {
+                let (in_d, in_sd) = k8s_tracker.observe_line(added);
+                line_hints.in_k8s_data_entry = in_d;
+                line_hints.in_k8s_string_data_entry = in_sd;
+                line_hints.is_k8s_secret_manifest =
+                    k8s_tracker.is_active_secret_doc(line_hints.is_k8s_secret_manifest);
+            }
+
+            if let Some(kind) = active_block {
+                let continues = match kind {
+                    DiffBlockKind::Pem => is_pem_or_pgp_continuation_line(added.as_bytes()),
+                    DiffBlockKind::Putty => is_putty_continuation_line(added.as_bytes()),
+                    DiffBlockKind::YamlScalar(indent) => {
+                        is_yaml_block_scalar_continuation(added.as_bytes(), indent)
+                    }
+                    DiffBlockKind::Hexdump => crate::rules::is_hexdump_line(added),
+                };
+                if continues {
+                    block_buf.push_str(added);
+                    block_buf.push('\n');
+                    let finished = match kind {
+                        DiffBlockKind::Pem => added.contains("-----END "),
+                        DiffBlockKind::Putty => {
+                            added.contains("Private-MAC:") || added.contains("Private-Hash:")
+                        }
+                        DiffBlockKind::YamlScalar(_) | DiffBlockKind::Hexdump => false,
+                    };
+                    if finished || block_buf.len() > 32 * 1024 {
                         flush_multiline(
-                            &mut pem_buf,
-                            &mut in_pem,
-                            pem_start_line,
+                            &mut block_buf,
+                            &mut active_block,
+                            block_start_line,
                             &mut b64_buf,
                             &mut b64_lines,
                             b64_start_line,
-                            current_file_has_gcp_sa,
+                            line_hints,
                             &current_abs_file,
                             &current_rel_file,
                             &current_commit,
@@ -1379,18 +1589,65 @@ fn stream_unified_diff(
                     continue;
                 } else {
                     flush_multiline(
-                        &mut pem_buf,
-                        &mut in_pem,
-                        pem_start_line,
+                        &mut block_buf,
+                        &mut active_block,
+                        block_start_line,
                         &mut b64_buf,
                         &mut b64_lines,
                         b64_start_line,
-                        current_file_has_gcp_sa,
+                        line_hints,
                         &current_abs_file,
                         &current_rel_file,
                         &current_commit,
                         hits,
                     );
+                }
+            }
+
+            if active_block.is_none() {
+                if is_pem_header_line(added) {
+                    active_block = Some(DiffBlockKind::Pem);
+                    block_start_line = line_no;
+                    block_buf.clear();
+                    block_buf.push_str(added);
+                    block_buf.push('\n');
+                    if added.contains("-----END ") {
+                        flush_multiline(
+                            &mut block_buf,
+                            &mut active_block,
+                            block_start_line,
+                            &mut b64_buf,
+                            &mut b64_lines,
+                            b64_start_line,
+                            line_hints,
+                            &current_abs_file,
+                            &current_rel_file,
+                            &current_commit,
+                            hits,
+                        );
+                    }
+                    continue;
+                } else if is_multiline_putty_header(added.as_bytes()) {
+                    active_block = Some(DiffBlockKind::Putty);
+                    block_start_line = line_no;
+                    block_buf.clear();
+                    block_buf.push_str(added);
+                    block_buf.push('\n');
+                    continue;
+                } else if let Some(indent) = yaml_block_scalar_parent_indent(added.as_bytes()) {
+                    active_block = Some(DiffBlockKind::YamlScalar(indent));
+                    block_start_line = line_no;
+                    block_buf.clear();
+                    block_buf.push_str(added);
+                    block_buf.push('\n');
+                    continue;
+                } else if crate::rules::is_hexdump_line(added) {
+                    active_block = Some(DiffBlockKind::Hexdump);
+                    block_start_line = line_no;
+                    block_buf.clear();
+                    block_buf.push_str(added);
+                    block_buf.push('\n');
+                    continue;
                 }
             }
 
@@ -1412,9 +1669,7 @@ fn stream_unified_diff(
                     b64_lines += 1;
                 }
                 if trimmed.ends_with('=') || trimmed.ends_with('"') || trimmed.ends_with('\'') {
-                    for m in
-                        engine.scan_text_with_doc_hint(&b64_buf, Some(abs), current_file_has_gcp_sa)
-                    {
+                    for m in engine.scan_text_with_hints(&b64_buf, Some(abs), line_hints) {
                         let (_, col) = compute_line_and_column(&b64_buf, 1, m.start);
                         hits.push(FileHit {
                             file: abs.clone(),
@@ -1435,9 +1690,7 @@ fn stream_unified_diff(
                 }
             } else {
                 if b64_lines >= 2 && b64_buf.len() >= 28 {
-                    for m in
-                        engine.scan_text_with_doc_hint(&b64_buf, Some(abs), current_file_has_gcp_sa)
-                    {
+                    for m in engine.scan_text_with_hints(&b64_buf, Some(abs), line_hints) {
                         let (_, col) = compute_line_and_column(&b64_buf, 1, m.start);
                         hits.push(FileHit {
                             file: abs.clone(),
@@ -1464,7 +1717,7 @@ fn stream_unified_diff(
                 }
             }
 
-            for m in engine.scan_text_with_doc_hint(added, Some(abs), current_file_has_gcp_sa) {
+            for m in engine.scan_text_with_hints(added, Some(abs), line_hints) {
                 let (_, col) = compute_line_and_column(added, 1, m.start);
                 hits.push(FileHit {
                     file: abs.clone(),
@@ -1481,24 +1734,24 @@ fn stream_unified_diff(
                 });
             }
         } else if line.starts_with(' ') || line.starts_with('-') {
-            if line.starts_with(' ') {
+            if let Some(ctx) = line.strip_prefix(' ') {
                 current_new_line += 1;
-                if !current_file_has_gcp_sa
-                    && (line.contains("\"service_account\"")
-                        || line.contains(".iam.gserviceaccount.com")
-                        || contains_gcp_sa_markers(line))
-                {
-                    current_file_has_gcp_sa = true;
+                current_doc_hints = current_doc_hints.merge(crate::rules::DocHints::from_text(ctx));
+                if contains_gcp_sa_markers(ctx) {
+                    current_doc_hints.has_gcp_sa = true;
+                }
+                if current_doc_hints.is_k8s_secret_manifest {
+                    let _ = k8s_tracker.observe_line(ctx);
                 }
             }
             flush_multiline(
-                &mut pem_buf,
-                &mut in_pem,
-                pem_start_line,
+                &mut block_buf,
+                &mut active_block,
+                block_start_line,
                 &mut b64_buf,
                 &mut b64_lines,
                 b64_start_line,
-                current_file_has_gcp_sa,
+                current_doc_hints,
                 &current_abs_file,
                 &current_rel_file,
                 &current_commit,
@@ -1511,13 +1764,13 @@ fn stream_unified_diff(
     let _ = child.wait();
 
     flush_multiline(
-        &mut pem_buf,
-        &mut in_pem,
-        pem_start_line,
+        &mut block_buf,
+        &mut active_block,
+        block_start_line,
         &mut b64_buf,
         &mut b64_lines,
         b64_start_line,
-        current_file_has_gcp_sa,
+        current_doc_hints,
         &current_abs_file,
         &current_rel_file,
         &current_commit,

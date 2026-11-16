@@ -81,6 +81,224 @@ pub struct RawMatch {
     pub secret_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DocHints {
+    pub has_gcp_sa: bool,
+    pub has_jwk_asymmetric_kty: bool,
+    pub has_jwk_d_param: bool,
+    pub has_jwk_oct_kty: bool,
+    pub is_k8s_secret_manifest: bool,
+    pub in_k8s_data_entry: bool,
+    pub in_k8s_string_data_entry: bool,
+}
+
+impl DocHints {
+    pub fn from_text(text: &str) -> Self {
+        let lower = text.to_ascii_lowercase();
+        let has_gcp_sa =
+            lower.contains("service_account") || lower.contains(".iam.gserviceaccount.com");
+        let has_kty =
+            text.contains("\"kty\"") || text.contains("\\\"kty\\\"") || text.contains("'kty'");
+        let has_jwk_asymmetric_kty = has_kty
+            && (text.contains("\"RSA\"")
+                || text.contains("\\\"RSA\\\"")
+                || text.contains("'RSA'")
+                || text.contains("\"EC\"")
+                || text.contains("\\\"EC\\\"")
+                || text.contains("'EC'")
+                || text.contains("\"OKP\"")
+                || text.contains("\\\"OKP\\\"")
+                || text.contains("'OKP'"));
+        let has_jwk_d_param =
+            text.contains("\"d\"") || text.contains("\\\"d\\\"") || text.contains("'d'");
+        let has_jwk_oct_kty = has_kty
+            && (text.contains("\"oct\"") || text.contains("\\\"oct\\\"") || text.contains("'oct'"));
+        let has_k8s_kind_secret =
+            (text.contains("kind:") || text.contains("\"kind\"") || text.contains("\\\"kind\\\""))
+                && text.contains("Secret");
+        let has_k8s_data = text.contains("data:")
+            || text.contains("stringData:")
+            || text.contains("\"data\"")
+            || text.contains("\\\"data\\\"")
+            || text.contains("\"stringData\"")
+            || text.contains("\\\"stringData\\\"");
+        Self {
+            has_gcp_sa,
+            has_jwk_asymmetric_kty,
+            has_jwk_d_param,
+            has_jwk_oct_kty,
+            is_k8s_secret_manifest: has_k8s_kind_secret && has_k8s_data,
+            in_k8s_data_entry: false,
+            in_k8s_string_data_entry: false,
+        }
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            has_gcp_sa: self.has_gcp_sa || other.has_gcp_sa,
+            has_jwk_asymmetric_kty: self.has_jwk_asymmetric_kty || other.has_jwk_asymmetric_kty,
+            has_jwk_d_param: self.has_jwk_d_param || other.has_jwk_d_param,
+            has_jwk_oct_kty: self.has_jwk_oct_kty || other.has_jwk_oct_kty,
+            is_k8s_secret_manifest: self.is_k8s_secret_manifest || other.is_k8s_secret_manifest,
+            in_k8s_data_entry: self.in_k8s_data_entry || other.in_k8s_data_entry,
+            in_k8s_string_data_entry: self.in_k8s_string_data_entry
+                || other.in_k8s_string_data_entry,
+        }
+    }
+}
+
+/// Tracks whether a line in a YAML or JSON `kind: Secret` manifest sits inside `data` or `stringData`,
+/// including multi-document YAML (`---`) streams mixing `Secret` with `ConfigMap` / `Deployment`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct K8sDataTracker {
+    yaml_indent: Option<(usize, bool)>, // (indent_cols, is_string_data)
+    json_depth: Option<(usize, bool)>,  // (brace_depth, is_string_data)
+    doc_kind_is_secret: Option<bool>,
+}
+
+impl K8sDataTracker {
+    pub fn is_active_secret_doc(&self, fallback: bool) -> bool {
+        self.doc_kind_is_secret.unwrap_or(fallback)
+    }
+
+    pub fn is_tracking(&self) -> bool {
+        self.doc_kind_is_secret.is_some() || self.yaml_indent.is_some() || self.json_depth.is_some()
+    }
+
+    pub fn observe_line(&mut self, line: &str) -> (bool, bool) {
+        let trimmed_cr = line.trim_end_matches(['\r', '\n']);
+        let leading_ws = trimmed_cr
+            .bytes()
+            .take_while(|&b| b == b' ' || b == b'\t')
+            .count();
+        let trimmed = trimmed_cr[leading_ws..].trim_end();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return (false, false);
+        }
+        if trimmed == "---" || trimmed.starts_with("--- ") || trimmed == "..." {
+            self.yaml_indent = None;
+            self.json_depth = None;
+            self.doc_kind_is_secret = None;
+            return (false, false);
+        }
+
+        if let Some(is_sec) = detect_k8s_kind_line(trimmed, leading_ws) {
+            self.doc_kind_is_secret = Some(is_sec);
+            if !is_sec {
+                self.yaml_indent = None;
+                self.json_depth = None;
+                return (false, false);
+            }
+        }
+
+        let allowed_doc = self.doc_kind_is_secret != Some(false);
+
+        // JSON multiline tracking (`"data": {` ... `}`)
+        if let Some((mut depth, is_str_data)) = self.json_depth {
+            let opens = trimmed.bytes().filter(|&b| b == b'{').count();
+            let closes = trimmed.bytes().filter(|&b| b == b'}').count();
+            depth = depth.saturating_add(opens);
+            if closes >= depth {
+                self.json_depth = None;
+                return (false, false);
+            }
+            self.json_depth = Some((depth - closes, is_str_data));
+            return if allowed_doc {
+                (!is_str_data, is_str_data)
+            } else {
+                (false, false)
+            };
+        }
+
+        if let Some(is_str_data) = detect_json_k8s_data_open(trimmed) {
+            if !trimmed.contains('}') {
+                self.json_depth = Some((1, is_str_data));
+            }
+            return if allowed_doc {
+                (!is_str_data, is_str_data)
+            } else {
+                (false, false)
+            };
+        }
+
+        // YAML block mapping tracking (`data:` / `stringData:`)
+        if let Some((base_indent, is_str_data)) = self.yaml_indent {
+            if leading_ws > base_indent {
+                return if allowed_doc {
+                    (!is_str_data, is_str_data)
+                } else {
+                    (false, false)
+                };
+            }
+            self.yaml_indent = None;
+        }
+
+        if trimmed == "data:" || trimmed.starts_with("data: #") {
+            self.yaml_indent = Some((leading_ws, false));
+            return (false, false);
+        }
+        if trimmed == "stringData:" || trimmed.starts_with("stringData: #") {
+            self.yaml_indent = Some((leading_ws, true));
+            return (false, false);
+        }
+
+        (false, false)
+    }
+}
+
+fn detect_k8s_kind_line(trimmed: &str, leading_ws: usize) -> Option<bool> {
+    if leading_ws <= 2 {
+        if let Some(rest) = trimmed.strip_prefix("kind:") {
+            let val = rest
+                .split(" #")
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .trim_matches(['"', '\'', ',']);
+            if !val.is_empty() {
+                return Some(val == "Secret");
+            }
+        }
+    }
+    for key in ["\"kind\"", "\\\"kind\\\""] {
+        if let Some(pos) = trimmed.find(key) {
+            let rest = trimmed[pos + key.len()..].trim_start();
+            if let Some(after_colon) = rest.strip_prefix(':') {
+                let val = after_colon
+                    .trim_start()
+                    .trim_start_matches(['"', '\'', '\\'])
+                    .bytes()
+                    .take_while(|b| b.is_ascii_alphanumeric())
+                    .collect::<Vec<u8>>();
+                if !val.is_empty() {
+                    return Some(val.as_slice() == b"Secret");
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_json_k8s_data_open(trimmed: &str) -> Option<bool> {
+    for (key, is_str) in [
+        ("\"data\"", false),
+        ("\\\"data\\\"", false),
+        ("\"stringData\"", true),
+        ("\\\"stringData\\\"", true),
+    ] {
+        if let Some(pos) = trimmed.find(key) {
+            let rest = trimmed[pos + key.len()..].trim_start();
+            if let Some(after_colon) = rest.strip_prefix(':') {
+                if after_colon.trim_start().starts_with('{') {
+                    return Some(is_str);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub struct RuleEngine {
     rules: Vec<CompiledRule>,
     prefilter: AhoCorasick,
@@ -88,6 +306,7 @@ pub struct RuleEngine {
     unanchored_rules: Vec<usize>,
     b64_rule_enabled: bool,
     hex_rule_enabled: bool,
+    k8s_rule_enabled: bool,
     policy: Option<PolicyConfig>,
 }
 
@@ -427,8 +646,8 @@ const RULE_SPECS: &[RuleSpec] = &[
         anchors: &["-----BEGIN "],
         // Requires a real base64 key body after the BEGIN header without ever crossing JSON quotes (`"`),
         // catching full keys, OpenPGP `PRIVATE KEY BLOCK` keys, AND truncated `head -n 2 id_rsa` keys
-        // while ignoring bare header mentions in prose (`expecting -----BEGIN RSA PRIVATE KEY-----`).
-        pattern: r#"(-----BEGIN (?:(?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+(?:[ \t]*[A-Za-z0-9-]+:[ \t]*[^\r\n"'`{}\[\]\\]+(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA]))+)*[ \t]*[A-Za-z0-9+/=]{16,}(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+[ \t]*[A-Za-z0-9+/=]{16,})*(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+(?:[ \t]*[A-Za-z0-9+/=]{1,76}[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+)?(?:[ \t]*=[A-Za-z0-9+/=]{4}[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+)?-----END (?:(?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----)?)"#,
+        // (including trailing short `< 16`-char Base64 padding lines) while ignoring bare header mentions in prose.
+        pattern: r#"(-----BEGIN (?:(?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+(?:[ \t]*[A-Za-z0-9-]+:[ \t]*[^\r\n"'`{}\[\]\\]+(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA]))+)*[ \t]*[A-Za-z0-9+/=]{16,}(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+[ \t]*[A-Za-z0-9+/=]{16,})*(?:(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+[ \t]*[A-Za-z0-9+/]{1,76}={0,2})?[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+(?:[ \t]*=[A-Za-z0-9+/=]{4}[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+)?-----END (?:(?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----|(?:[ \t]*(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])+[ \t]*(?:[A-Za-z0-9+/]{2,15}={1,2}|[A-Za-z0-9+/]{0,15}[0-9+/][A-Za-z0-9+/]{2,15}={0,2}))?))"#,
         secret_group: 1,
         min_entropy: 0.0,
     },
@@ -885,6 +1104,18 @@ const RULE_SPECS: &[RuleSpec] = &[
             "signing_key",
             "secret_key",
             "app_key",
+            "_APP_KEY",
+            "_app_key",
+            "_APPKEY",
+            "_appkey",
+            "-app-key",
+            "app-key",
+            "appKey",
+            "AppKey",
+            "APIKEY",
+            "apikey",
+            "_APIKEY",
+            "_apikey",
             "apiKey",
             "secretKey",
             "clientSecret",
@@ -910,9 +1141,113 @@ const RULE_SPECS: &[RuleSpec] = &[
             "client-secret",
             "access-token",
         ],
-        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passwd|_pass|_token|-secret|-api-key|-access-token|-auth-token|-refresh-token|-private-key|-password|ApiKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password)|API_KEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSWD|SECRET|TOKEN|api_key|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passwd|apiKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"|\\+u002[27]|["'])?([A-Za-z0-9/+=\-_!@#$%^&*~.?]{16,180})(?:\\+"|\\+u002[27]|["'])?"#,
+        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passwd|_pass|_token|-secret|-api-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|ApiKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password)|API_KEY|APIKEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSWD|SECRET|TOKEN|api_key|apikey|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passwd|apiKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?]{12,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"|\\+u002[27]|["'])?([A-Za-z0-9/+=\-_!@#$%^&*~.?]{16,180})(?:\\+"|\\+u002[27]|["'])?)"#,
         secret_group: 1,
-        min_entropy: 3.55,
+        min_entropy: 3.30,
+    },
+    RuleSpec {
+        id: "jwk-private-key",
+        name: "JSON Web Key (JWK) Private Key",
+        description: "RFC 7517 / RFC 7518 JWK asymmetric (`d`, `p`, `q`, `dp`, `dq`, `qi`) or symmetric (`k`) private key material.",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &[
+            "\"d\"", "\\\"d\\\"", "'d'", "\"p\"", "\\\"p\\\"", "\"q\"", "\\\"q\\\"", "\"dp\"",
+            "\\\"dp\\\"", "\"dq\"", "\\\"dq\\\"", "\"qi\"", "\\\"qi\\\"", "\"k\"", "\\\"k\\\"",
+            "'k'",
+        ],
+        pattern: r#"(?:\\+"|["'])(?:d|p|q|dp|dq|qi|k)(?:\\+"|["'])\s*:\s*(?:\\+"|["'])([A-Za-z0-9+/_=\-]{22,1024})(?:\\+"|["'])"#,
+        secret_group: 1,
+        min_entropy: 3.30,
+    },
+    RuleSpec {
+        id: "kubernetes-secret-data",
+        name: "Kubernetes Secret Manifest Data",
+        description: "Base64-encoded secret payload inside a Kubernetes `kind: Secret` manifest `data` map.",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        // Handled contextually in `scan_text_inner` when `DocHints.is_k8s_secret_manifest` is active.
+        anchors: &[],
+        pattern: r"([A-Za-z0-9+/]{12,}={0,2})",
+        secret_group: 1,
+        min_entropy: 3.0,
+    },
+    RuleSpec {
+        id: "notion-api-token",
+        name: "Notion Integration Token",
+        description: "Notion internal or OAuth integration secret (`ntn_...` / `secret_...`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["ntn_", "secret_"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])((?:ntn_[0-9A-Za-z]{40,60}|secret_[A-Za-z0-9]{43}))\b"#,
+        secret_group: 1,
+        min_entropy: 3.6,
+    },
+    RuleSpec {
+        id: "airtable-pat",
+        name: "Airtable Personal Access Token",
+        description: "Airtable scoped personal access token (`pat<14>.<64-hex>`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["pat"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(pat[A-Za-z0-9]{14}\.[a-f0-9]{64})\b"#,
+        secret_group: 1,
+        min_entropy: 3.6,
+    },
+    RuleSpec {
+        id: "hubspot-pat",
+        name: "HubSpot Private App Token",
+        description: "HubSpot private app access token (`pat-na1-...` / `pat-eu1-...`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["pat-na1-", "pat-eu1-"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(pat-(?:na1|eu1)-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b"#,
+        secret_group: 1,
+        min_entropy: 3.2,
+    },
+    RuleSpec {
+        id: "square-access-token",
+        name: "Square Access Token / Secret",
+        description: "Square OAuth access token or application secret (`sq0atp-...` / `sq0csp-...`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["sq0atp-", "sq0csp-"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(sq0(?:atp|csp)-[0-9A-Za-z\-_]{22,64})\b"#,
+        secret_group: 1,
+        min_entropy: 3.4,
+    },
+    RuleSpec {
+        id: "figma-pat",
+        name: "Figma Personal Access Token",
+        description: "Figma personal access token (`figd_...`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["figd_"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(figd_[A-Za-z0-9_\-]{36,56})\b"#,
+        secret_group: 1,
+        min_entropy: 3.5,
+    },
+    RuleSpec {
+        id: "voyage-api-key",
+        name: "Voyage AI API Key",
+        description: "Voyage AI embedding and reranker API key (`pa-...`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["pa-"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(pa-[A-Za-z0-9_\-]{38,56})\b"#,
+        secret_group: 1,
+        min_entropy: 3.7,
+    },
+    RuleSpec {
+        id: "vercel-access-token",
+        name: "Vercel Access Token",
+        description: "Vercel personal or OAuth access token (`vcp_...` / `vca_...` / `vck_...`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &["vcp_", "vca_", "vck_"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(vc[pak]_[A-Za-z0-9]{24,72})\b"#,
+        secret_group: 1,
+        min_entropy: 3.5,
     },
     RuleSpec {
         id: "base64-encoded-secret",
@@ -929,7 +1264,7 @@ const RULE_SPECS: &[RuleSpec] = &[
     RuleSpec {
         id: "hex-encoded-secret",
         name: "Hex-Encoded Secret",
-        description: "Hex-encoded (`xxd -p` / `od -tx1` / `.toString('hex')`) API key, cloud token, database URI, or private key.",
+        description: "Hex-encoded (`xxd` / `od -tx1` / `hexdump` / `.toString('hex')`) API key, cloud token, database URI, or private key.",
         severity: Severity::Critical,
         category: RuleCategory::Secret,
         // Handled by `scan_hex_candidates` across continuous, `0x`-prefixed, and line-wrapped hex dumps.
@@ -1062,6 +1397,7 @@ impl RuleEngine {
         let mut unanchored_rules = Vec::new();
         let mut b64_rule_enabled = false;
         let mut hex_rule_enabled = false;
+        let mut k8s_rule_enabled = false;
 
         for spec in RULE_SPECS {
             if !include_pii && spec.category == RuleCategory::Pii {
@@ -1075,6 +1411,9 @@ impl RuleEngine {
             }
             if spec.id == "hex-encoded-secret" {
                 hex_rule_enabled = true;
+            }
+            if spec.id == "kubernetes-secret-data" {
+                k8s_rule_enabled = true;
             }
             let rule_idx = rules.len();
             for &anchor in spec.anchors {
@@ -1167,6 +1506,7 @@ impl RuleEngine {
             unanchored_rules,
             b64_rule_enabled,
             hex_rule_enabled,
+            k8s_rule_enabled,
             policy: policy.cloned(),
         }
     }
@@ -1181,12 +1521,12 @@ impl RuleEngine {
 
     /// Scans a single line or chunk in linear O(n) time using SIMD Aho-Corasick prefiltering.
     pub fn scan_text(&self, text: &str) -> Vec<RawMatch> {
-        self.scan_text_inner(text, None, 0, true, true, false)
+        self.scan_text_inner(text, None, 0, true, true, DocHints::default())
     }
 
     /// Scans text while applying path-scoped allowlists (`[allowlist.rule_paths]` and `--trust-project-config`).
     pub fn scan_text_for_path(&self, text: &str, path: Option<&std::path::Path>) -> Vec<RawMatch> {
-        self.scan_text_inner(text, path, 0, true, true, false)
+        self.scan_text_inner(text, path, 0, true, true, DocHints::default())
     }
 
     /// Scans text with an optional file-level GCP service-account context hint so multi-line
@@ -1197,7 +1537,24 @@ impl RuleEngine {
         path: Option<&std::path::Path>,
         has_gcp_sa_markers: bool,
     ) -> Vec<RawMatch> {
-        self.scan_text_inner(text, path, 0, true, true, has_gcp_sa_markers)
+        self.scan_text_with_hints(
+            text,
+            path,
+            DocHints {
+                has_gcp_sa: has_gcp_sa_markers,
+                ..DocHints::default()
+            },
+        )
+    }
+
+    /// Scans text with document-level context hints (GCP SA JSON, JWK `kty`, Kubernetes `kind: Secret`).
+    pub fn scan_text_with_hints(
+        &self,
+        text: &str,
+        path: Option<&std::path::Path>,
+        hints: DocHints,
+    ) -> Vec<RawMatch> {
+        self.scan_text_inner(text, path, 0, true, true, hints)
     }
 
     fn scan_text_inner(
@@ -1207,11 +1564,12 @@ impl RuleEngine {
         decode_depth: u8,
         allow_json_unescape: bool,
         allow_percent_decode: bool,
-        has_gcp_sa_markers: bool,
+        hints: DocHints,
     ) -> Vec<RawMatch> {
         if text.is_empty() {
             return Vec::new();
         }
+        let eff_hints = hints.merge(DocHints::from_text(text));
 
         let mut candidate_bits: u128 = 0;
         let mut extra_candidates: Option<HashSet<usize>> = None;
@@ -1243,7 +1601,7 @@ impl RuleEngine {
             for (idx, rule) in self.rules.iter().enumerate() {
                 if matches!(
                     rule.id.as_str(),
-                    "base64-encoded-secret" | "hex-encoded-secret"
+                    "base64-encoded-secret" | "hex-encoded-secret" | "kubernetes-secret-data"
                 ) {
                     continue;
                 }
@@ -1300,7 +1658,7 @@ impl RuleEngine {
                         m.start(),
                         m.end(),
                         val,
-                        has_gcp_sa_markers,
+                        eff_hints,
                     ) {
                         continue;
                     }
@@ -1323,6 +1681,16 @@ impl RuleEngine {
                     });
                 }
             }
+        }
+
+        if eff_hints.is_k8s_secret_manifest
+            && self.k8s_rule_enabled
+            && !self
+                .policy
+                .as_ref()
+                .is_some_and(|p| p.is_rule_disabled_for("kubernetes-secret-data", path))
+        {
+            self.scan_k8s_secret_data_entries(text, path, eff_hints, &mut matches);
         }
 
         if decode_depth < 2 {
@@ -1359,7 +1727,7 @@ impl RuleEngine {
                     decode_depth,
                     false,
                     allow_percent_decode,
-                    has_gcp_sa_markers,
+                    eff_hints,
                 ) {
                     if um.start < um.end && um.end <= raw_ends.len() {
                         um.start = raw_starts[um.start];
@@ -1382,7 +1750,7 @@ impl RuleEngine {
                     decode_depth + 1,
                     allow_json_unescape,
                     true,
-                    has_gcp_sa_markers,
+                    eff_hints,
                 ) {
                     if pm.start < pm.end && pm.end <= raw_ends.len() {
                         pm.start = raw_starts[pm.start];
@@ -1418,6 +1786,7 @@ impl RuleEngine {
                                 matches!(
                                     id,
                                     "dotenv-generic-secret"
+                                        | "kubernetes-secret-data"
                                         | "base64-encoded-secret"
                                         | "hex-encoded-secret"
                                         | "http-bearer-token"
@@ -1426,10 +1795,13 @@ impl RuleEngine {
                             };
                             let prev_is_generic = is_generic(&prev.rule_id);
                             let m_is_specific = !is_generic(&m.rule_id);
+                            let k8s_upgrades_dotenv = prev.rule_id == "dotenv-generic-secret"
+                                && m.rule_id == "kubernetes-secret-data";
                             // Upgrade overlapping generic matches to the higher-severity / specific secret rule
                             // while preserving the union byte span (and any captured variable name) so `clean` scrubs the entire value.
                             if m.severity > prev.severity
-                                || (m.severity == prev.severity && prev_is_generic && m_is_specific)
+                                || (m.severity == prev.severity
+                                    && ((prev_is_generic && m_is_specific) || k8s_upgrades_dotenv))
                             {
                                 let union_start = prev.start.min(m.start);
                                 let union_end = prev.end.max(m.end);
@@ -1472,6 +1844,238 @@ impl RuleEngine {
         }
 
         deduped
+    }
+
+    fn scan_k8s_secret_data_entries(
+        &self,
+        text: &str,
+        path: Option<&std::path::Path>,
+        eff_hints: DocHints,
+        out: &mut Vec<RawMatch>,
+    ) {
+        // 1. Streaming single-line mode from `scanner.rs` / `cleaner.rs`
+        if eff_hints.in_k8s_data_entry || eff_hints.in_k8s_string_data_entry {
+            self.inspect_k8s_data_line(
+                text,
+                0,
+                eff_hints.in_k8s_data_entry,
+                eff_hints.in_k8s_string_data_entry,
+                path,
+                out,
+            );
+        }
+
+        // 2. Inline JSON `{"kind":"Secret","data":{"creds":"..."}}` (including JSONL-escaped quotes)
+        for (marker, is_str_data) in [
+            ("\"data\"", false),
+            ("\\\"data\\\"", false),
+            ("\"stringData\"", true),
+            ("\\\"stringData\\\"", true),
+        ] {
+            let mut search_from = 0usize;
+            while let Some(rel) = text[search_from..].find(marker) {
+                let pos = search_from + rel;
+                search_from = pos + marker.len();
+                let rest = &text[search_from..];
+                let ws1 = rest.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+                if rest.as_bytes().get(ws1) != Some(&b':') {
+                    continue;
+                }
+                let after_colon = &rest[ws1 + 1..];
+                let ws2 = after_colon
+                    .bytes()
+                    .take_while(|b| b.is_ascii_whitespace())
+                    .count();
+                if after_colon.as_bytes().get(ws2) != Some(&b'{') {
+                    continue;
+                }
+                let brace_open_abs = search_from + ws1 + 1 + ws2;
+                let mut depth = 1usize;
+                let mut brace_close_abs = None;
+                for (off, b) in text[brace_open_abs + 1..].bytes().enumerate() {
+                    if b == b'{' {
+                        depth += 1;
+                    } else if b == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            brace_close_abs = Some(brace_open_abs + 1 + off);
+                            break;
+                        }
+                    }
+                }
+                if let Some(close_abs) = brace_close_abs {
+                    let inner = &text[brace_open_abs + 1..close_abs];
+                    let mut seg_start = 0usize;
+                    for (idx, ch) in inner.char_indices() {
+                        if ch == ',' || ch == '\n' {
+                            let seg = &inner[seg_start..idx];
+                            self.inspect_k8s_data_line(
+                                seg,
+                                brace_open_abs + 1 + seg_start,
+                                !is_str_data,
+                                is_str_data,
+                                path,
+                                out,
+                            );
+                            seg_start = idx + 1;
+                        }
+                    }
+                    if seg_start < inner.len() {
+                        self.inspect_k8s_data_line(
+                            &inner[seg_start..],
+                            brace_open_abs + 1 + seg_start,
+                            !is_str_data,
+                            is_str_data,
+                            path,
+                            out,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. Multi-line YAML/JSON manifest in `text` (splitting on physical `\n` and JSONL `\n`)
+        if text.contains('\n') || text.contains("\\n") {
+            let mut tracker = K8sDataTracker::default();
+            for (line_start, line_end) in split_logical_lines_with_offsets(text) {
+                let line = &text[line_start..line_end];
+                let (in_data, in_str_data) = tracker.observe_line(line);
+                if in_data || in_str_data {
+                    self.inspect_k8s_data_line(line, line_start, in_data, in_str_data, path, out);
+                }
+            }
+        }
+    }
+
+    fn inspect_k8s_data_line(
+        &self,
+        line: &str,
+        line_abs_offset: usize,
+        in_data: bool,
+        in_str_data: bool,
+        path: Option<&std::path::Path>,
+        out: &mut Vec<RawMatch>,
+    ) {
+        let Some(colon_idx) = line.find(':') else {
+            return;
+        };
+        let raw_key = line[..colon_idx].trim_matches(|c: char| {
+            c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '\\' | ',' | '{')
+        });
+        if raw_key.is_empty()
+            || raw_key.len() > 128
+            || matches!(
+                raw_key,
+                "apiVersion" | "kind" | "metadata" | "type" | "data" | "stringData" | "immutable"
+            )
+            || !raw_key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return;
+        }
+
+        let rhs = &line[colon_idx + 1..];
+        let rhs_no_comment = if let Some(hash_pos) = rhs.find(" #") {
+            &rhs[..hash_pos]
+        } else {
+            rhs
+        };
+        let lead_trim = rhs_no_comment
+            .bytes()
+            .take_while(|&b| b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'\\'))
+            .count();
+        if lead_trim >= rhs_no_comment.len() {
+            return;
+        }
+        let tail_slice = &rhs_no_comment[lead_trim..];
+        let trimmed_val = tail_slice.trim_end_matches(|c: char| {
+            c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '\\' | ',' | '}')
+        });
+        if trimmed_val.is_empty() {
+            return;
+        }
+        let abs_start = line_abs_offset + colon_idx + 1 + lead_trim;
+        let abs_end = abs_start + trimmed_val.len();
+
+        if out.iter().any(|existing| {
+            existing.rule_id != "dotenv-generic-secret"
+                && existing.start <= abs_start
+                && existing.end >= abs_end
+        }) {
+            return;
+        }
+        if trimmed_val.contains("REDACTED_BY_LEAKTAP")
+            || self.has_stopword(trimmed_val, path)
+            || is_likely_placeholder(trimmed_val)
+        {
+            return;
+        }
+
+        if in_data {
+            if trimmed_val.len() < 8
+                || trimmed_val.len() > MAX_B64_CANDIDATE_CHARS
+                || !trimmed_val
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+            {
+                return;
+            }
+            let no_pad = trimmed_val.trim_end_matches('=');
+            if no_pad.len() < 6 || trimmed_val.len() - no_pad.len() > 2 {
+                return;
+            }
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD
+                .decode(trimmed_val)
+                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(no_pad))
+            else {
+                return;
+            };
+            if decoded.len() < 6 {
+                return;
+            }
+            if let Ok(dec_str) = std::str::from_utf8(&decoded) {
+                let dt = dec_str.trim();
+                if dt.len() < 4
+                    || is_likely_placeholder(dt)
+                    || matches!(
+                        dt.to_ascii_lowercase().as_str(),
+                        "true" | "false" | "{}" | "[]"
+                    )
+                {
+                    return;
+                }
+            }
+        } else if in_str_data {
+            let lower = trimmed_val.to_ascii_lowercase();
+            if trimmed_val.len() < 8
+                || matches!(lower.as_str(), "true" | "false" | "opaque")
+                || lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || looks_like_filesystem_path(trimmed_val)
+                || shannon_entropy(trimmed_val) < 2.8
+            {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let fp = fingerprint_match("kubernetes-secret-data", trimmed_val);
+        if self.is_fingerprint_ignored(&fp, path) {
+            return;
+        }
+        out.push(RawMatch {
+            rule_id: "kubernetes-secret-data".to_string(),
+            rule_name: "Kubernetes Secret Manifest Data".to_string(),
+            severity: Severity::High,
+            category: RuleCategory::Secret,
+            start: abs_start,
+            end: abs_end,
+            masked: mask_value("kubernetes-secret-data", trimmed_val),
+            fingerprint: fp,
+            secret_key: Some(raw_key.to_string()),
+        });
     }
 
     /// Single-pass linear O(n) scanner for standard, URL-safe, prefixed, and line-wrapped Base64 blobs.
@@ -1679,16 +2283,22 @@ impl RuleEngine {
             Ok(s) => std::borrow::Cow::Borrowed(s),
             Err(_) => String::from_utf8_lossy(&decoded),
         };
-        let has_gcp = decoded_cow.contains("service_account")
-            || decoded_cow.contains(".iam.gserviceaccount.com");
-        self.scan_text_inner(&decoded_cow, path, decode_depth + 1, true, true, has_gcp)
-            .into_iter()
-            .filter(|m| m.category == RuleCategory::Secret)
-            .max_by_key(|m| m.severity)
+        let inner_hints = DocHints::from_text(&decoded_cow);
+        self.scan_text_inner(
+            &decoded_cow,
+            path,
+            decode_depth + 1,
+            true,
+            true,
+            inner_hints,
+        )
+        .into_iter()
+        .filter(|m| m.category == RuleCategory::Secret)
+        .max_by_key(|m| m.severity)
     }
 
-    /// Single-pass linear O(n) scanner for continuous, `0x`-prefixed, `xxd -p` wrapped,
-    /// and space/colon-delimited hex byte dumps (`od -tx1`, `hexdump`, packet dumps).
+    /// Single-pass linear O(n) scanner for continuous, `0x`-prefixed, `xxd` (default + `-p`),
+    /// `od -tx1`, `hexdump -C`, and space/colon-delimited hex byte dumps.
     fn scan_hex_candidates(
         &self,
         text: &str,
@@ -1696,6 +2306,9 @@ impl RuleEngine {
         decode_depth: u8,
         out: &mut Vec<RawMatch>,
     ) {
+        // First pass: structured address-prefixed hex dumps (`xxd`, `od -tx1`, `hexdump -C`)
+        self.scan_structured_hexdump_blocks(text, path, decode_depth, out);
+
         let bytes = text.as_bytes();
         let len = bytes.len();
         let mut i = 0usize;
@@ -1721,24 +2334,25 @@ impl RuleEngine {
                 j += 1;
             }
 
-            // Case 1: Space- or colon-separated 2-hex-digit byte sequences (`73 6b 5f ...` or `73:6b:5f:...`)
+            // Case 1: Space- or colon-separated 2- or 4-hex-digit sequences (`73 6b 5f ...`, `736b 5f6c ...`, `73:6b:5f:...`)
+            let first_grp_len = j - hex_start;
             if at_word_start
                 && start == hex_start
-                && (j - hex_start) == 2
+                && (first_grp_len == 2 || first_grp_len == 4)
                 && j < len
-                && (bytes[j] == b' ' || bytes[j] == b':')
+                && (bytes[j] == b' ' || (first_grp_len == 2 && bytes[j] == b':'))
             {
                 let sep = bytes[j];
-                let mut pairs = 1usize;
+                let mut total_hex = first_grp_len;
                 let mut end = j;
-                while end < len && pairs < 8192 {
+                while end < len && total_hex < 16384 {
                     let mut k = end;
                     if bytes[k] == sep {
                         k += 1;
                         if sep == b' ' && k < len && bytes[k] == b' ' {
                             k += 1;
                         }
-                    } else if sep == b' ' && pairs >= 8 {
+                    } else if sep == b' ' && total_hex >= 16 {
                         if bytes[k] == b'\r' && k + 1 < len && bytes[k + 1] == b'\n' {
                             k += 2;
                         } else if bytes[k] == b'\n' {
@@ -1755,19 +2369,25 @@ impl RuleEngine {
                         break;
                     }
 
-                    if k + 2 <= len
-                        && bytes[k].is_ascii_hexdigit()
-                        && bytes[k + 1].is_ascii_hexdigit()
-                        && (k + 2 == len || !bytes[k + 2].is_ascii_alphanumeric())
+                    let mut grp_end = k;
+                    while grp_end < len
+                        && bytes[grp_end].is_ascii_hexdigit()
+                        && (grp_end - k) <= first_grp_len
                     {
-                        pairs += 1;
-                        end = k + 2;
+                        grp_end += 1;
+                    }
+                    let grp_len = grp_end - k;
+                    let valid_grp =
+                        grp_len == first_grp_len || (first_grp_len == 4 && grp_len == 2);
+                    if valid_grp && (grp_end == len || !bytes[grp_end].is_ascii_alphanumeric()) {
+                        total_hex += grp_len;
+                        end = grp_end;
                     } else {
                         break;
                     }
                 }
 
-                if pairs >= 18 {
+                if total_hex >= 32 {
                     i = end;
                     let raw_span = &text[start..end];
                     if !self.has_stopword(raw_span, path) {
@@ -1828,6 +2448,50 @@ impl RuleEngine {
             if let Some(inner) = self.verify_hex_secret(&clean_cow, path, decode_depth) {
                 self.push_hex_match(inner, &clean_cow, start, end, path, out);
             }
+        }
+    }
+
+    fn scan_structured_hexdump_blocks(
+        &self,
+        text: &str,
+        path: Option<&std::path::Path>,
+        decode_depth: u8,
+        out: &mut Vec<RawMatch>,
+    ) {
+        let mut block_start: Option<usize> = None;
+        let mut block_end: usize = 0;
+        let mut clean_hex = String::new();
+
+        let flush_block =
+            |b_start: usize, b_end: usize, hex_buf: &str, out_vec: &mut Vec<RawMatch>| {
+                if hex_buf.len() < 32 || self.has_stopword(&text[b_start..b_end], path) {
+                    return;
+                }
+                if let Some(inner) = self.verify_hex_secret(hex_buf, path, decode_depth) {
+                    self.push_hex_match(inner, hex_buf, b_start, b_end, path, out_vec);
+                }
+            };
+
+        for (line_start, line_end) in split_logical_lines_with_offsets(text) {
+            let line = &text[line_start..line_end];
+            if let Some(line_hex) = parse_hexdump_line_hex(line) {
+                if clean_hex.len() + line_hex.len() <= 16384 {
+                    if block_start.is_none() {
+                        block_start = Some(line_start);
+                    }
+                    block_end = line_end;
+                    clean_hex.push_str(&line_hex);
+                    continue;
+                }
+            }
+            if let Some(bs) = block_start.take() {
+                flush_block(bs, block_end, &clean_hex, out);
+                clean_hex.clear();
+            }
+        }
+
+        if let Some(bs) = block_start.take() {
+            flush_block(bs, block_end, &clean_hex, out);
         }
     }
 
@@ -1911,6 +2575,7 @@ impl RuleEngine {
                 Ok(s) => std::borrow::Cow::Borrowed(s),
                 Err(_) => String::from_utf8_lossy(&decoded),
             };
+            let inner_hints = DocHints::from_text(&decoded_cow);
             if let Some(best) = self
                 .scan_text_inner(
                     &decoded_cow,
@@ -1918,7 +2583,7 @@ impl RuleEngine {
                     decode_depth + 1,
                     true,
                     true,
-                    crate::scanner::contains_gcp_sa_markers(&decoded_cow),
+                    inner_hints,
                 )
                 .into_iter()
                 .filter(|m| m.category == RuleCategory::Secret)
@@ -1940,6 +2605,159 @@ impl RuleEngine {
         self.policy
             .as_ref()
             .is_some_and(|p| p.is_fingerprint_ignored_for(fp, path))
+    }
+}
+
+/// Splits `text` into logical lines on physical `\r?\n` AND JSONL `\\r\\n` / `\\n` escapes,
+/// returning `(start_byte, end_byte)` slices (excluding line terminators).
+fn split_logical_lines_with_offsets(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    let mut i = 0usize;
+
+    while i < len {
+        if bytes[i] == b'\r' && i + 1 < len && bytes[i + 1] == b'\n' {
+            out.push((line_start, i));
+            i += 2;
+            line_start = i;
+        } else if bytes[i] == b'\n' {
+            out.push((line_start, i));
+            i += 1;
+            line_start = i;
+        } else if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1] == b'n' {
+            out.push((line_start, i));
+            i += 2;
+            line_start = i;
+        } else if bytes[i] == b'\\'
+            && i + 3 < len
+            && bytes[i + 1] == b'r'
+            && bytes[i + 2] == b'\\'
+            && bytes[i + 3] == b'n'
+        {
+            out.push((line_start, i));
+            i += 4;
+            line_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if line_start <= len {
+        out.push((line_start, len));
+    }
+    out
+}
+
+/// Returns `true` if `line` is a structured `xxd`, `od -tx1`, or `hexdump -C` dump line.
+pub fn is_hexdump_line(line: &str) -> bool {
+    parse_hexdump_line_hex(line).is_some()
+}
+
+/// Extracts the raw hex byte digits from a single `xxd`, `od -tx1`, or `hexdump -C` line.
+pub fn parse_hexdump_line_hex(line: &str) -> Option<String> {
+    let s = line
+        .trim_end_matches(['\r', '\n'])
+        .trim_start_matches([' ', '\t']);
+    if s.len() < 10 {
+        return None;
+    }
+    let after_0x = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    let addr_len = after_0x
+        .bytes()
+        .take_while(|b| b.is_ascii_hexdigit())
+        .count();
+    if !(4..=16).contains(&addr_len) {
+        return None;
+    }
+    let after_addr = &after_0x[addr_len..];
+    let (has_colon, rest_start) = if let Some(after_colon) = after_addr.strip_prefix(':') {
+        let ws = after_colon
+            .bytes()
+            .take_while(|&b| b == b' ' || b == b'\t')
+            .count();
+        if ws == 0 {
+            return None;
+        }
+        (true, &after_colon[ws..])
+    } else if addr_len >= 6 {
+        let ws = after_addr
+            .bytes()
+            .take_while(|&b| b == b' ' || b == b'\t')
+            .count();
+        if !(1..=6).contains(&ws) {
+            return None;
+        }
+        (false, &after_addr[ws..])
+    } else {
+        return None;
+    };
+
+    if has_colon {
+        // `xxd` / `objdump` format: 2- or 4-hex groups separated by single spaces, followed by `>= 2` spaces + ASCII gutter
+        let mut hex_out = String::with_capacity(32);
+        let rbytes = rest_start.as_bytes();
+        let mut idx = 0usize;
+        while idx < rbytes.len() {
+            let grp_start = idx;
+            while idx < rbytes.len() && rbytes[idx].is_ascii_hexdigit() && (idx - grp_start) <= 8 {
+                idx += 1;
+            }
+            let grp_len = idx - grp_start;
+            if !matches!(grp_len, 2 | 4 | 8) {
+                return None;
+            }
+            hex_out.push_str(&rest_start[grp_start..idx]);
+            let ws_start = idx;
+            while idx < rbytes.len() && rbytes[idx] == b' ' {
+                idx += 1;
+            }
+            let ws_len = idx - ws_start;
+            if idx == rbytes.len() {
+                break;
+            }
+            if ws_len >= 2 {
+                // Remaining tail is the `xxd` ASCII gutter (`<= 36` chars)
+                if rest_start[idx..].len() > 36 {
+                    return None;
+                }
+                break;
+            }
+            if ws_len == 0 {
+                return None;
+            }
+        }
+        if hex_out.len() >= 2 && (hex_out.len() & 1) == 0 {
+            Some(hex_out)
+        } else {
+            None
+        }
+    } else {
+        // `od -tx1` or `hexdump -C`: optional trailing `|...|` ASCII gutter, preceded purely by hex groups
+        let trimmed_end = rest_start.trim_end_matches([' ', '\t']);
+        let hex_region = if let Some(without_close) = trimmed_end.strip_suffix('|') {
+            let open_pipe = without_close.rfind('|')?;
+            &without_close[..open_pipe]
+        } else {
+            trimmed_end
+        };
+        let mut hex_out = String::with_capacity(32);
+        let mut tok_count = 0usize;
+        for tok in hex_region.split_whitespace() {
+            if !matches!(tok.len(), 2 | 4 | 8) || !tok.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            hex_out.push_str(tok);
+            tok_count += 1;
+        }
+        if tok_count >= 1 && hex_out.len() >= 2 {
+            Some(hex_out)
+        } else {
+            None
+        }
     }
 }
 
@@ -2350,7 +3168,7 @@ fn decode_percent_inline_with_spans(text: &str) -> Option<(String, Vec<usize>, V
 fn extract_matched_key_name(rule_id: &str, full_match: &str) -> Option<String> {
     if !matches!(
         rule_id,
-        "dotenv-generic-secret" | "url-query-secret" | "aws-secret-key"
+        "dotenv-generic-secret" | "url-query-secret" | "aws-secret-key" | "jwk-private-key"
     ) {
         return None;
     }
@@ -2406,7 +3224,7 @@ fn passes_post_filter(
     match_start: usize,
     match_end: usize,
     val: &str,
-    has_gcp_sa_markers: bool,
+    eff_hints: DocHints,
 ) -> bool {
     if val.contains("[REDACTED_BY_LEAKTAP]") || val.contains("REDACTED_BY_LEAKTAP") {
         return false;
@@ -2440,13 +3258,70 @@ fn passes_post_filter(
             }
         }
         "gcp-service-account-key" => {
-            if !has_gcp_sa_markers {
+            if !eff_hints.has_gcp_sa {
                 let lower_ctx = full_text.to_ascii_lowercase();
                 if !lower_ctx.contains("service_account")
                     && !lower_ctx.contains(".iam.gserviceaccount.com")
                 {
                     return false;
                 }
+            }
+        }
+        "jwk-private-key" => {
+            let lhs = full_match.split(':').next().unwrap_or("");
+            let param = lhs
+                .trim_matches(|c: char| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '\\'));
+            match param {
+                "d" => {
+                    if !eff_hints.has_jwk_asymmetric_kty {
+                        return false;
+                    }
+                }
+                "p" | "q" | "dp" | "dq" | "qi" => {
+                    if !(eff_hints.has_jwk_asymmetric_kty && eff_hints.has_jwk_d_param) {
+                        return false;
+                    }
+                }
+                "k" => {
+                    if !eff_hints.has_jwk_oct_kty {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        "notion-api-token" => {
+            if let Some(sfx) = val.strip_prefix("secret_") {
+                let has_upper = sfx.bytes().any(|b| b.is_ascii_uppercase());
+                let has_lower = sfx.bytes().any(|b| b.is_ascii_lowercase());
+                let has_digit = sfx.bytes().any(|b| b.is_ascii_digit());
+                if !(has_upper && has_lower && has_digit) {
+                    return false;
+                }
+            } else if let Some(sfx) = val.strip_prefix("ntn_") {
+                let has_alpha = sfx.bytes().any(|b| b.is_ascii_alphabetic());
+                let has_digit = sfx.bytes().any(|b| b.is_ascii_digit());
+                if !(has_alpha && has_digit) {
+                    return false;
+                }
+            }
+        }
+        "voyage-api-key" => {
+            let sfx = val.strip_prefix("pa-").unwrap_or(val);
+            let has_upper = sfx.bytes().any(|b| b.is_ascii_uppercase());
+            let has_lower = sfx.bytes().any(|b| b.is_ascii_lowercase());
+            let has_digit = sfx.bytes().any(|b| b.is_ascii_digit());
+            let hyphens = sfx.bytes().filter(|&b| b == b'-').count();
+            if !(has_upper && has_lower && has_digit) || hyphens > 2 {
+                return false;
+            }
+        }
+        "vercel-access-token" => {
+            let sfx = if val.len() > 4 { &val[4..] } else { val };
+            let has_digit = sfx.bytes().any(|b| b.is_ascii_digit());
+            let has_alpha = sfx.bytes().any(|b| b.is_ascii_alphabetic());
+            if !(has_digit && has_alpha) {
+                return false;
             }
         }
         "fireworks-api-key" => {
@@ -2549,23 +3424,54 @@ fn passes_post_filter(
                     return false;
                 }
             }
-            // Reject 32-char MD5 and 40-char Git SHA-1 hex digests assigned to generic *_TOKEN / *_KEY names
             let is_pure_hex = val.bytes().all(|b| b.is_ascii_hexdigit());
-            if is_pure_hex
-                && matches!(val.len(), 32 | 40)
-                && !key_part.contains("SECRET")
-                && !key_part.contains("PASS")
-                && !key_part.contains("PWD")
-            {
+            let ent = shannon_entropy(val);
+            let has_pw_complexity = val.bytes().any(|b| b.is_ascii_uppercase())
+                && val.bytes().any(|b| b.is_ascii_lowercase())
+                && val.bytes().any(|b| b.is_ascii_digit())
+                && val.bytes().any(|b| !b.is_ascii_alphanumeric());
+            if !is_pure_hex && !has_pw_complexity && ent < 3.50 {
                 return false;
             }
-            let all_lower_ident = val
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || matches!(c, '_' | '-' | '.'));
-            let all_upper_ident = val
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || matches!(c, '_' | '-' | '.'));
-            if (all_lower_ident || all_upper_ident) && shannon_entropy(val) < 4.1 {
+            // Preserve 32/40-char hex keys on explicit API/app/auth/private/signing/secret/password names
+            // (e.g. `AZURE_OPENAI_API_KEY`, `DD_API_KEY`, `DD_APP_KEY`), while rejecting 32/40-char MD5/SHA-1
+            // digests assigned to bare generic `*_TOKEN` names (`GIT_TOKEN=<40-char-sha>`).
+            let explicit_hex_secret_key = [
+                "SECRET",
+                "PASS",
+                "PWD",
+                "API_KEY",
+                "API-KEY",
+                "APIKEY",
+                "APP_KEY",
+                "APP-KEY",
+                "APPKEY",
+                "AUTH_KEY",
+                "AUTH_TOKEN",
+                "ACCESS_KEY",
+                "ACCESS_TOKEN",
+                "PRIVATE_KEY",
+                "SIGNING_KEY",
+                "MASTER_KEY",
+                "ENCRYPTION_KEY",
+                "SERVICE_KEY",
+                "STORAGE_KEY",
+                "HMAC_KEY",
+            ]
+            .iter()
+            .any(|kw| key_part.contains(kw));
+            if is_pure_hex && matches!(val.len(), 32 | 40) && !explicit_hex_secret_key {
+                return false;
+            }
+            let all_lower_ident = !is_pure_hex
+                && val
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || matches!(c, '_' | '-' | '.'));
+            let all_upper_ident = !is_pure_hex
+                && val
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || matches!(c, '_' | '-' | '.'));
+            if (all_lower_ident || all_upper_ident) && ent < 4.1 {
                 return false;
             }
         }
@@ -2789,6 +3695,8 @@ pub fn is_likely_placeholder(val: &str) -> bool {
             | "placeholder"
             | "dummy"
             | "changeme"
+            | "change_me"
+            | "change-me"
             | "replace_me"
             | "password"
             | "secret"
@@ -2806,7 +3714,6 @@ pub fn is_likely_placeholder(val: &str) -> bool {
         "your-secret",
         "your_token",
         "your-token",
-        "changeme",
         "replace_me",
         "replace-me",
         "insert_your",
@@ -2814,8 +3721,6 @@ pub fn is_likely_placeholder(val: &str) -> bool {
         "[redacted]",
         "<redacted>",
         "xxxxxxxx",
-        "0000000000",
-        "abcdef123456",
         "${",
         "<your",
     ];
@@ -2823,10 +3728,26 @@ pub fn is_likely_placeholder(val: &str) -> bool {
         return true;
     }
 
-    const SOFT_DOC_WORDS: &[&str] = &["example", "placeholder", "dummy"];
+    for seq in ["0000000000", "abcdef123456"] {
+        if lower.contains(seq) {
+            let ent = shannon_entropy(val);
+            if ent < 3.5 || seq.len() * 100 >= val.len() * 45 {
+                return true;
+            }
+        }
+    }
+
+    const SOFT_DOC_WORDS: &[&str] = &[
+        "example",
+        "placeholder",
+        "dummy",
+        "changeme",
+        "change_me",
+        "change-me",
+    ];
     if SOFT_DOC_WORDS.iter().any(|w| lower.contains(w)) {
-        // Do not discard complex real passwords (`K9#mP2$vL8@exampleProdDb99!`) or high-entropy
-        // cryptographic tokens (`entropy >= 4.5`) that happen to contain an English substring.
+        // Do not discard complex real passwords (`K9#mP2$vL8@exampleProdDb99!`, `ChAnGeMe!9#kL2$vP8@Prod`)
+        // or high-entropy cryptographic tokens (`entropy >= 4.5`) that happen to contain an English substring.
         let has_pw_symbol = val.bytes().any(|b| {
             matches!(
                 b,
@@ -2904,10 +3825,15 @@ pub fn mask_value(rule_id: &str, raw: &str) -> String {
         let last = chars.last().copied().unwrap_or('*');
         return format!("{first}***{last}");
     }
-    // Keep generic user-chosen passwords tightly masked (at most 3 leading + 2 trailing chars)
+    // Keep generic user-chosen passwords and raw key payloads tightly masked (at most 3 leading + 2 trailing chars)
     if matches!(
         rule_id,
-        "dotenv-generic-secret" | "url-query-secret" | "http-bearer-token" | "aws-secret-key"
+        "dotenv-generic-secret"
+            | "url-query-secret"
+            | "http-bearer-token"
+            | "aws-secret-key"
+            | "jwk-private-key"
+            | "kubernetes-secret-data"
     ) {
         let prefix: String = chars[..3].iter().collect();
         let suffix: String = chars[len - 2..].iter().collect();
@@ -2997,6 +3923,13 @@ fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
         ("neon-api-key", &["napi_"]),
         ("cerebras-api-key", &["csk-"]),
         ("fireworks-api-key", &["fw_"]),
+        ("notion-api-token", &["ntn_", "secret_"]),
+        ("airtable-pat", &["pat"]),
+        ("hubspot-pat", &["pat-na1-", "pat-eu1-"]),
+        ("square-access-token", &["sq0atp-", "sq0csp-"]),
+        ("figma-pat", &["figd_"]),
+        ("voyage-api-key", &["pa-"]),
+        ("vercel-access-token", &["vcp_", "vca_", "vck_"]),
         ("jwt-token", &["eyJ"]),
     ];
 

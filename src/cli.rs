@@ -6,12 +6,16 @@ use std::path::PathBuf;
     name = "leaktap",
     version,
     about = "See what your AI coding CLIs actually leak — offline log/plugin/MCP scanner, terminal UI, and live CLI wiretap.",
-    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers and marketplace plugins.\n\nQuickstart:\n  leaktap                        Scan local chat logs, SQLite state, MCP configs, and plugins/hooks/skills\n  leaktap ui                     Open the interactive 4-tab terminal UI\n  leaktap claude                 Start Claude Code with live API, env, and socket watching\n  leaktap --block-secrets claude Actively block outgoing prompts that contain leaked secrets\n  leaktap codex                  Start Codex CLI with live API, env, and socket watching\n  leaktap agy                    Start Antigravity CLI with live env and socket watching"
+    long_about = "leaktap is built for AI coding CLIs — Claude Code, Codex CLI, Antigravity CLI, and Gemini CLI — plus local MCP servers and marketplace plugins.\n\nQuickstart:\n  leaktap                        Scan local chat logs, SQLite state, MCP configs, and plugins/hooks/skills\n  leaktap scan --all             Scan both the current workspace repo and all user-home AI agent stores\n  leaktap ui                     Open the interactive 4-tab terminal UI\n  leaktap claude                 Start Claude Code with live API, env, and socket watching\n  leaktap --block-secrets claude Actively block outgoing prompts that contain leaked secrets\n  leaktap codex                  Start Codex CLI with live API, env, and socket watching\n  leaktap agy                    Start Antigravity CLI with live env and socket watching"
 )]
 pub struct Cli {
     /// Explicit path to a trusted `.leaktap.toml` or `.leaktapignore` policy file
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
+
+    /// Load trusted project `.leaktap.toml` and `.leaktapignore` from a git ref (e.g. `origin/main`) instead of the untrusted working tree
+    #[arg(long, global = true)]
+    pub policy_git_ref: Option<String>,
 
     /// Opt in to loading `.leaktap.toml`, `leaktap.toml`, and `.leaktapignore` from cwd or `--path` targets
     #[arg(long, global = true)]
@@ -24,6 +28,10 @@ pub struct Cli {
     /// Actively block outgoing LLM API requests (`HTTP 400`) when a secret is detected in the prompt or headers
     #[arg(long, global = true)]
     pub block_secrets: bool,
+
+    /// Strip `SSH_AUTH_SOCK` and `SSH_AGENT_PID` before starting a wrapped CLI session
+    #[arg(long, global = true)]
+    pub scrub_ssh_agent: bool,
 
     /// Comma-separated environment variables to keep when `--scrub-env` is active (works with `leaktap --allow-env GH_TOKEN claude` or `tap`)
     #[arg(long, global = true, value_delimiter = ',')]
@@ -60,7 +68,22 @@ pub enum Commands {
     Tap(TapArgs),
 
     /// List all built-in and configured secret, privacy, header, plugin, and MCP detection rules
-    Rules,
+    Rules(RulesArgs),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum RulesFormat {
+    #[default]
+    Text,
+    Terminal,
+    Json,
+}
+
+#[derive(Debug, Clone, Default, Parser)]
+pub struct RulesArgs {
+    /// Output format: text table (`text`) or machine-readable JSON (`json`)
+    #[arg(short, long, value_enum, default_value_t = RulesFormat::Text)]
+    pub format: RulesFormat,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -80,6 +103,10 @@ pub struct ScanArgs {
     /// Specific file(s) or folder(s) to scan (defaults to ~/.claude, ~/.codex, ~/.cursor, ~/.gemini + workspace configs)
     #[arg(short, long = "path")]
     pub paths: Vec<PathBuf>,
+
+    /// Scan both the full current workspace directory AND all user-home global AI agent directories together
+    #[arg(long)]
+    pub all: bool,
 
     /// Output format: terminal receipt, JSON, or SARIF 2.1.0 for CI
     #[arg(short, long, value_enum, default_value_t = OutputFormat::Terminal)]
@@ -112,6 +139,10 @@ pub struct ScanArgs {
     /// Optional `.leaktap.toml` policy file path
     #[arg(skip)]
     pub config: Option<PathBuf>,
+
+    /// Optional git ref to load trusted project policy from
+    #[arg(skip)]
+    pub policy_git_ref: Option<String>,
 
     /// Opt in to loading project/target `.leaktap.toml` and `.leaktapignore`
     #[arg(skip)]
@@ -165,6 +196,10 @@ pub struct CleanArgs {
     #[arg(skip)]
     pub config: Option<PathBuf>,
 
+    /// Optional git ref to load trusted project policy from
+    #[arg(skip)]
+    pub policy_git_ref: Option<String>,
+
     /// Opt in to loading project/target `.leaktap.toml` and `.leaktapignore`
     #[arg(skip)]
     pub trust_project_config: bool,
@@ -196,6 +231,10 @@ pub struct UiArgs {
     #[arg(skip)]
     pub config: Option<PathBuf>,
 
+    /// Optional git ref to load trusted project policy from
+    #[arg(skip)]
+    pub policy_git_ref: Option<String>,
+
     /// Opt in to loading project/target `.leaktap.toml` and `.leaktapignore`
     #[arg(skip)]
     pub trust_project_config: bool,
@@ -215,6 +254,10 @@ pub struct TapArgs {
     /// Keep all inherited environment variables even when using a CLI shorthand
     #[arg(long)]
     pub no_scrub_env: bool,
+
+    /// Strip `SSH_AUTH_SOCK` and `SSH_AGENT_PID` from the child command environment
+    #[arg(long)]
+    pub scrub_ssh_agent: bool,
 
     /// Comma-separated environment variables to keep when --scrub-env is enabled
     #[arg(skip)]
@@ -252,6 +295,10 @@ pub struct TapArgs {
     #[arg(skip)]
     pub config: Option<PathBuf>,
 
+    /// Optional git ref to load trusted project policy from
+    #[arg(skip)]
+    pub policy_git_ref: Option<String>,
+
     /// Opt in to loading project/target `.leaktap.toml` and `.leaktapignore`
     #[arg(skip)]
     pub trust_project_config: bool,
@@ -271,8 +318,10 @@ impl TapArgs {
         program: &str,
         extra_args: Vec<String>,
         block_secrets: bool,
+        scrub_ssh_agent: bool,
         allow_env: Vec<String>,
         config: Option<PathBuf>,
+        policy_git_ref: Option<String>,
         trust_project_config: bool,
         no_config: bool,
     ) -> Self {
@@ -282,6 +331,7 @@ impl TapArgs {
         Self {
             scrub_env: true,
             no_scrub_env: false,
+            scrub_ssh_agent,
             allow_env,
             inspect_api: true,
             no_inspect_api: false,
@@ -291,6 +341,7 @@ impl TapArgs {
             log: None,
             quiet: false,
             config,
+            policy_git_ref,
             trust_project_config,
             no_config,
             command,

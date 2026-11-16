@@ -84,11 +84,19 @@ const CREDENTIAL_HARVEST_PATTERNS: &[(&str, &str)] = &[
     ("'.ssh'", "~/.ssh"),
     ("\".ssh\"", "~/.ssh"),
     (".aws/credentials", "~/.aws/credentials"),
+    (".aws/config", "~/.aws/config"),
     (".aws/sso", "~/.aws/sso"),
     ("'.aws'", "~/.aws"),
     ("\".aws\"", "~/.aws"),
     ("'/.aws'", "~/.aws"),
     ("\"/.aws\"", "~/.aws"),
+    (".azure/accesstokens.json", "~/.azure/accessTokens.json"),
+    (".azure/msal_token_cache", "~/.azure/msal_token_cache"),
+    ("~/.azure", "~/.azure"),
+    ("$home/.azure", "$HOME/.azure"),
+    ("${home}/.azure", "${HOME}/.azure"),
+    ("'.azure'", "~/.azure"),
+    ("\".azure\"", "~/.azure"),
     (
         "gcloud/application_default_credentials.json",
         "gcloud application_default_credentials.json",
@@ -113,6 +121,13 @@ const CREDENTIAL_HARVEST_PATTERNS: &[(&str, &str)] = &[
     ("~/.netrc", "~/.netrc"),
     ("'.netrc'", "~/.netrc"),
     ("\".netrc\"", "~/.netrc"),
+    (".pgpass", "~/.pgpass"),
+    (".my.cnf", "~/.my.cnf"),
+    (".vault-token", "~/.vault-token"),
+    ("credentials.tfrc.json", "Terraform credentials.tfrc.json"),
+    (".terraformrc", "~/.terraformrc"),
+    (".databrickscfg", "~/.databrickscfg"),
+    (".s3cfg", "~/.s3cfg"),
     (".git-credentials", "~/.git-credentials"),
     ("'.git-credentials'", "~/.git-credentials"),
     ("\".git-credentials\"", "~/.git-credentials"),
@@ -122,10 +137,7 @@ const CREDENTIAL_HARVEST_PATTERNS: &[(&str, &str)] = &[
     ("${home}/.npmrc", "${HOME}/.npmrc"),
     ("'.npmrc'", "~/.npmrc"),
     ("\".npmrc\"", "~/.npmrc"),
-    ("/.pypirc", "~/.pypirc"),
-    ("~/.pypirc", "~/.pypirc"),
-    ("'.pypirc'", "~/.pypirc"),
-    ("\".pypirc\"", "~/.pypirc"),
+    (".pypirc", "~/.pypirc"),
     (".docker/config.json", "~/.docker/config.json"),
     ("'.docker'", "~/.docker"),
     ("\".docker\"", "~/.docker"),
@@ -133,6 +145,16 @@ const CREDENTIAL_HARVEST_PATTERNS: &[(&str, &str)] = &[
     (".claude/.credentials.json", "~/.claude/.credentials.json"),
     (".codex/auth.json", "~/.codex/auth.json"),
     ("oauth_creds.json", "~/.gemini/oauth_creds.json"),
+    ("cookies.sqlite", "Firefox cookies.sqlite"),
+    ("key4.db", "Firefox key4.db"),
+    ("logins.json", "Firefox logins.json"),
+    ("cookies.binarycookies", "Safari Cookies.binarycookies"),
+    ("/login data", "Chromium Login Data SQLite store"),
+    ("\\login data", "Chromium Login Data SQLite store"),
+    ("'login data'", "Chromium Login Data SQLite store"),
+    ("\"login data\"", "Chromium Login Data SQLite store"),
+    ("/default/cookies", "Chromium Cookies SQLite store"),
+    ("/network/cookies", "Chromium Cookies SQLite store"),
     (
         "security find-generic-password",
         "macOS Keychain (`security find-generic-password`)",
@@ -160,6 +182,7 @@ struct PluginRegexes {
     prompt_stealth: Regex,
     prompt_exfil: Regex,
     prompt_img_exfil: Regex,
+    prompt_prose_exfil: Regex,
     html_comment: Regex,
     html_comment_dotenv: Regex,
     net_call: Regex,
@@ -210,13 +233,17 @@ fn plugin_regexes() -> &'static PluginRegexes {
         )
         .expect("prompt_stealth regex"),
         prompt_exfil: Regex::new(
-            r#"(?i)(?:\|\s*(?:curl|wget|nc|ncat|socat|openssl\s+s_client)\b|\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*(?:\$\([^\n)]+\)|`[^`\n]+`)|\b(?:curl|wget)\b[^\n]*(?:--upload-file\s+\S+|(?:-d|--data(?:-\w+)?|-F|--form)\s+["']?(?:[A-Za-z0-9_.-]+=)?@[^\s"']+)|\b(?:curl|wget)\b[^\n]*https?://[^\s"'<>)\]]*[?&][^\s"'<>)\]]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:curl|wget)\b[^\n]*(?:\s-d|\s--data(?:-\w+)?|\s-F|\s--form)\s+["']?[^\n"']*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:nslookup|dig|ping|scp|sftp|rsync)\b[^\n]*(?:\$\([^\n)]+\)|`[^`\n]+`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\.env\b|\.ssh|\.aws|\.npmrc|\.netrc)|\b(?:cat|type|Get-Content|head|tail|base64)\s+[^\n]*(?:\.env\b|\.ssh|\.aws|\.npmrc|\.netrc|credentials)[^\n]*(?:curl|wget|http|fetch|nc|scp|sftp|ssh|nslookup|dig)\b)"#,
+            r#"(?i)(?:\|\s*(?:curl|wget|nc|ncat|socat|openssl\s+s_client)\b|\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*(?:\$\([^\n)]+\)|`[^`\n]+`)|\b(?:curl|wget)\b[^\n]*(?:--upload-file\s+\S+|(?:-d|--data(?:-\w+)?|-F|--form)\s+["']?(?:[A-Za-z0-9_.-]+=)?@[^\s"']+)|\b(?:curl|wget)\b[^\n]*https?://[^\s"'<>)\]]*[?&][^\s"'<>)\]]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:curl|wget)\b[^\n]*(?:\s-d|\s--data(?:-\w+)?|\s-F|\s--form)\s+["']?[^\n"']*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:nslookup|dig|ping|scp|sftp|rsync)\b[^\n]*(?:\$\([^\n)]+\)|`[^`\n]+`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\.env\b|\.ssh|\.aws|\.npmrc|\.netrc|\.pgpass|\.my\.cnf|\.vault-token|\.azure)|\b(?:cat|type|Get-Content|head|tail|base64)\s+[^\n]*(?:\.env\b|\.ssh|\.aws|\.npmrc|\.netrc|\.pgpass|\.my\.cnf|\.vault-token|\.azure|credentials)[^\n]*(?:curl|wget|http|fetch|nc|scp|sftp|ssh|nslookup|dig)\b)"#,
         )
         .expect("prompt_exfil regex"),
         prompt_img_exfil: Regex::new(
             r#"(?i)!\[[^\]]*\]\(\s*https?://[^\s)]*(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\{\{[^}\n]+\}\}|\$\([^\n)]+\))"#,
         )
         .expect("prompt_img_exfil regex"),
+        prompt_prose_exfil: Regex::new(
+            r#"(?i)\b(?:read|load|collect|gather|extract|dump|encode|include|attach|append|send|post|upload|transmit|forward|exfiltrate)\b[^.!?\n]{0,140}(?:(?:^|[\s`'"])\.env(?:\.[A-Za-z0-9_-]+)?\b|\b(?:api\s+keys?|secret\s+keys?|private\s+keys?|access\s+tokens?|ssh\s+keys?|environment\s+variables?|process\.env|os\.environ|credentials)\b|~/\.(?:ssh|aws|pgpass|my\.cnf|vault-token|azure|kube|npmrc|netrc|gnupg|pypirc))[^.!?\n]{0,160}\b(?:send|post|upload|transmit|forward|exfiltrate|include|attach|append|fetch|request|webhook|to|via|into|at)\b[^.!?\n]{0,100}https?://[^\s"'`<>)\]]+"#,
+        )
+        .expect("prompt_prose_exfil regex"),
         html_comment: Regex::new(r"(?s)<!--(.*?)-->").expect("html_comment regex"),
         html_comment_dotenv: Regex::new(r"(?i)(?:^|[^A-Za-z0-9_])\.env(?:\.(?:local|production|prod|staging|development|dev|test))?(?:$|[^A-Za-z0-9_.])")
             .expect("html_comment_dotenv regex"),
@@ -238,7 +265,7 @@ fn plugin_regexes() -> &'static PluginRegexes {
         )
         .expect("sensitive_env_name regex"),
         dotenv_file_read: Regex::new(
-            r#"(?i)(?:\b(?:readFileSync|readFile|createReadStream|open|read_text)\s*\([^\n)]{0,80}['"`/\\]\.env(?:\.[A-Za-z0-9_-]+)?['"`]|\b(?:cat|Get-Content|type)\s+['"]?(?:\./|\$PWD/|\$\{PWD\}/)?\.env(?:\.[A-Za-z0-9_-]+)?\b)"#,
+            r#"(?i)(?:\b(?:readFileSync|readFile|createReadStream|open|read_text|read_bytes|dotenv_values)\s*\([^\n)]{0,120}['"`/\\]\.env(?:\.[A-Za-z0-9_-]+)?['"`]|\bPath(?:\.cwd\(\))?\s*/\s*['"]\.env(?:\.[A-Za-z0-9_-]+)?['"]|\b(?:cat|Get-Content|type)\s+['"]?(?:\./|\$PWD/|\$\{PWD\}/)?\.env(?:\.[A-Za-z0-9_-]+)?\b)"#,
         )
         .expect("dotenv_file_read regex"),
     })
@@ -521,6 +548,24 @@ fn audit_single_plugin_file(
         is_hooks_file || matches!(file_name, "plugin.json" | "gemini-extension.json");
     let is_prompt_doc = is_instruction_doc_file(logical_path, file_name);
 
+    if !crate::scanner::is_sqlite_extension(logical_path)
+        && (crate::discovery::is_compiled_binary_file(disk_path)
+            || is_likely_compiled_binary(disk_path))
+    {
+        let label = component_label(logical_path, "");
+        let _ = audit_compiled_binary_file(
+            disk_path,
+            logical_path,
+            &display,
+            &label,
+            1,
+            engine,
+            out,
+            seen_fp,
+        );
+        return;
+    }
+
     if is_json_config && meta.len() > MAX_JSON_CONFIG_BYTES {
         let label = component_label(logical_path, "");
         let fp = fingerprint_match("plugin-oversized-config", &display);
@@ -588,17 +633,36 @@ fn audit_single_plugin_file(
     };
     let label = component_label(logical_path, &raw);
 
+    // 0. Check hidden bidirectional override, Unicode Tag, Variation Selector Supplement, or zero-width smuggling
+    // across BOTH prompt files and scripts/configs, then strip invisible codepoints before regex checks.
+    check_unicode_smuggling(
+        logical_path,
+        &display,
+        &label,
+        &raw,
+        is_prompt_doc,
+        1,
+        out,
+        seen_fp,
+    );
+    let norm_raw = strip_invisible_unicode(&raw);
+    let parsed_json_opt = if file_name.ends_with(".json") || file_name.ends_with(".jsonc") {
+        parse_json_or_jsonc(&norm_raw)
+    } else {
+        None
+    };
+
     // 1. Audit lifecycle hooks, helper commands, and `env` overrides in `hooks.json` and `settings*.json`
     if is_hooks_file {
-        if let Some(json) = parse_json_or_jsonc(&raw) {
+        if let Some(ref json) = parsed_json_opt {
             audit_hooks_config(
                 disk_path,
                 logical_path,
                 sandbox_remap,
                 &display,
                 &label,
-                &raw,
-                &json,
+                &norm_raw,
+                json,
                 file_name == "hooks.json",
                 engine,
                 out,
@@ -612,40 +676,94 @@ fn audit_single_plugin_file(
         logical_path,
         &display,
         &label,
-        &raw,
+        &norm_raw,
         is_prompt_doc,
         1,
         out,
         seen_fp,
     );
 
-    // 3. Check credential harvesting (`~/.ssh`, `~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, Keychain)
-    check_credential_harvest(
-        logical_path,
-        &display,
-        &label,
-        &raw,
-        is_prompt_doc,
-        1,
-        out,
-        seen_fp,
-    );
+    // 3. Check credential harvesting (`~/.ssh`, `~/.aws/credentials`, `~/.pgpass`, Keychain, browser DBs),
+    // pruning defensive `permissions.deny` / `permissions.ask` / `exclude` JSON subtrees first.
+    if let Some(ref json) = parsed_json_opt {
+        let mut pruned = json.clone();
+        prune_defensive_json_subtrees(&mut pruned);
+        let pruned_str = serde_json::to_string_pretty(&pruned).unwrap_or_default();
+        let before_len = out.len();
+        check_credential_harvest(
+            logical_path,
+            &display,
+            &label,
+            &pruned_str,
+            false,
+            1,
+            out,
+            seen_fp,
+        );
+        for f in &mut out[before_len..] {
+            if f.config_path == logical_path {
+                for &(needle, human_target) in CREDENTIAL_HARVEST_PATTERNS {
+                    if f.message.contains(human_target) {
+                        let mapped = find_line_number(&norm_raw, needle);
+                        if mapped > 1 || norm_raw.to_ascii_lowercase().contains(needle) {
+                            f.line = mapped;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        check_credential_harvest(
+            logical_path,
+            &display,
+            &label,
+            &norm_raw,
+            is_prompt_doc,
+            1,
+            out,
+            seen_fp,
+        );
+    }
 
     // 3b. Check code/script environment & secret exfiltration (`process.env` / `os.environ` / `.env` -> external network)
     check_env_and_secret_exfiltration(
         logical_path,
         &display,
         &label,
-        &raw,
+        &norm_raw,
         is_prompt_doc,
         1,
         out,
         seen_fp,
     );
 
+    // 3c. Check outbound external network calls inside executable skill scripts (`skills/*/scripts/*`)
+    if !is_prompt_doc && is_skill_script_path(logical_path) {
+        if let Some(target_desc) = detect_non_official_external_network_call(&norm_raw) {
+            let fp = fingerprint_match("plugin-skill-network", &format!("{display}:{target_desc}"));
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "plugin-skill-network",
+                    server_name: label.clone(),
+                    config_file: display.clone(),
+                    config_path: logical_path.to_path_buf(),
+                    line: 1,
+                    severity: Severity::High,
+                    fingerprint: fp,
+                    message: format!(
+                        "Skill script makes an outbound network call ({target_desc}) — inspect script inputs for data exfiltration"
+                    ),
+                },
+            );
+        }
+    }
+
     // 4. Check prompt injection, stealth directives, & exfiltration commands in markdown/rule instruction files
     if is_prompt_doc {
-        check_prompt_injection(logical_path, &display, &label, &raw, 1, out, seen_fp);
+        check_prompt_injection(logical_path, &display, &label, &norm_raw, 1, out, seen_fp);
     }
 
     // 5. Check hardcoded live secrets (Secret category only — never flag author emails in plugin.json)
@@ -653,7 +771,7 @@ fn audit_single_plugin_file(
         logical_path,
         &display,
         &label,
-        &raw,
+        &norm_raw,
         1,
         engine,
         out,
@@ -662,7 +780,7 @@ fn audit_single_plugin_file(
 
     // 6. Check outbound third-party telemetry/analytics ingestion endpoints in manifests, hooks, and scripts
     if !is_prompt_doc {
-        check_telemetry_domains(logical_path, &display, &label, &raw, 1, out, seen_fp);
+        check_telemetry_domains(logical_path, &display, &label, &norm_raw, 1, out, seen_fp);
     }
 }
 
@@ -692,7 +810,18 @@ fn audit_streamed_plugin_file(
         combined.extend_from_slice(&overlap);
         combined.extend_from_slice(&chunk[..n]);
 
-        let text = String::from_utf8_lossy(&combined);
+        let raw_text = String::from_utf8_lossy(&combined);
+        check_unicode_smuggling(
+            logical_path,
+            display,
+            &label,
+            &raw_text,
+            is_prompt_doc,
+            base_line,
+            out,
+            seen_fp,
+        );
+        let text = strip_invisible_unicode(&raw_text);
         check_remote_code_exec(
             logical_path,
             display,
@@ -769,6 +898,333 @@ fn audit_streamed_plugin_file(
     detected_net
 }
 
+#[allow(clippy::too_many_arguments)]
+fn audit_compiled_binary_file(
+    disk_path: &Path,
+    logical_path: &Path,
+    display: &str,
+    label: &str,
+    line: usize,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) -> Option<String> {
+    let fp = fingerprint_match("plugin-compiled-binary", display);
+    push_finding(
+        out,
+        seen_fp,
+        McpFinding {
+            rule_id: "plugin-compiled-binary",
+            server_name: label.to_string(),
+            config_file: display.to_string(),
+            config_path: logical_path.to_path_buf(),
+            line,
+            severity: Severity::High,
+            fingerprint: fp,
+            message: format!(
+                "Opaque compiled binary (`{display}`) bundled or executed by plugin, hook, skill, or MCP config — inspect binary provenance"
+            ),
+        },
+    );
+
+    let extracted = extract_printable_binary_strings(disk_path, 32 * 1024 * 1024)?;
+    check_remote_code_exec(
+        logical_path,
+        display,
+        label,
+        &extracted,
+        false,
+        1,
+        out,
+        seen_fp,
+    );
+    check_credential_harvest(
+        logical_path,
+        display,
+        label,
+        &extracted,
+        false,
+        1,
+        out,
+        seen_fp,
+    );
+    check_env_and_secret_exfiltration(
+        logical_path,
+        display,
+        label,
+        &extracted,
+        false,
+        1,
+        out,
+        seen_fp,
+    );
+    check_hardcoded_secrets(
+        logical_path,
+        display,
+        label,
+        &extracted,
+        1,
+        engine,
+        out,
+        seen_fp,
+    );
+    check_telemetry_domains(logical_path, display, label, &extracted, 1, out, seen_fp);
+    detect_external_network_call(&extracted)
+}
+
+fn extract_printable_binary_strings(disk_path: &Path, max_bytes: u64) -> Option<String> {
+    let meta = fs::metadata(disk_path).ok()?;
+    if meta.len() > max_bytes {
+        return None;
+    }
+    let mut f = File::open(disk_path).ok()?;
+    let mut io_buf = vec![0u8; 64 * 1024];
+    let mut run = Vec::with_capacity(256);
+    let mut out = String::new();
+
+    loop {
+        let n = match f.read(&mut io_buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        for &b in &io_buf[..n] {
+            if b.is_ascii_graphic() || b == b' ' || b == b'\t' {
+                run.push(b);
+                if run.len() >= 8192 {
+                    if let Ok(s) = std::str::from_utf8(&run) {
+                        out.push_str(s);
+                        out.push('\n');
+                    }
+                    run.clear();
+                }
+            } else {
+                if run.len() >= 6 {
+                    if let Ok(s) = std::str::from_utf8(&run) {
+                        out.push_str(s);
+                        out.push('\n');
+                    }
+                }
+                run.clear();
+            }
+            if out.len() >= 4 * 1024 * 1024 {
+                break;
+            }
+        }
+        if out.len() >= 4 * 1024 * 1024 {
+            break;
+        }
+    }
+    if run.len() >= 6 {
+        if let Ok(s) = std::str::from_utf8(&run) {
+            out.push_str(s);
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+fn prune_defensive_json_subtrees(val: &mut Value) {
+    match val {
+        Value::Object(map) => {
+            for def_key in [
+                "disallowedTools",
+                "deniedTools",
+                "blockedPaths",
+                "exclude",
+                "watcherExclude",
+                "ignorePatterns",
+                "files.exclude",
+                "search.exclude",
+                "files.watcherExclude",
+                "claude.exclude",
+                "cursor.general.globalCursorIgnoreList",
+            ] {
+                map.remove(def_key);
+            }
+            if let Some(Value::Object(perms)) = map.get_mut("permissions") {
+                perms.remove("deny");
+                perms.remove("ask");
+            }
+            if let Some(Value::Object(sb)) = map.get_mut("sandbox") {
+                sb.remove("deny");
+                sb.remove("denyRead");
+                sb.remove("denyWrite");
+            }
+            for child in map.values_mut() {
+                prune_defensive_json_subtrees(child);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                prune_defensive_json_subtrees(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_skill_script_path(path: &Path) -> bool {
+    let in_skills = path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("skills" | "commands" | "workflows")
+        )
+    });
+    in_skills && (has_script_extension(path) || is_shebang_script(path))
+}
+
+fn detect_non_official_external_network_call(text: &str) -> Option<String> {
+    let target = detect_external_network_call(text)?;
+    let code = strip_code_comments(text);
+    let re = plugin_regexes();
+    let non_local_urls: Vec<&str> = re
+        .url_extract
+        .find_iter(&code)
+        .map(|m| m.as_str())
+        .filter(|u| !is_localhost_url(u))
+        .collect();
+    if !non_local_urls.is_empty() && non_local_urls.iter().all(|u| is_official_llm_api_url(u)) {
+        return None;
+    }
+    Some(target)
+}
+
+fn is_non_system_binary_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let lower = s.to_ascii_lowercase();
+    for sys_prefix in [
+        "/bin/",
+        "/sbin/",
+        "/usr/bin/",
+        "/usr/sbin/",
+        "/usr/local/bin/",
+        "/usr/lib/",
+        "/lib/",
+        "/lib64/",
+        "/system/",
+        "/library/apple/",
+        "/opt/homebrew/",
+        "/nix/store/",
+        "/snap/",
+        "c:\\windows\\",
+        "c:/windows/",
+        "c:\\program files\\",
+        "c:/program files/",
+    ] {
+        if lower.starts_with(sys_prefix) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_suspicious_invisible_codepoint(
+    cp: u32,
+    byte_idx: usize,
+    prev: Option<char>,
+    next: Option<char>,
+) -> bool {
+    if (0x202A..=0x202E).contains(&cp)
+        || (0x2066..=0x2069).contains(&cp)
+        || matches!(cp, 0x200E | 0x200F | 0x061C)
+        || (0xE0000..=0xE007F).contains(&cp)
+        || (0xE0100..=0xE01EF).contains(&cp)
+        || matches!(cp, 0x200B | 0x2060 | 0x2061 | 0x2062 | 0x2063 | 0x2064)
+        || (cp == 0xFEFF && byte_idx > 0)
+    {
+        return true;
+    }
+    if matches!(cp, 0x200C | 0x200D) || (0xFE00..=0xFE0F).contains(&cp) {
+        let adj_ascii = prev.is_some_and(|c| c.is_ascii_alphanumeric())
+            || next.is_some_and(|c| c.is_ascii_alphanumeric());
+        if adj_ascii {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn strip_invisible_unicode(raw: &str) -> String {
+    let has_candidate = raw.chars().any(|c| {
+        let cp = c as u32;
+        (0x200B..=0x200F).contains(&cp)
+            || (0x202A..=0x202E).contains(&cp)
+            || (0x2060..=0x2069).contains(&cp)
+            || cp == 0x061C
+            || cp == 0xFEFF
+            || (0xFE00..=0xFE0F).contains(&cp)
+            || (0xE0000..=0xE007F).contains(&cp)
+            || (0xE0100..=0xE01EF).contains(&cp)
+    });
+    if !has_candidate {
+        return raw.to_string();
+    }
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        let cp = c as u32;
+        let is_invis = (0x200B..=0x200F).contains(&cp)
+            || (0x202A..=0x202E).contains(&cp)
+            || (0x2060..=0x2069).contains(&cp)
+            || cp == 0x061C
+            || cp == 0xFEFF
+            || (0xFE00..=0xFE0F).contains(&cp)
+            || (0xE0000..=0xE007F).contains(&cp)
+            || (0xE0100..=0xE01EF).contains(&cp);
+        if !is_invis {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_unicode_smuggling(
+    path: &Path,
+    display: &str,
+    label: &str,
+    raw: &str,
+    is_prompt_doc: bool,
+    base_line: usize,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) {
+    let indexed: Vec<(usize, char)> = raw.char_indices().collect();
+    for (i, &(byte_idx, ch)) in indexed.iter().enumerate() {
+        let prev = i.checked_sub(1).and_then(|p| indexed.get(p)).map(|x| x.1);
+        let next = indexed.get(i + 1).map(|x| x.1);
+        if is_suspicious_invisible_codepoint(ch as u32, byte_idx, prev, next) {
+            let line = base_line + line_at_offset(raw, byte_idx).saturating_sub(1);
+            let fp = fingerprint_match(
+                "plugin-prompt-injection",
+                &format!("{display}:unicode-smuggling"),
+            );
+            let kind = if is_prompt_doc {
+                "Prompt file"
+            } else {
+                "Plugin script or config"
+            };
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "plugin-prompt-injection",
+                    server_name: label.to_string(),
+                    config_file: display.to_string(),
+                    config_path: path.to_path_buf(),
+                    line,
+                    severity: Severity::High,
+                    fingerprint: fp,
+                    message: format!(
+                        "{kind} contains hidden bidirectional override, zero-width, Variation Selector, or Unicode tag smuggling characters"
+                    ),
+                },
+            );
+            return;
+        }
+    }
+}
+
 fn is_instruction_doc_file(path: &Path, file_name: &str) -> bool {
     if file_name.ends_with(".md")
         || file_name.ends_with(".mdc")
@@ -809,6 +1265,7 @@ enum HookAction {
 enum ResolvedScriptBody {
     InMemory(String),
     StreamedLargeFile,
+    CompiledBinary,
 }
 
 fn infer_project_root<'a>(hooks_dir: &'a Path, plugin_root: &'a Path) -> &'a Path {
@@ -827,6 +1284,12 @@ fn infer_project_root<'a>(hooks_dir: &'a Path, plugin_root: &'a Path) -> &'a Pat
                     | ".windsurf"
                     | ".roo"
                     | ".cline"
+                    | ".junie"
+                    | ".amazonq"
+                    | ".kiro"
+                    | ".augment"
+                    | ".trae"
+                    | ".zed"
             )
         )
     };
@@ -1378,7 +1841,7 @@ fn audit_hooks_config(
                             config_file: display.to_string(),
                             config_path: path.to_path_buf(),
                             line: hook_line,
-                            severity: Severity::High,
+                            severity: Severity::Medium,
                             fingerprint: fp,
                             message: format!(
                                 "Workspace config registers automatic shell command for `{event_name}` (`{cmd_snip}`) — opening this project can execute repo-controlled code"
@@ -1386,6 +1849,18 @@ fn audit_hooks_config(
                         },
                     );
                 }
+
+                check_unicode_smuggling(
+                    path,
+                    display,
+                    &hook_label,
+                    &cmd,
+                    false,
+                    hook_line,
+                    out,
+                    seen_fp,
+                );
+                let cmd = strip_invisible_unicode(&cmd);
 
                 check_remote_code_exec(
                     path,
@@ -1451,7 +1926,7 @@ fn audit_hooks_config(
                     );
                 }
 
-                // Resolve and fully audit every local handler script referenced by the hook command
+                // Resolve and fully audit every local handler script or binary referenced by the hook command
                 for (script_path, script_rel, resolved_body) in resolve_hook_handler_scripts(
                     &cmd,
                     hooks_dir,
@@ -1474,8 +1949,20 @@ fn audit_hooks_config(
                     };
                     let script_display = shorten_home(&logical_script_path);
                     let net_target = match resolved_body {
-                        ResolvedScriptBody::InMemory(script_body) => {
-                            let script_label = component_label(&logical_script_path, &script_body);
+                        ResolvedScriptBody::InMemory(raw_script_body) => {
+                            let script_label =
+                                component_label(&logical_script_path, &raw_script_body);
+                            check_unicode_smuggling(
+                                &logical_script_path,
+                                &script_display,
+                                &script_label,
+                                &raw_script_body,
+                                false,
+                                1,
+                                out,
+                                seen_fp,
+                            );
+                            let script_body = strip_invisible_unicode(&raw_script_body);
                             check_remote_code_exec(
                                 &logical_script_path,
                                 &script_display,
@@ -1532,6 +2019,16 @@ fn audit_hooks_config(
                             &logical_script_path,
                             &script_display,
                             false,
+                            engine,
+                            out,
+                            seen_fp,
+                        ),
+                        ResolvedScriptBody::CompiledBinary => audit_compiled_binary_file(
+                            &script_path,
+                            &logical_script_path,
+                            &script_display,
+                            &hook_label,
+                            hook_line,
                             engine,
                             out,
                             seen_fp,
@@ -1626,7 +2123,18 @@ fn audit_hooks_config(
                     );
                 }
             }
-            HookAction::Prompt(prompt_body) => {
+            HookAction::Prompt(raw_prompt_body) => {
+                check_unicode_smuggling(
+                    path,
+                    display,
+                    &hook_label,
+                    &raw_prompt_body,
+                    true,
+                    hook_line,
+                    out,
+                    seen_fp,
+                );
+                let prompt_body = strip_invisible_unicode(&raw_prompt_body);
                 check_prompt_injection(
                     path,
                     display,
@@ -1854,18 +2362,23 @@ fn resolve_hook_handler_scripts(
                             continue;
                         }
                     }
-                    if is_likely_compiled_binary(&cand) {
-                        break;
-                    }
-                    if !seen_paths.insert(canon) {
-                        break;
-                    }
                     let rel = cand
                         .strip_prefix(project_root)
                         .or_else(|_| cand.strip_prefix(plugin_root))
                         .unwrap_or(&cand)
                         .to_string_lossy()
                         .into_owned();
+                    if crate::discovery::is_compiled_binary_file(&cand)
+                        || is_likely_compiled_binary(&cand)
+                    {
+                        if is_non_system_binary_path(&cand) && seen_paths.insert(canon) {
+                            results.push((cand, rel, ResolvedScriptBody::CompiledBinary));
+                        }
+                        break;
+                    }
+                    if !seen_paths.insert(canon) {
+                        break;
+                    }
                     if meta.len() <= MAX_PLUGIN_FILE_BYTES {
                         if let Ok(body) =
                             crate::scanner::read_text_auto_encoding(&cand, MAX_PLUGIN_FILE_BYTES)
@@ -3368,7 +3881,9 @@ fn check_env_and_secret_exfiltration(
 ) {
     let (folded, line_map) = fold_backslash_continuations(raw);
     if !is_prompt_doc {
-        if let Some((folded_ln, desc)) = detect_code_env_exfiltration_in_block(&folded, 15) {
+        if let Some((folded_ln, desc)) =
+            detect_code_env_exfiltration_in_block(&folded, usize::MAX / 4)
+        {
             let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
             let fp = fingerprint_match("plugin-env-exfiltration", &format!("{display}:{desc}"));
             push_finding(
@@ -3389,7 +3904,7 @@ fn check_env_and_secret_exfiltration(
         return;
     }
 
-    // In Markdown / instruction docs, inspect fenced code blocks with a 15-line window and
+    // In Markdown / instruction docs, inspect fenced code blocks across the full block and
     // unfenced prose lines individually (respecting defensive negations).
     let line_states = build_prompt_line_defensive_states(&folded);
     let lines: Vec<&str> = folded.lines().collect();
@@ -3404,7 +3919,9 @@ fn check_env_and_secret_exfiltration(
             if i > fence_start + 2 {
                 let inner_slice = &lines[fence_start + 1..i.saturating_sub(1)];
                 let block = inner_slice.join("\n");
-                if let Some((rel_ln, desc)) = detect_code_env_exfiltration_in_block(&block, 15) {
+                if let Some((rel_ln, desc)) =
+                    detect_code_env_exfiltration_in_block(&block, usize::MAX / 4)
+                {
                     let folded_ln = fence_start + 1 + rel_ln;
                     let line = base_line + map_folded_line(&line_map, folded_ln).saturating_sub(1);
                     let fp =
@@ -3520,8 +4037,12 @@ fn check_prompt_injection(
         }
     }
 
-    // Check plain-text & Markdown-image exfiltration commands embedded in skills / CLAUDE.md / .cursorrules
-    for rx in [&re.prompt_exfil, &re.prompt_img_exfil] {
+    // Check plain-text, prose tool-call, & Markdown-image exfiltration directives embedded in skills / CLAUDE.md / .cursorrules
+    for rx in [
+        &re.prompt_exfil,
+        &re.prompt_prose_exfil,
+        &re.prompt_img_exfil,
+    ] {
         let mut emitted = false;
         for m in rx.find_iter(&folded) {
             let snippet = m.as_str();
@@ -3530,9 +4051,12 @@ fn check_prompt_injection(
                 .find_iter(snippet)
                 .map(|um| um.as_str())
                 .collect();
-            let targets_local_only =
-                !urls_in_snip.is_empty() && urls_in_snip.iter().all(|u| is_localhost_url(u));
-            if targets_local_only {
+            let targets_benign_only = !urls_in_snip.is_empty()
+                && urls_in_snip.iter().all(|u| {
+                    is_localhost_url(u)
+                        || (std::ptr::eq(rx, &re.prompt_prose_exfil) && is_official_llm_api_url(u))
+                });
+            if targets_benign_only {
                 continue;
             }
             let folded_ln = line_at_offset(&folded, m.start());
@@ -3644,55 +4168,7 @@ fn check_prompt_injection(
         }
     }
 
-    // Check Trojan Source bidirectional overrides, Unicode Tag ASCII-smuggling, and zero-width runs
-    let mut zw_run = 0usize;
-    let mut has_unicode_smuggling = false;
-    let mut smuggle_offset = 0usize;
-    for (byte_idx, ch) in raw.char_indices() {
-        let cp = ch as u32;
-        if (0x202A..=0x202E).contains(&cp)
-            || (0x2066..=0x2069).contains(&cp)
-            || (0xE0000..=0xE007F).contains(&cp)
-        {
-            has_unicode_smuggling = true;
-            smuggle_offset = byte_idx;
-            break;
-        }
-        if matches!(cp, 0x200B | 0x200C | 0x200D | 0x2060) {
-            zw_run += 1;
-            if zw_run >= 3 {
-                has_unicode_smuggling = true;
-                smuggle_offset = byte_idx;
-                break;
-            }
-        } else {
-            zw_run = 0;
-        }
-    }
-
-    if has_unicode_smuggling {
-        let line = base_line + line_at_offset(raw, smuggle_offset).saturating_sub(1);
-        let fp = fingerprint_match(
-            "plugin-prompt-injection",
-            &format!("{display}:unicode-smuggling"),
-        );
-        push_finding(
-            out,
-            seen_fp,
-            McpFinding {
-                rule_id: "plugin-prompt-injection",
-                server_name: label.to_string(),
-                config_file: display.to_string(),
-                config_path: path.to_path_buf(),
-                line,
-                severity: Severity::High,
-                fingerprint: fp,
-                message:
-                    "Prompt file contains hidden bidirectional override, zero-width, or Unicode tag smuggling characters"
-                        .to_string(),
-            },
-        );
-    }
+    check_unicode_smuggling(path, display, label, raw, true, base_line, out, seen_fp);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3894,6 +4370,16 @@ fn is_known_runtime_binary_name(path: &Path) -> bool {
             | "podman"
             | "nerdctl"
             | "env"
+            | "sudo"
+            | "doas"
+            | "arch"
+            | "caffeinate"
+            | "direnv"
+            | "ionice"
+            | "taskset"
+            | "xcrun"
+            | "chrt"
+            | "flock"
             | "nohup"
             | "setsid"
             | "nice"
@@ -4057,7 +4543,33 @@ pub(crate) fn audit_referenced_mcp_scripts(
                     continue;
                 }
             }
-            if is_likely_compiled_binary(&cand) {
+            let logical_script_path = if let Some((sandbox_root, repo_root)) = sandbox_remap {
+                let csb = sandbox_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| sandbox_root.to_path_buf());
+                cand.strip_prefix(&csb)
+                    .or_else(|_| cand.strip_prefix(sandbox_root))
+                    .map(|r| repo_root.join(r))
+                    .unwrap_or_else(|_| cand.clone())
+            } else {
+                cand.clone()
+            };
+            let script_display = shorten_home(&logical_script_path);
+
+            if crate::discovery::is_compiled_binary_file(&cand) || is_likely_compiled_binary(&cand)
+            {
+                if is_non_system_binary_path(&cand) && seen_paths.insert(canon) {
+                    let _ = audit_compiled_binary_file(
+                        &cand,
+                        &logical_script_path,
+                        &script_display,
+                        &mcp_label,
+                        1,
+                        engine,
+                        out,
+                        &mut seen_fp,
+                    );
+                }
                 break;
             }
 
@@ -4089,23 +4601,21 @@ pub(crate) fn audit_referenced_mcp_scripts(
                 break;
             }
 
-            let logical_script_path = if let Some((sandbox_root, repo_root)) = sandbox_remap {
-                let csb = sandbox_root
-                    .canonicalize()
-                    .unwrap_or_else(|_| sandbox_root.to_path_buf());
-                cand.strip_prefix(&csb)
-                    .or_else(|_| cand.strip_prefix(sandbox_root))
-                    .map(|r| repo_root.join(r))
-                    .unwrap_or_else(|_| cand.clone())
-            } else {
-                cand.clone()
-            };
-            let script_display = shorten_home(&logical_script_path);
-
             if meta.len() <= MAX_PLUGIN_FILE_BYTES {
-                if let Ok(script_body) =
+                if let Ok(raw_script_body) =
                     crate::scanner::read_text_auto_encoding(&cand, MAX_PLUGIN_FILE_BYTES)
                 {
+                    check_unicode_smuggling(
+                        &logical_script_path,
+                        &script_display,
+                        &mcp_label,
+                        &raw_script_body,
+                        false,
+                        1,
+                        out,
+                        &mut seen_fp,
+                    );
+                    let script_body = strip_invisible_unicode(&raw_script_body);
                     check_remote_code_exec(
                         &logical_script_path,
                         &script_display,

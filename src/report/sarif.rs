@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
-const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
+pub const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
     (
         "mcp-hardcoded-secret",
         "MCP Hardcoded Secret",
@@ -21,8 +21,14 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
     (
         "mcp-credential-harvest",
         "MCP Credential Store Access",
-        "MCP server command directly reads host SSH, cloud, or CLI credential stores.",
+        "MCP server command directly reads host SSH, cloud, browser, or CLI credential stores.",
         Severity::Critical,
+    ),
+    (
+        "mcp-privilege-escalation",
+        "MCP Privilege Escalation",
+        "MCP server command invokes sudo or doas privilege escalation.",
+        Severity::High,
     ),
     (
         "mcp-inline-code-exec",
@@ -33,13 +39,13 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
     (
         "mcp-unpinned-package",
         "MCP Unpinned Package",
-        "Unpinned npx/uvx/bunx/pipx package pulls latest mutable registry code at launch.",
-        Severity::High,
+        "Unpinned npx/uvx/bunx/pipx/docker package pulls mutable registry or URL/git code at launch.",
+        Severity::Medium,
     ),
     (
         "mcp-unrestricted-shell",
         "MCP Unrestricted Shell",
-        "MCP server exposes raw unrestricted shell command execution.",
+        "MCP server exposes raw unrestricted shell command execution or privileged container flags.",
         Severity::High,
     ),
     (
@@ -69,7 +75,7 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
     (
         "plugin-credential-harvest",
         "Plugin Credential Store Access",
-        "Plugin, hook, or skill accesses ~/.ssh, ~/.aws, keychain, or CLI credential files.",
+        "Plugin, hook, or skill accesses ~/.ssh, ~/.aws, ~/.azure, browser DBs, keychain, or CLI credential files.",
         Severity::Critical,
     ),
     (
@@ -85,6 +91,18 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         Severity::Critical,
     ),
     (
+        "plugin-compiled-binary",
+        "Plugin or Hook Compiled Binary",
+        "Plugin, hook, skill, or MCP helper bundles or executes an opaque native, Wasm, or bytecode binary.",
+        Severity::High,
+    ),
+    (
+        "plugin-skill-network",
+        "Skill Script Outbound Network Call",
+        "Executable skill script makes outbound network calls to non-official external endpoints.",
+        Severity::High,
+    ),
+    (
         "plugin-hook-network",
         "Lifecycle Hook Outbound Network Call",
         "Lifecycle hook makes outbound network requests during CLI tool or prompt events.",
@@ -93,7 +111,7 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
     (
         "plugin-prompt-injection",
         "Skill or Instruction Prompt Injection",
-        "Skill or instruction file contains stealth override directives, hidden payloads, or exfiltration commands.",
+        "Skill or instruction file contains stealth override directives, hidden Unicode payloads, or exfiltration commands.",
         Severity::High,
     ),
     (
@@ -118,7 +136,7 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         "plugin-workspace-hook-exec",
         "Workspace Automatic Hook Command",
         "Workspace settings register an automatic shell or helper command hook that executes repository-controlled code.",
-        Severity::High,
+        Severity::Medium,
     ),
     (
         "plugin-oversized-config",
@@ -133,6 +151,91 @@ const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         Severity::High,
     ),
 ];
+
+pub const BUILTIN_LIVE_RULES: &[(&str, &str, &str, Severity)] = &[
+    (
+        "header-secret-leak",
+        "HTTP Header Secret or Cross-Provider Auth Leak",
+        "Cross-provider token, internal JWT, opaque credential, or secret sent inside an outgoing HTTP header (blocked under `--block-secrets`).",
+        Severity::Critical,
+    ),
+    (
+        "header-email-leak",
+        "HTTP Header Email Leak",
+        "Developer email address embedded inside `User-Agent` or custom HTTP headers.",
+        Severity::High,
+    ),
+    (
+        "header-os-username",
+        "HTTP Header OS Username Exposure",
+        "Local OS username exposed inside outgoing HTTP headers.",
+        Severity::Medium,
+    ),
+    (
+        "header-machine-hostname",
+        "HTTP Header Machine Hostname Exposure",
+        "Local machine hostname exposed inside outgoing HTTP headers.",
+        Severity::Medium,
+    ),
+    (
+        "tcp-connection",
+        "Outbound TCP Socket",
+        "Outbound TCP connection opened by the wrapped CLI or child MCP/hook process (with PID & scrubbed cmdline).",
+        Severity::Medium,
+    ),
+    (
+        "udp-connection",
+        "Outbound Connected UDP Socket",
+        "Connected outbound UDP socket opened by the wrapped CLI or child MCP/hook process (with PID & scrubbed cmdline).",
+        Severity::Medium,
+    ),
+];
+
+pub fn render_rules_json(engine: &RuleEngine) -> String {
+    let mut items = Vec::new();
+    for r in engine.rules() {
+        let cat = match r.category {
+            RuleCategory::Secret => "secret",
+            RuleCategory::Pii => "pii",
+        };
+        items.push(json!({
+            "id": r.id,
+            "name": r.name,
+            "category": cat,
+            "severity": r.severity.as_str(),
+            "description": r.description,
+        }));
+    }
+    for &(id, name, desc, sev) in BUILTIN_STATIC_RULES {
+        let cat = if id.starts_with("plugin-") {
+            "plugin"
+        } else {
+            "mcp"
+        };
+        items.push(json!({
+            "id": id,
+            "name": name,
+            "category": cat,
+            "severity": sev.as_str(),
+            "description": desc,
+        }));
+    }
+    for &(id, name, desc, sev) in BUILTIN_LIVE_RULES {
+        items.push(json!({
+            "id": id,
+            "name": name,
+            "category": "wiretap",
+            "severity": sev.as_str(),
+            "description": desc,
+        }));
+    }
+    serde_json::to_string_pretty(&json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "total_rules": items.len(),
+        "rules": items,
+    }))
+    .expect("valid rules JSON")
+}
 
 fn extract_git_commit_sha(display_file: &str) -> Option<&str> {
     let rest = display_file.strip_prefix("git:")?;

@@ -180,8 +180,9 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     let inspect_api_enabled =
         (args.inspect_api || block_secrets_enabled) && !args.no_inspect_api && !is_info_only;
 
-    let policy = PolicyConfig::load_with_options(
+    let policy = PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
         &[],
         args.trust_project_config,
         args.no_config,
@@ -344,13 +345,25 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         && !allow_set.contains("SSH_AUTH_SOCK")
         && env::var_os("SSH_AUTH_SOCK").is_some_and(|v| !v.is_empty())
     {
-        emit_cb(
-            "env",
-            "ssh_agent_inherited",
-            "env-ssh-agent",
-            "MEDIUM",
-            "Child session inherits active `SSH_AUTH_SOCK` agent socket".to_string(),
-        );
+        if args.scrub_ssh_agent {
+            cmd.env_remove("SSH_AUTH_SOCK");
+            cmd.env_remove("SSH_AGENT_PID");
+            emit_cb(
+                "env",
+                "ssh_agent_scrubbed",
+                "env-ssh-agent",
+                "MEDIUM",
+                "Scrubbed `SSH_AUTH_SOCK` agent socket before launch".to_string(),
+            );
+        } else {
+            emit_cb(
+                "env",
+                "ssh_agent_inherited",
+                "env-ssh-agent",
+                "MEDIUM",
+                "Child session inherits active `SSH_AUTH_SOCK` agent socket (pass --scrub-ssh-agent to strip)".to_string(),
+            );
+        }
     }
 
     if let Some(ref tap) = local_api_tap {
@@ -866,6 +879,7 @@ pub fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool 
         upper.as_str(),
         "GOOGLE_APPLICATION_CREDENTIALS"
             | "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"
+            | "CLOUDSDK_CONFIG"
             | "AWS_SHARED_CREDENTIALS_FILE"
             | "AWS_CONFIG_FILE"
             | "AWS_WEB_IDENTITY_TOKEN_FILE"
@@ -876,6 +890,10 @@ pub fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool 
             | "AWS_PROFILE"
             | "AWS_DEFAULT_PROFILE"
             | "AZURE_CONFIG_DIR"
+            | "GH_CONFIG_DIR"
+            | "TF_CLI_CONFIG_FILE"
+            | "NETRC"
+            | "PGPASSFILE"
             | "VAULT_TOKEN"
     ) || upper.ends_with("_SECRET_FILE")
         || upper.ends_with("_PASSWORD_FILE")

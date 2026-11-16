@@ -410,155 +410,26 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         "\n{}\n\n",
         st.bold("Built-in MCP, Plugin, Hook & Skill Rules")
     ));
-    let mcp_rules = [
-        (
-            "CRITICAL",
-            "mcp-hardcoded-secret",
-            "Plaintext secret or token stored inside MCP `env`, `args`, or `headers`.",
-        ),
-        (
-            "CRITICAL",
-            "mcp-remote-code-exec",
-            "MCP server command downloads and executes remote payloads (`curl | sh`, `eval`, etc.).",
-        ),
-        (
-            "CRITICAL",
-            "mcp-credential-harvest",
-            "MCP server command directly reads `~/.ssh`, `~/.aws`, keychain, or CLI auth stores.",
-        ),
-        (
-            "HIGH",
-            "mcp-inline-code-exec",
-            "MCP server executes inline `npx -c` / `python -c` / `node -e` code.",
-        ),
-        (
-            "HIGH",
-            "mcp-unpinned-package",
-            "Unpinned `npx -y` / `uvx` / `uv run --with` / `bunx` package executing mutable registry code.",
-        ),
-        (
-            "HIGH",
-            "mcp-unrestricted-shell",
-            "MCP server exposing raw unrestricted shell execution or privileged container flags.",
-        ),
-        (
-            "HIGH",
-            "mcp-broad-filesystem",
-            "MCP server granted `/`, `~`, or sensitive directories (`~/.ssh`, `~/.aws`, `/etc`, `docker.sock`).",
-        ),
-        (
-            "HIGH",
-            "mcp-plaintext-http",
-            "Remote MCP server connected over unencrypted `http://`.",
-        ),
-        (
-            "HIGH",
-            "mcp-oversized-config",
-            "MCP config exceeding the 16 MiB structured AST limit.",
-        ),
-        (
-            "MEDIUM",
-            "mcp-telemetry-endpoint",
-            "MCP config referencing known third-party telemetry/analytics endpoints.",
-        ),
-        (
-            "CRITICAL",
-            "plugin-remote-code-exec",
-            "Plugin, hook, or skill executing piped, encoded, or dynamically fetched remote code.",
-        ),
-        (
-            "CRITICAL",
-            "plugin-credential-harvest",
-            "Plugin, hook, or skill reading `~/.ssh`, `~/.aws`, `~/.npmrc`, `~/.config/gh`, or keychain.",
-        ),
-        (
-            "CRITICAL",
-            "plugin-env-exfiltration",
-            "Plugin, hook, MCP script, or skill exfiltrating `process.env` / `os.environ` / API keys over the network.",
-        ),
-        (
-            "CRITICAL",
-            "plugin-hardcoded-secret",
-            "Live API key or credential bundled inside an installed plugin, hook, or skill.",
-        ),
-        (
-            "CRITICAL",
-            "plugin-env-code-exec",
-            "Settings overriding `NODE_OPTIONS`, `LD_PRELOAD`, `BASH_ENV`, `GIT_SSH_COMMAND`, or workspace `PATH`.",
-        ),
-        (
-            "CRITICAL",
-            "plugin-api-base-override",
-            "Settings redirecting LLM base URLs, `HTTPS_PROXY`, custom CA bundles, or disabling TLS checks.",
-        ),
-        (
-            "HIGH",
-            "plugin-workspace-hook-exec",
-            "Workspace settings registering an automatic shell or helper command hook.",
-        ),
-        (
-            "HIGH",
-            "plugin-hook-network",
-            "Lifecycle hook (`PreToolUse`, `SessionStart`, etc.) making outbound network calls.",
-        ),
-        (
-            "HIGH",
-            "plugin-prompt-injection",
-            "Skill or instruction file (`SKILL.md`, `CLAUDE.md`, `.cursorrules`, `.windsurf/rules`, `.clinerules`) with stealth overrides or exfil commands.",
-        ),
-        (
-            "HIGH",
-            "plugin-oversized-config",
-            "Plugin or workspace JSON config exceeding the 16 MiB structured AST limit.",
-        ),
-        (
-            "HIGH",
-            "plugin-telemetry-endpoint",
-            "Plugin manifest, hook, or script referencing third-party analytics endpoints.",
-        ),
-    ];
-    for (sev, id, desc) in mcp_rules {
-        out.push_str(&format!("  {sev:<9} {id:<27} {}\n", st.dim(desc)));
+    for &(id, _name, desc, sev) in crate::report::sarif::BUILTIN_STATIC_RULES {
+        out.push_str(&format!(
+            "  {:<9} {:<27} {}\n",
+            sev.as_str(),
+            id,
+            st.dim(desc)
+        ));
     }
 
     out.push_str(&format!(
         "\n{}\n\n",
         st.bold("Built-in Live HTTP Header, Prompt Blocking & Socket Wiretap Rules (`tap`)")
     ));
-    let live_rules = [
-        (
-            "CRITICAL",
-            "header-secret-leak",
-            "Non-provider secret or leaked token sent inside an outgoing HTTP header (blocked under `--block-secrets`).",
-        ),
-        (
-            "HIGH",
-            "header-email-leak",
-            "Developer email address embedded inside `User-Agent` or custom HTTP headers.",
-        ),
-        (
-            "MEDIUM",
-            "header-os-username",
-            "Local OS username exposed inside outgoing HTTP headers.",
-        ),
-        (
-            "MEDIUM",
-            "header-machine-hostname",
-            "Local machine hostname exposed inside outgoing HTTP headers.",
-        ),
-        (
-            "MEDIUM",
-            "tcp-connection",
-            "Outbound TCP connection opened by the wrapped CLI or child MCP/hook process (with PID & cmdline).",
-        ),
-        (
-            "MEDIUM",
-            "udp-connection",
-            "Connected outbound UDP socket opened by the wrapped CLI or child MCP/hook process (with PID & cmdline).",
-        ),
-    ];
-    for (sev, id, desc) in live_rules {
-        out.push_str(&format!("  {sev:<9} {id:<27} {}\n", st.dim(desc)));
+    for &(id, _name, desc, sev) in crate::report::sarif::BUILTIN_LIVE_RULES {
+        out.push_str(&format!(
+            "  {:<9} {:<27} {}\n",
+            sev.as_str(),
+            id,
+            st.dim(desc)
+        ));
     }
     out
 }

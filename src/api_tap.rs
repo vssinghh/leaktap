@@ -1,4 +1,4 @@
-use crate::header_audit::HeaderAuditor;
+use crate::header_audit::{HeaderAuditor, UpstreamProvider};
 use crate::rules::{RuleCategory, RuleEngine};
 use flate2::bufread::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -467,29 +467,50 @@ fn handle_client(
         Vec::new()
     };
 
-    let (provider, target_url) = if let Some(rest) = raw_path.strip_prefix("/_anthropic") {
-        let suffix = if rest.is_empty() { "/" } else { rest };
-        ("anthropic", format!("{}{suffix}", upstreams.anthropic))
-    } else if let Some(rest) = raw_path.strip_prefix("/_openai") {
-        if has_chatgpt_account_id && !upstreams.openai_explicit {
-            let stripped = rest.strip_prefix("/v1").unwrap_or(rest);
-            let suffix = if stripped.is_empty() { "/" } else { stripped };
-            ("openai", format!("{}{suffix}", upstreams.chatgpt))
-        } else {
+    let (provider, upstream_provider, target_url) =
+        if let Some(rest) = raw_path.strip_prefix("/_anthropic") {
             let suffix = if rest.is_empty() { "/" } else { rest };
-            ("openai", format!("{}{suffix}", upstreams.openai))
-        }
-    } else if let Some(rest) = raw_path.strip_prefix("/_gemini") {
-        let suffix = if rest.is_empty() { "/" } else { rest };
-        ("gemini", format!("{}{suffix}", upstreams.gemini))
-    } else {
-        let suffix = if raw_path.starts_with('/') {
-            raw_path.as_str()
+            (
+                "anthropic",
+                UpstreamProvider::Anthropic,
+                format!("{}{suffix}", upstreams.anthropic),
+            )
+        } else if let Some(rest) = raw_path.strip_prefix("/_openai") {
+            if has_chatgpt_account_id && !upstreams.openai_explicit {
+                let stripped = rest.strip_prefix("/v1").unwrap_or(rest);
+                let suffix = if stripped.is_empty() { "/" } else { stripped };
+                (
+                    "openai",
+                    UpstreamProvider::OpenAi,
+                    format!("{}{suffix}", upstreams.chatgpt),
+                )
+            } else {
+                let suffix = if rest.is_empty() { "/" } else { rest };
+                (
+                    "openai",
+                    UpstreamProvider::OpenAi,
+                    format!("{}{suffix}", upstreams.openai),
+                )
+            }
+        } else if let Some(rest) = raw_path.strip_prefix("/_gemini") {
+            let suffix = if rest.is_empty() { "/" } else { rest };
+            (
+                "gemini",
+                UpstreamProvider::Gemini,
+                format!("{}{suffix}", upstreams.gemini),
+            )
         } else {
-            "/"
+            let suffix = if raw_path.starts_with('/') {
+                raw_path.as_str()
+            } else {
+                "/"
+            };
+            (
+                "anthropic",
+                UpstreamProvider::Anthropic,
+                format!("{}{suffix}", upstreams.anthropic),
+            )
         };
-        ("anthropic", format!("{}{suffix}", upstreams.anthropic))
-    };
 
     emit(
         "http",
@@ -549,16 +570,16 @@ fn handle_client(
         }
     }
 
-    // 2. Audit outgoing HTTP headers (`User-Agent` email leaks, hostname/OS user, leaked keys)
+    // 2. Audit outgoing HTTP headers (`User-Agent` email leaks, hostname/OS user, cross-provider/leaked keys)
     for (k, v) in &headers {
-        for hf in auditor.inspect_header(k, v, engine) {
+        for hf in auditor.inspect_header_for_provider(k, v, Some(upstream_provider), engine) {
             if upstreams.block_secrets
                 && hf.rule_id == "header-secret-leak"
                 && blocked_summary.is_none()
             {
                 blocked_summary = Some((
                     hf.rule_id.to_string(),
-                    format!("non-auth HTTP header `{k}` ({})", hf.detail),
+                    format!("HTTP header `{k}` ({})", hf.detail),
                     "leaktap_secret_blocked",
                 ));
             }
@@ -710,7 +731,7 @@ fn handle_client(
                 "type": "invalid_request_error",
                 "code": err_code,
                 "message": format!(
-                    "[leaktap] Blocked outgoing {provider} API request: {summary}. Remove or redact the secret before retrying."
+                    "[leaktap] Blocked outgoing {provider} API request: {summary}. Remove or redact the secret before retrying (if it is already saved in local session history, run 'leaktap clean --apply' or start a new agent session so subsequent turns are not repeatedly blocked)."
                 )
             }
         })

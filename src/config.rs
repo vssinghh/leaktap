@@ -153,9 +153,28 @@ impl PolicyConfig {
         trust_project_config: bool,
         no_config: bool,
     ) -> Result<Self, String> {
+        Self::load_with_git_ref(
+            explicit_config,
+            None,
+            scan_paths,
+            trust_project_config,
+            no_config,
+        )
+    }
+
+    pub fn load_with_git_ref(
+        explicit_config: Option<&Path>,
+        policy_git_ref: Option<&str>,
+        scan_paths: &[PathBuf],
+        trust_project_config: bool,
+        no_config: bool,
+    ) -> Result<Self, String> {
         if no_config {
-            if explicit_config.is_some() {
-                return Err("cannot combine `--config` with `--no-config`".to_string());
+            if explicit_config.is_some() || policy_git_ref.is_some() {
+                return Err(
+                    "cannot combine `--config` or `--policy-git-ref` with `--no-config`"
+                        .to_string(),
+                );
             }
             return Ok(PolicyConfig::default());
         }
@@ -163,8 +182,8 @@ impl PolicyConfig {
         let mut merged = PolicyConfig::default();
 
         // 1. Trusted user/fleet policy (`~/.config/leaktap/config.toml` or `~/.leaktap/config.toml`),
-        // loaded ONLY when `--config` was NOT explicitly provided (so CI `--config policy.toml` stays hermetic).
-        if explicit_config.is_none() {
+        // loaded ONLY when `--config` and `--policy-git-ref` were NOT explicitly provided (so CI stays hermetic).
+        if explicit_config.is_none() && policy_git_ref.is_none() {
             if let Some(home) = home_dir() {
                 for cand in [
                     home.join(".config/leaktap/config.toml"),
@@ -222,9 +241,57 @@ impl PolicyConfig {
                     .map_err(|e| format!("invalid TOML in `{}`: {e}", cfg.display()))?;
                 merged.merge_global_policy_file(parsed, &explicit_anchors)?;
             }
-            if !trust_project_config {
+            if !trust_project_config && policy_git_ref.is_none() {
                 return Ok(merged);
             }
+        }
+
+        // 2b. Trusted git ref policy (`--policy-git-ref origin/main`) for pull-request CI:
+        // loads `.leaktap.toml`, `leaktap.toml`, and `.leaktapignore` directly from `<REF>` via `git`
+        // (scoped strictly to each discovered git repo root) while ignoring untrusted working-tree edits.
+        if let Some(raw_ref) = policy_git_ref {
+            let git_ref = raw_ref.trim();
+            if git_ref.is_empty() || git_ref.starts_with('-') || git_ref.contains('\0') {
+                return Err(format!("invalid `--policy-git-ref` value `{git_ref}`"));
+            }
+            let repo_roots = discover_git_repo_roots(&anchor_dirs);
+            if repo_roots.is_empty() {
+                return Err(format!(
+                    "`--policy-git-ref {git_ref}` requires running inside or targeting a git repository"
+                ));
+            }
+            let mut verified_any_ref = false;
+            for repo_root in &repo_roots {
+                let verify_spec = format!("{git_ref}^{{commit}}");
+                if !git_ref_exists(repo_root, &verify_spec) {
+                    continue;
+                }
+                verified_any_ref = true;
+                for name in [".leaktap.toml", "leaktap.toml"] {
+                    let obj_spec = format!("{git_ref}:{name}");
+                    if let Some(raw) = read_git_blob_utf8(repo_root, &obj_spec) {
+                        let parsed: PolicyFile = toml::from_str(&raw).map_err(|e| {
+                            format!(
+                                "invalid TOML in `{}` ({obj_spec}): {e}",
+                                repo_root.display()
+                            )
+                        })?;
+                        merged.merge_scoped_project_policy_file(parsed, repo_root)?;
+                    }
+                }
+                let ig_spec = format!("{git_ref}:.leaktapignore");
+                if let Some(raw) = read_git_blob_utf8(repo_root, &ig_spec) {
+                    merged.add_scoped_project_ignore_lines(&raw, repo_root);
+                }
+            }
+            if !verified_any_ref {
+                return Err(format!(
+                    "git ref `{git_ref}` passed to `--policy-git-ref` could not be resolved"
+                ));
+            }
+            // Always return here so untrusted working-tree `.leaktap.toml` / `.leaktapignore`
+            // edits are NEVER merged on top of `--policy-git-ref <REF>`, even if `--trust-project-config` was also passed.
+            return Ok(merged);
         }
 
         // 3. Discover project / target configs in `cwd` and `scan_paths`
@@ -774,4 +841,72 @@ fn compile_project_scoped_glob_regexes(glob: &str, proj_root: &Path) -> Vec<Rege
         }
     }
     out
+}
+
+fn discover_git_repo_roots(anchor_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for dir in anchor_dirs {
+        let Ok(out) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let s = String::from_utf8_lossy(&out.stdout);
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            let pb = normalize_abs_path(Path::new(trimmed));
+            if !roots.contains(&pb) {
+                roots.push(pb);
+            }
+        }
+    }
+    roots
+}
+
+fn git_ref_exists(repo_root: &Path, verify_spec: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--verify", "--quiet", verify_spec])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn read_git_blob_utf8(repo_root: &Path, obj_spec: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["cat-file", "-p", obj_spec])
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+pub fn is_ci_environment() -> bool {
+    for var in [
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CIRCLECI",
+        "BUILDKITE",
+        "TF_BUILD",
+        "JENKINS_URL",
+        "CI",
+    ] {
+        if let Ok(val) = env::var(var) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("false") && trimmed != "0" {
+                return true;
+            }
+        }
+    }
+    false
 }

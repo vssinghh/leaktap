@@ -3,6 +3,7 @@ use crate::plugin_audit::{has_script_extension, is_shebang_script};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Default, Clone)]
@@ -60,7 +61,16 @@ pub fn discover_targets_with_policy(
     include_mcp: bool,
     policy: Option<&PolicyConfig>,
 ) -> DiscoveredTargets {
-    discover_targets_internal(custom_paths, include_mcp, false, policy)
+    discover_targets_internal(custom_paths, false, include_mcp, false, policy)
+}
+
+pub fn discover_targets_with_all_and_policy(
+    custom_paths: &[PathBuf],
+    scan_all: bool,
+    include_mcp: bool,
+    policy: Option<&PolicyConfig>,
+) -> DiscoveredTargets {
+    discover_targets_internal(custom_paths, scan_all, include_mcp, false, policy)
 }
 
 pub fn discover_clean_targets_with_policy(
@@ -68,11 +78,12 @@ pub fn discover_clean_targets_with_policy(
     include_code: bool,
     policy: Option<&PolicyConfig>,
 ) -> DiscoveredTargets {
-    discover_targets_internal(custom_paths, false, !include_code, policy)
+    discover_targets_internal(custom_paths, false, false, !include_code, policy)
 }
 
 fn discover_targets_internal(
     custom_paths: &[PathBuf],
+    scan_all: bool,
     include_mcp: bool,
     clean_session_logs_only: bool,
     policy: Option<&PolicyConfig>,
@@ -97,7 +108,7 @@ fn discover_targets_internal(
             policy,
         };
 
-        if !custom_paths.is_empty() {
+        if !custom_paths.is_empty() && !scan_all {
             for p in custom_paths {
                 roots.push(shorten_home(p));
                 let start_in_cust =
@@ -230,6 +241,10 @@ fn discover_targets_internal(
                         cwd.join(".gemini/settings.json"),
                         cwd.join(".claude/settings.json"),
                         cwd.join(".claude/settings.local.json"),
+                        cwd.join(".junie/mcp/mcp.json"),
+                        cwd.join(".amazonq/mcp.json"),
+                        cwd.join(".kiro/settings/mcp.json"),
+                        cwd.join(".zed/settings.json"),
                     ];
                     for cfg in &workspace_configs {
                         if cfg.is_file() {
@@ -261,6 +276,14 @@ fn discover_targets_internal(
                         cwd.join(".windsurf/rules"),
                         cwd.join(".windsurf/workflows"),
                         cwd.join(".roo/rules"),
+                        cwd.join(".roo/rules-code"),
+                        cwd.join(".roo/rules-architect"),
+                        cwd.join(".roo/rules-ask"),
+                        cwd.join(".junie"),
+                        cwd.join(".amazonq"),
+                        cwd.join(".kiro"),
+                        cwd.join(".augment"),
+                        cwd.join(".trae"),
                         cwd.join(".agents"),
                         cwd.join(".agent"),
                         cwd.join(".antigravitycli"),
@@ -278,6 +301,32 @@ fn discover_targets_internal(
                     if !is_home_or_root {
                         let mut dir_budget = 256usize;
                         discover_monorepo_subconfigs(&cwd, &mut ctx, 0, &mut dir_budget);
+                    }
+                }
+            }
+
+            if scan_all {
+                ctx.explicit_scan = true;
+                for p in custom_paths {
+                    let label = shorten_home(p);
+                    if !roots.contains(&label) {
+                        roots.push(label);
+                    }
+                    let start_in_cust =
+                        has_customization_ancestor(p) || (p.is_dir() && is_plugin_or_skill_root(p));
+                    walk_path(p, &mut ctx, start_in_cust, 0);
+                }
+                if let Ok(cwd) = env::current_dir() {
+                    let is_home_or_root =
+                        cwd == Path::new("/") || home_dir().is_some_and(|h| cwd == h);
+                    if !is_home_or_root {
+                        let label = shorten_home(&cwd);
+                        if !roots.contains(&label) {
+                            roots.push(label);
+                        }
+                        let start_in_cust = has_customization_ancestor(&cwd)
+                            || (cwd.is_dir() && is_plugin_or_skill_root(&cwd));
+                        walk_path(&cwd, &mut ctx, start_in_cust, 0);
                     }
                 }
             }
@@ -340,6 +389,12 @@ fn discover_monorepo_subconfigs(
                         | ".roo"
                         | ".vscode"
                         | ".github"
+                        | ".junie"
+                        | ".amazonq"
+                        | ".kiro"
+                        | ".augment"
+                        | ".trae"
+                        | ".zed"
                 ) && depth > 0
                 {
                     discover_dotdir_in_subpackage(&p, name, ctx);
@@ -415,9 +470,11 @@ fn discover_dotdir_in_subpackage(dotdir: &Path, name: &str, ctx: &mut WalkContex
             if cfg.is_file() {
                 classify_file(&cfg, ctx, false, false);
             }
-            let rules = dotdir.join("rules");
-            if rules.exists() {
-                walk_path(&rules, ctx, true, 0);
+            for sub in ["rules", "rules-code", "rules-architect", "rules-ask"] {
+                let rules = dotdir.join(sub);
+                if rules.exists() {
+                    walk_path(&rules, ctx, true, 0);
+                }
             }
         }
         ".gemini" => {
@@ -434,6 +491,12 @@ fn discover_dotdir_in_subpackage(dotdir: &Path, name: &str, ctx: &mut WalkContex
                 }
             }
         }
+        ".zed" => {
+            let cfg = dotdir.join("settings.json");
+            if cfg.is_file() {
+                classify_file(&cfg, ctx, false, false);
+            }
+        }
         ".github" => {
             for sub in ["copilot-instructions.md", "instructions", "prompts"] {
                 let sp = dotdir.join(sub);
@@ -441,6 +504,9 @@ fn discover_dotdir_in_subpackage(dotdir: &Path, name: &str, ctx: &mut WalkContex
                     walk_path(&sp, ctx, true, 0);
                 }
             }
+        }
+        ".junie" | ".amazonq" | ".kiro" | ".augment" | ".trae" => {
+            walk_path(dotdir, ctx, true, 0);
         }
         _ => {}
     }
@@ -581,6 +647,11 @@ fn is_customization_dir_name(name: &str) -> bool {
             | ".agents"
             | ".agent"
             | ".antigravitycli"
+            | ".junie"
+            | ".amazonq"
+            | ".kiro"
+            | ".augment"
+            | ".trae"
     )
 }
 
@@ -597,13 +668,25 @@ fn has_customization_ancestor(path: &Path) -> bool {
         if is_customization_dir_name(c) {
             return true;
         }
-        if matches!(
+        if (matches!(
             c,
-            "commands" | "agents" | "rules" | "workflows" | "instructions" | "prompts"
-        ) && idx > 0
+            "commands" | "agents" | "rules" | "workflows" | "instructions" | "prompts" | "steering"
+        ) || c.starts_with("rules-"))
+            && idx > 0
             && matches!(
                 comps[idx - 1],
-                ".claude" | ".codex" | ".cursor" | ".gemini" | ".windsurf" | ".roo" | ".github"
+                ".claude"
+                    | ".codex"
+                    | ".cursor"
+                    | ".gemini"
+                    | ".windsurf"
+                    | ".roo"
+                    | ".github"
+                    | ".junie"
+                    | ".amazonq"
+                    | ".kiro"
+                    | ".augment"
+                    | ".trae"
             )
         {
             return true;
@@ -713,6 +796,11 @@ fn classify_file(
                 if ctx.seen.insert(path.to_path_buf()) {
                     ctx.transcripts.push(path.to_path_buf());
                 }
+            } else if is_compiled_binary_file(path) {
+                if ctx.seen.insert(path.to_path_buf()) {
+                    ctx.plugin_files.push(path.to_path_buf());
+                    ctx.transcripts.push(path.to_path_buf());
+                }
             } else if (is_explicit_plugin_file || is_auditable_customization_file(path, file_name))
                 && ctx.seen.insert(path.to_path_buf())
             {
@@ -721,7 +809,7 @@ fn classify_file(
                 // Guarantee an explicit `--path <file>` inside a skill/plugin directory is never silently skipped
                 ctx.transcripts.push(path.to_path_buf());
             }
-        } else if ctx.seen.insert(path.to_path_buf()) {
+        } else if !is_compiled_binary_file(path) && ctx.seen.insert(path.to_path_buf()) {
             // `clean --include-code`
             ctx.transcripts.push(path.to_path_buf());
         }
@@ -828,6 +916,9 @@ fn is_top_level_instruction_or_plugin_file(path: &Path, file_name: &str) -> bool
     ) {
         return true;
     }
+    if file_name == "guidelines.md" && path.to_string_lossy().contains(".junie") {
+        return true;
+    }
     if file_name.ends_with(".mdc") {
         let p = path.to_string_lossy();
         if p.contains(".cursor") || p.contains("rules") {
@@ -842,6 +933,90 @@ fn is_top_level_instruction_or_plugin_file(path: &Path, file_name: &str) -> bool
     false
 }
 
+/// Detects compiled native / WebAssembly / bytecode binaries (`ELF`, `Mach-O`, `PE`, `Wasm`, `.node`, `.so`, `.dylib`, `.dll`, `.exe`, `.pyc`).
+pub fn is_compiled_binary_file(path: &Path) -> bool {
+    if crate::scanner::is_sqlite_extension(path) {
+        return false;
+    }
+    if let Some(ext) = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+    {
+        if matches!(
+            ext.as_str(),
+            "exe" | "dll" | "so" | "dylib" | "node" | "wasm" | "pyc" | "pyo" | "class" | "o" | "a"
+        ) {
+            return true;
+        }
+        // Skip common non-executable media/archive/font files inside `assets/`
+        if matches!(
+            ext.as_str(),
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "ico"
+                | "icns"
+                | "svg"
+                | "pdf"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "otf"
+                | "mp3"
+                | "mp4"
+                | "wav"
+                | "zip"
+                | "gz"
+                | "tgz"
+                | "tar"
+                | "xz"
+                | "zst"
+        ) {
+            return false;
+        }
+    }
+    let Ok(mut f) = fs::File::open(path) else {
+        return false;
+    };
+    let mut hdr = [0u8; 64];
+    let Ok(n) = f.read(&mut hdr) else {
+        return false;
+    };
+    if n < 4 {
+        return false;
+    }
+    is_compiled_binary_magic(&hdr[..n])
+}
+
+pub fn is_compiled_binary_magic(hdr: &[u8]) -> bool {
+    if hdr.len() < 4 {
+        return false;
+    }
+    // ELF (`\x7fELF`), WebAssembly (`\0asm`), Java `.class` / Mach-O fat (`\xca\xfe\xba\xbe`),
+    // Mach-O 32/64-bit little/big endian, or Windows PE/COFF (`MZ` with binary NUL bytes)
+    if hdr.starts_with(b"\x7fELF")
+        || hdr.starts_with(b"\0asm")
+        || matches!(
+            &hdr[..4],
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+        )
+    {
+        return true;
+    }
+    if hdr.starts_with(b"MZ") && hdr.contains(&0) {
+        return true;
+    }
+    false
+}
+
 fn is_auditable_customization_file(path: &Path, file_name: &str) -> bool {
     if is_lock_or_metadata_file(file_name) {
         return false;
@@ -851,7 +1026,7 @@ fn is_auditable_customization_file(path: &Path, file_name: &str) -> bool {
         return true;
     }
 
-    if has_script_extension(path) {
+    if has_script_extension(path) || is_compiled_binary_file(path) {
         return true;
     }
 
@@ -896,10 +1071,18 @@ fn is_auditable_customization_file(path: &Path, file_name: &str) -> bool {
 
 fn has_instruction_dir_ancestor(path: &Path) -> bool {
     path.components().any(|c| match c {
-        Component::Normal(s) => matches!(
-            s.to_str(),
-            Some(".clinerules" | "rules" | "workflows" | "instructions" | "prompts" | "commands")
-        ),
+        Component::Normal(s) => s.to_str().is_some_and(|name| {
+            matches!(
+                name,
+                ".clinerules"
+                    | "rules"
+                    | "workflows"
+                    | "instructions"
+                    | "prompts"
+                    | "commands"
+                    | "steering"
+            ) || name.starts_with("rules-")
+        }),
         _ => false,
     })
 }
@@ -923,6 +1106,7 @@ fn is_mcp_config_filename(path: &Path, file_name: &str) -> bool {
             || path_str.contains(".claude")
             || (file_name == "settings.json"
                 && (path_str.contains(".vscode")
+                    || path_str.contains(".zed")
                     || path_str.contains("User/settings.json")
                     || path_str.contains("User\\settings.json")))
         {
@@ -1121,6 +1305,48 @@ pub fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+/// Returns `true` when `path` resolves to `$HOME/.claude.json` even when invoked via a relative
+/// path (`.claude.json`, `./.claude.json`) or through a symlinked `$HOME` directory.
+pub fn is_home_claude_state_file(path: &Path) -> bool {
+    let Some(home) = home_dir() else {
+        return false;
+    };
+    let target = home.join(".claude.json");
+    if path == target {
+        return true;
+    }
+    let abs_candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Ok(cwd) = env::current_dir() {
+        cwd.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    if abs_candidate == target {
+        return true;
+    }
+    match (fs::canonicalize(&abs_candidate), fs::canonicalize(&target)) {
+        (Ok(c_path), Ok(c_target)) => c_path == c_target,
+        _ => {
+            let canon_parent_join = |p: &Path| -> Option<PathBuf> {
+                let fname = p.file_name()?;
+                let parent = p
+                    .parent()
+                    .filter(|pr| !pr.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                Some(fs::canonicalize(parent).ok()?.join(fname))
+            };
+            match (
+                canon_parent_join(&abs_candidate),
+                canon_parent_join(&target),
+            ) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+        }
+    }
 }
 
 pub fn shorten_home(path: &Path) -> String {

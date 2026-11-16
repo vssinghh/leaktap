@@ -220,7 +220,8 @@ fn scan_single_file_impl(
     let mut line_num = 0usize;
     let mut total_bytes = 0u64;
     let mut hits = Vec::new();
-    let mut doc_gcp_sa_markers: Option<bool> = None;
+    let mut doc_hints: Option<crate::rules::DocHints> = None;
+    let mut k8s_tracker = crate::rules::K8sDataTracker::default();
 
     loop {
         buf.clear();
@@ -264,12 +265,14 @@ fn scan_single_file_impl(
                         }
                     }
                 }
-                return None;
+                return scan_binary_strings_as(disk_path, logical_path, &display_file, engine);
             }
+        } else if buf.contains(&0) {
+            return scan_binary_strings_as(disk_path, logical_path, &display_file, engine);
         }
 
-        // Coalesce physical multi-line PEM & PGP private key blocks (including TOML/Python triple-quoted keys,
-        // without crossing JSONL line boundaries)
+        // Coalesce physical multi-line PEM/PGP/PuTTY private keys, wrapped Base64, YAML block scalars,
+        // and structured `xxd` / `od -tx1` / `hexdump -C` blocks without crossing JSONL line boundaries.
         if is_multiline_pem_header(&buf) {
             while buf.len() < 32 * 1024 {
                 let prev_len = buf.len();
@@ -283,6 +286,71 @@ fn scan_single_file_impl(
                             break;
                         }
                         if !is_pem_or_pgp_continuation_line(added) {
+                            pending_line = Some((added.to_vec(), line_num));
+                            buf.truncate(prev_len);
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        } else if is_multiline_putty_header(&buf) {
+            while buf.len() < 32 * 1024 {
+                let prev_len = buf.len();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(extra) => {
+                        line_num += 1;
+                        total_bytes += extra as u64;
+                        let added = &buf[prev_len..];
+                        if contains_subslice(added, b"Private-MAC:")
+                            || contains_subslice(added, b"Private-Hash:")
+                        {
+                            break;
+                        }
+                        if !is_putty_continuation_line(added) {
+                            pending_line = Some((added.to_vec(), line_num));
+                            buf.truncate(prev_len);
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        } else if let Some(parent_indent) = yaml_block_scalar_parent_indent(&buf) {
+            while buf.len() < 32 * 1024 {
+                let prev_len = buf.len();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(extra) => {
+                        line_num += 1;
+                        total_bytes += extra as u64;
+                        let added = &buf[prev_len..];
+                        if !is_yaml_block_scalar_continuation(added, parent_indent) {
+                            pending_line = Some((added.to_vec(), line_num));
+                            buf.truncate(prev_len);
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        } else if std::str::from_utf8(&buf)
+            .ok()
+            .is_some_and(crate::rules::is_hexdump_line)
+        {
+            while buf.len() < 32 * 1024 {
+                let prev_len = buf.len();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(extra) => {
+                        line_num += 1;
+                        total_bytes += extra as u64;
+                        let added = &buf[prev_len..];
+                        let is_cont = std::str::from_utf8(added)
+                            .ok()
+                            .is_some_and(crate::rules::is_hexdump_line);
+                        if !is_cont {
                             pending_line = Some((added.to_vec(), line_num));
                             buf.truncate(prev_len);
                             break;
@@ -320,12 +388,36 @@ fn scan_single_file_impl(
         }
 
         let text = String::from_utf8_lossy(&buf);
-        let has_gcp_sa = if text.contains("private_key_id") {
-            *doc_gcp_sa_markers.get_or_insert_with(|| file_has_gcp_sa_markers(disk_path))
+        let needs_doc_hints = doc_hints.is_some()
+            || text.contains("private_key_id")
+            || text.contains("\"kty\"")
+            || text.contains("'kty'")
+            || text.contains("\"d\"")
+            || text.contains("\"k\"")
+            || text.contains("kind:")
+            || text.contains("\"kind\"")
+            || text.contains("data:")
+            || text.contains("stringData:");
+        let mut line_hints = if needs_doc_hints {
+            *doc_hints.get_or_insert_with(|| file_doc_hints(disk_path))
         } else {
-            false
+            crate::rules::DocHints::default()
         };
-        for m in engine.scan_text_with_doc_hint(&text, Some(logical_path), has_gcp_sa) {
+        if line_hints.is_k8s_secret_manifest
+            || k8s_tracker.is_tracking()
+            || text.contains("kind:")
+            || text.contains("\"kind\"")
+        {
+            for sub in text.lines() {
+                let (in_d, in_sd) = k8s_tracker.observe_line(sub);
+                line_hints.in_k8s_data_entry |= in_d;
+                line_hints.in_k8s_string_data_entry |= in_sd;
+            }
+            line_hints.is_k8s_secret_manifest =
+                k8s_tracker.is_active_secret_doc(line_hints.is_k8s_secret_manifest);
+        }
+
+        for m in engine.scan_text_with_hints(&text, Some(logical_path), line_hints) {
             let (hit_line, hit_col) = compute_line_and_column(&text, start_line, m.start);
             hits.push(FileHit {
                 file: logical_path.to_path_buf(),
@@ -373,10 +465,89 @@ pub fn contains_gcp_sa_markers(text: &str) -> bool {
 }
 
 pub fn file_has_gcp_sa_markers(path: &Path) -> bool {
+    file_doc_hints(path).has_gcp_sa
+}
+
+pub fn file_doc_hints(path: &Path) -> crate::rules::DocHints {
     let Ok(text) = read_text_auto_encoding(path, 4 * 1024 * 1024) else {
-        return false;
+        return crate::rules::DocHints::default();
     };
-    contains_gcp_sa_markers(&text)
+    crate::rules::DocHints::from_text(&text)
+}
+
+/// Scans printable ASCII strings (`>= 12` bytes) inside compiled ELF/Mach-O/PE/Wasm or binary files
+/// up to 32 MiB so hardcoded secrets (`sk_live_...`, `AKIA...`) in hook/MCP/plugin binaries are detected.
+fn scan_binary_strings_as(
+    disk_path: &Path,
+    logical_path: &Path,
+    display_file: &str,
+    engine: &RuleEngine,
+) -> Option<PerFileResult> {
+    let meta = fs::metadata(disk_path).ok()?;
+    if meta.len() > 32 * 1024 * 1024 {
+        return None;
+    }
+    let mut file = File::open(disk_path).ok()?;
+    let mut io_buf = vec![0u8; 64 * 1024];
+    let mut run_buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut hits = Vec::new();
+    let mut total_bytes = 0u64;
+
+    let flush_run = |run: &[u8], out: &mut Vec<FileHit>| {
+        let Ok(s) = std::str::from_utf8(run) else {
+            return;
+        };
+        for m in engine.scan_text_for_path(s, Some(logical_path)) {
+            if m.category != RuleCategory::Secret {
+                continue;
+            }
+            out.push(FileHit {
+                file: logical_path.to_path_buf(),
+                display_file: display_file.to_string(),
+                line: 1,
+                column: 1,
+                rule_id: m.rule_id,
+                rule_name: m.rule_name,
+                severity: m.severity,
+                category: m.category,
+                masked: m.masked,
+                fingerprint: m.fingerprint,
+                secret_key: m.secret_key,
+            });
+        }
+    };
+
+    loop {
+        let n = match file.read(&mut io_buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        total_bytes += n as u64;
+        for &b in &io_buf[..n] {
+            if b.is_ascii_graphic() || matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                run_buf.push(b);
+                if run_buf.len() >= SQLITE_MAX_RUN_BYTES {
+                    flush_run(&run_buf, &mut hits);
+                    let keep = run_buf.len().saturating_sub(SQLITE_OVERLAP_BYTES);
+                    run_buf.drain(0..keep);
+                }
+            } else {
+                if run_buf.len() >= 12 {
+                    flush_run(&run_buf, &mut hits);
+                }
+                run_buf.clear();
+            }
+        }
+    }
+    if run_buf.len() >= 12 {
+        flush_run(&run_buf, &mut hits);
+    }
+
+    Some(PerFileResult {
+        bytes: total_bytes,
+        hits,
+    })
 }
 
 /// Scans `.claude.json` prompt history and pasted contents while skipping CLI login metadata
@@ -392,8 +563,8 @@ fn scan_claude_json_file(
     let mut parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let root = parsed.as_object_mut()?;
 
-    let is_home_file =
-        crate::discovery::home_dir().is_some_and(|h| logical_path == h.join(".claude.json"));
+    let is_home_file = crate::discovery::is_home_claude_state_file(logical_path)
+        || crate::discovery::is_home_claude_state_file(disk_path);
     if is_home_file {
         root.remove("oauthAccount");
         root.remove("customApiKeyResponses");
@@ -423,8 +594,8 @@ fn scan_claude_json_file(
 
     let mut hits = Vec::new();
     for s in leaf_strings {
-        let has_gcp_sa = s.contains("private_key_id") && contains_gcp_sa_markers(s);
-        for m in engine.scan_text_with_doc_hint(s, Some(logical_path), has_gcp_sa) {
+        let hints = crate::rules::DocHints::from_text(s);
+        for m in engine.scan_text_with_hints(s, Some(logical_path), hints) {
             let needle = &s[m.start..m.end];
             let (line, column) = find_line_and_col_of_substr(&raw, needle).unwrap_or((1, 1));
             hits.push(FileHit {
@@ -590,17 +761,18 @@ fn scan_utf16_file_as(
     }
     let raw = fs::read(disk_path).ok()?;
     let decoded = decode_utf16_bytes(&raw);
-    let doc_has_gcp_sa = decoded.contains("private_key_id") && contains_gcp_sa_markers(&decoded);
+    let base_hints = crate::rules::DocHints::from_text(&decoded);
+    let mut k8s_tracker = crate::rules::K8sDataTracker::default();
     let lines: Vec<&str> = decoded.lines().collect();
     let mut hits = Vec::new();
     let mut i = 0usize;
     while i < lines.len() {
         let start_line = i + 1;
         let first = lines[i];
+        let mut block = String::from(first);
+        i += 1;
         if is_multiline_pem_header(first.as_bytes()) {
-            let mut block = String::from(first);
             block.push('\n');
-            i += 1;
             while i < lines.len() && block.len() < 32 * 1024 {
                 let next = lines[i];
                 if next.contains("-----END ") {
@@ -616,27 +788,47 @@ fn scan_utf16_file_as(
                 block.push('\n');
                 i += 1;
             }
-            for m in engine.scan_text_with_doc_hint(&block, Some(logical_path), doc_has_gcp_sa) {
-                let (hit_line, hit_col) = compute_line_and_column(&block, start_line, m.start);
-                hits.push(FileHit {
-                    file: logical_path.to_path_buf(),
-                    display_file: display_file.to_string(),
-                    line: hit_line,
-                    column: hit_col,
-                    rule_id: m.rule_id,
-                    rule_name: m.rule_name,
-                    severity: m.severity,
-                    category: m.category,
-                    masked: m.masked,
-                    fingerprint: m.fingerprint,
-                    secret_key: m.secret_key,
-                });
-            }
-            continue;
-        } else if is_wrapped_base64_start_line(first.as_bytes()) {
-            let mut block = String::from(first);
+        } else if is_multiline_putty_header(first.as_bytes()) {
             block.push('\n');
-            i += 1;
+            while i < lines.len() && block.len() < 32 * 1024 {
+                let next = lines[i];
+                if next.contains("Private-MAC:") || next.contains("Private-Hash:") {
+                    block.push_str(next);
+                    block.push('\n');
+                    i += 1;
+                    break;
+                }
+                if !is_putty_continuation_line(next.as_bytes()) {
+                    break;
+                }
+                block.push_str(next);
+                block.push('\n');
+                i += 1;
+            }
+        } else if let Some(parent_indent) = yaml_block_scalar_parent_indent(first.as_bytes()) {
+            block.push('\n');
+            while i < lines.len() && block.len() < 32 * 1024 {
+                let next = lines[i];
+                if !is_yaml_block_scalar_continuation(next.as_bytes(), parent_indent) {
+                    break;
+                }
+                block.push_str(next);
+                block.push('\n');
+                i += 1;
+            }
+        } else if crate::rules::is_hexdump_line(first) {
+            block.push('\n');
+            while i < lines.len() && block.len() < 32 * 1024 {
+                let next = lines[i];
+                if !crate::rules::is_hexdump_line(next) {
+                    break;
+                }
+                block.push_str(next);
+                block.push('\n');
+                i += 1;
+            }
+        } else if is_wrapped_base64_start_line(first.as_bytes()) {
+            block.push('\n');
             while i < lines.len() && block.len() < MULTILINE_B64_COALESCE_CAP {
                 let next = lines[i];
                 if !is_wrapped_base64_continuation_line(next.as_bytes()) {
@@ -654,27 +846,24 @@ fn scan_utf16_file_as(
                     break;
                 }
             }
-            for m in engine.scan_text_with_doc_hint(&block, Some(logical_path), doc_has_gcp_sa) {
-                let (hit_line, hit_col) = compute_line_and_column(&block, start_line, m.start);
-                hits.push(FileHit {
-                    file: logical_path.to_path_buf(),
-                    display_file: display_file.to_string(),
-                    line: hit_line,
-                    column: hit_col,
-                    rule_id: m.rule_id,
-                    rule_name: m.rule_name,
-                    severity: m.severity,
-                    category: m.category,
-                    masked: m.masked,
-                    fingerprint: m.fingerprint,
-                    secret_key: m.secret_key,
-                });
-            }
-            continue;
         }
-        i += 1;
-        for m in engine.scan_text_with_doc_hint(first, Some(logical_path), doc_has_gcp_sa) {
-            let (hit_line, hit_col) = compute_line_and_column(first, start_line, m.start);
+
+        let mut line_hints = base_hints;
+        if line_hints.is_k8s_secret_manifest
+            || k8s_tracker.is_tracking()
+            || block.contains("kind:")
+            || block.contains("\"kind\"")
+        {
+            for sub in block.lines() {
+                let (in_d, in_sd) = k8s_tracker.observe_line(sub);
+                line_hints.in_k8s_data_entry |= in_d;
+                line_hints.in_k8s_string_data_entry |= in_sd;
+            }
+            line_hints.is_k8s_secret_manifest =
+                k8s_tracker.is_active_secret_doc(line_hints.is_k8s_secret_manifest);
+        }
+        for m in engine.scan_text_with_hints(&block, Some(logical_path), line_hints) {
+            let (hit_line, hit_col) = compute_line_and_column(&block, start_line, m.start);
             hits.push(FileHit {
                 file: logical_path.to_path_buf(),
                 display_file: display_file.to_string(),
@@ -944,8 +1133,11 @@ fn scan_sqlite_chunk(
     hits: &mut Vec<FileHit>,
 ) {
     let text = String::from_utf8_lossy(chunk);
-    let has_gcp_sa = text.contains("private_key_id") && contains_gcp_sa_markers(&text);
-    for m in engine.scan_text_with_doc_hint(&text, Some(path), has_gcp_sa) {
+    let mut hints = crate::rules::DocHints::from_text(&text);
+    if text.contains("private_key_id") && contains_gcp_sa_markers(&text) {
+        hints.has_gcp_sa = true;
+    }
+    for m in engine.scan_text_with_hints(&text, Some(path), hints) {
         hits.push(FileHit {
             file: path.to_path_buf(),
             display_file: display_file.to_string(),
@@ -1139,4 +1331,87 @@ pub fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+pub fn is_multiline_putty_header(line: &[u8]) -> bool {
+    let trimmed = trim_ascii_bytes(line);
+    let is_json_line =
+        (trimmed.starts_with(b"{") || trimmed.starts_with(b"[")) && trimmed.contains(&b'"');
+    !is_json_line
+        && !contains_subslice(line, b"\\n")
+        && contains_subslice(trimmed, b"PuTTY-User-Key-File-")
+}
+
+pub fn is_putty_continuation_line(line: &[u8]) -> bool {
+    let trimmed = trim_ascii_bytes(line);
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Some(colon_pos) = trimmed.iter().position(|&b| b == b':') {
+        let key = &trimmed[..colon_pos];
+        if !key.is_empty()
+            && key.len() <= 32
+            && key.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return true;
+        }
+    }
+    let stripped = trim_trailing_quotes(trimmed);
+    stripped.len() >= 4
+        && stripped
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
+pub fn yaml_block_scalar_parent_indent(line: &[u8]) -> Option<usize> {
+    let indent = line
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    let rest = trim_ascii_bytes(&line[indent..]);
+    if rest.is_empty() || rest.starts_with(b"#") {
+        return None;
+    }
+    let key_part = rest.strip_prefix(b"- ").unwrap_or(rest);
+    let colon_pos = key_part.iter().position(|&b| b == b':')?;
+    let key = trim_ascii_bytes(&key_part[..colon_pos]);
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'"' | b'\''))
+    {
+        return None;
+    }
+    let rhs = trim_ascii_bytes(&key_part[colon_pos + 1..]);
+    let (&style, after_style) = rhs.split_first()?;
+    if style != b'|' && style != b'>' {
+        return None;
+    }
+    let mut idx = 0usize;
+    while idx < after_style.len() && idx < 2 {
+        let b = after_style[idx];
+        if b == b'-' || b == b'+' || (b'1'..=b'9').contains(&b) {
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+    let tail = trim_ascii_bytes(&after_style[idx..]);
+    if tail.is_empty() || tail.starts_with(b"#") {
+        Some(indent)
+    } else {
+        None
+    }
+}
+
+pub fn is_yaml_block_scalar_continuation(line: &[u8], parent_indent: usize) -> bool {
+    if trim_ascii_bytes(line).is_empty() {
+        return true;
+    }
+    let indent = line
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    indent > parent_indent
 }

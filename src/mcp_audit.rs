@@ -68,6 +68,8 @@ const SENSITIVE_MOUNT_SUBPATHS: &[(&str, &str)] = &[
     ("~/.aws", "~/.aws"),
     ("$home/.aws", "$HOME/.aws"),
     ("${home}/.aws", "${HOME}/.aws"),
+    ("/.azure", "~/.azure"),
+    ("~/.azure", "~/.azure"),
     ("/.gnupg", "~/.gnupg"),
     ("~/.gnupg", "~/.gnupg"),
     ("/.kube", "~/.kube"),
@@ -80,6 +82,19 @@ const SENSITIVE_MOUNT_SUBPATHS: &[(&str, &str)] = &[
     ("~/.npmrc", "~/.npmrc"),
     ("/.pypirc", "~/.pypirc"),
     ("~/.pypirc", "~/.pypirc"),
+    ("/.pgpass", "~/.pgpass"),
+    ("~/.pgpass", "~/.pgpass"),
+    ("/.my.cnf", "~/.my.cnf"),
+    ("~/.my.cnf", "~/.my.cnf"),
+    ("/.vault-token", "~/.vault-token"),
+    ("~/.vault-token", "~/.vault-token"),
+    ("/.databrickscfg", "~/.databrickscfg"),
+    ("~/.databrickscfg", "~/.databrickscfg"),
+    ("/.s3cfg", "~/.s3cfg"),
+    ("~/.s3cfg", "~/.s3cfg"),
+    ("/.terraformrc", "~/.terraformrc"),
+    ("~/.terraformrc", "~/.terraformrc"),
+    ("credentials.tfrc.json", "credentials.tfrc.json"),
     ("/.docker", "~/.docker"),
     ("~/.docker", "~/.docker"),
     ("/.netrc", "~/.netrc"),
@@ -209,7 +224,7 @@ fn audit_single_mcp_file(
             }
         }
         return;
-    }
+    };
 
     let Ok(raw) = crate::scanner::read_text_auto_encoding(disk_path, MAX_MCP_CONFIG_BYTES) else {
         return;
@@ -227,8 +242,8 @@ fn audit_single_mcp_file(
         return;
     };
 
-    // 1. Top-level `mcpServers` (JSON), `mcp_servers` (Codex TOML), or `servers` (VS Code `mcp.json`)
-    for top_key in ["mcpServers", "mcp_servers", "servers"] {
+    // 1. Top-level `mcpServers` (JSON), `mcp_servers` (Codex TOML), `servers` (VS Code `mcp.json`), or `context_servers` (Zed `settings.json`)
+    for top_key in ["mcpServers", "mcp_servers", "servers", "context_servers"] {
         if let Some(servers) = json.get(top_key).and_then(|v| v.as_object()) {
             for (name, spec) in servers {
                 inspect_server(
@@ -267,10 +282,10 @@ fn audit_single_mcp_file(
         }
     }
 
-    // 2. Project-scoped MCP blocks (`projects.<workspace>.mcpServers` / `mcp_servers`)
+    // 2. Project-scoped MCP blocks (`projects.<workspace>.mcpServers` / `mcp_servers` / `context_servers`)
     if let Some(projects) = json.get("projects").and_then(|v| v.as_object()) {
         for (_proj_path, proj_val) in projects {
-            for nested_key in ["mcpServers", "mcp_servers"] {
+            for nested_key in ["mcpServers", "mcp_servers", "context_servers"] {
                 if let Some(servers) = proj_val.get(nested_key).and_then(|v| v.as_object()) {
                     for (name, spec) in servers {
                         inspect_server(
@@ -336,13 +351,35 @@ fn audit_vscode_settings_extras(
     let Some(root_obj) = json.as_object() else {
         return;
     };
-    let is_workspace_cfg = path
-        .components()
-        .any(|c| c.as_os_str().to_str() == Some(".vscode"));
+    let is_workspace_cfg = path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".vscode" | ".zed" | ".cursor" | ".windsurf")
+        )
+    }) && !crate::plugin_audit::is_user_home_global_agent_path(path);
     let mut seen_fp: std::collections::HashSet<String> =
         out.iter().map(|f| f.fingerprint.clone()).collect();
 
-    // 1. Audit `terminal.integrated.env.{linux,osx,windows}` (dotted keys and nested objects)
+    // 1. Audit `terminal.integrated.env.{linux,osx,windows}` (VS Code) and `terminal.env` (Zed)
+    if let Some(zed_env_obj) = root_obj
+        .get("terminal")
+        .and_then(|v| v.get("env"))
+        .and_then(|v| v.as_object())
+    {
+        crate::plugin_audit::audit_env_object_overrides(
+            path,
+            display,
+            raw_file,
+            zed_env_obj,
+            "terminal.env",
+            "IDE terminal settings",
+            is_workspace_cfg,
+            true,
+            engine,
+            out,
+            &mut seen_fp,
+        );
+    }
     for platform in ["linux", "osx", "windows"] {
         let dotted_key = format!("terminal.integrated.env.{platform}");
         if let Some(env_obj) = root_obj.get(&dotted_key).and_then(|v| v.as_object()) {
@@ -609,7 +646,7 @@ fn audit_codex_toml_extras(
     for (top_k, top_v) in root_obj {
         if matches!(
             top_k.as_str(),
-            "mcp_servers" | "mcpServers" | "servers" | "projects" | "env"
+            "mcp_servers" | "mcpServers" | "servers" | "context_servers" | "projects" | "env"
         ) {
             continue;
         }
@@ -696,10 +733,20 @@ fn inspect_server(
     out: &mut Vec<McpFinding>,
 ) {
     let server_line = find_line_number(raw_file, server_name);
-    let command = spec.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let cmd_obj = spec.get("command").and_then(|v| v.as_object());
+    let command = spec
+        .get("command")
+        .and_then(|v| v.as_str())
+        .or_else(|| cmd_obj.and_then(|o| o.get("path")).and_then(|v| v.as_str()))
+        .unwrap_or("");
     let args: Vec<&str> = spec
         .get("args")
         .and_then(|v| v.as_array())
+        .or_else(|| {
+            cmd_obj
+                .and_then(|o| o.get("args"))
+                .and_then(|v| v.as_array())
+        })
         .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
 
@@ -730,7 +777,7 @@ fn inspect_server(
         out,
     );
 
-    // Check 3: Plaintext hardcoded secrets in `env`, `headers`, or inline `args`
+    // Check 3: Plaintext hardcoded secrets in `env`, `command.env`, `settings`, `headers`, or inline `args`
     check_hardcoded_credentials(
         server_name,
         spec,
@@ -743,8 +790,16 @@ fn inspect_server(
         out,
     );
 
-    // Check 3b: Dangerous process execution / proxy / TLS / API base overrides in MCP `env`
-    if let Some(env_obj) = spec.get("env").and_then(|v| v.as_object()) {
+    // Check 3b: Dangerous process execution / proxy / TLS / API base overrides in MCP `env` or Zed `command.env`
+    for env_candidate in [
+        spec.get("env").and_then(|v| v.as_object()),
+        cmd_obj
+            .and_then(|o| o.get("env"))
+            .and_then(|v| v.as_object()),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let is_workspace_cfg = !crate::plugin_audit::is_user_home_global_agent_path(path);
         let mut seen_fp: std::collections::HashSet<String> =
             out.iter().map(|f| f.fingerprint.clone()).collect();
@@ -754,7 +809,7 @@ fn inspect_server(
             path,
             display,
             raw_file,
-            env_obj,
+            env_candidate,
             &scope_prefix,
             &context_noun,
             is_workspace_cfg,
@@ -814,12 +869,24 @@ fn emit_unpinned_pkg_finding(
         if out.iter().any(|f| f.fingerprint == fp) {
             return;
         }
+        let is_remote_url_or_git = pkg.starts_with("http://")
+            || pkg.starts_with("https://")
+            || pkg.starts_with("git+")
+            || pkg.starts_with("github:")
+            || pkg.starts_with("git://");
+        let sev = if is_remote_url_or_git {
+            Severity::High
+        } else {
+            Severity::Medium
+        };
         let msg = if has_auto_install {
             format!(
-                "Runs unpinned `{launcher_label} {pkg}` — pulls mutable remote code on start with local file/env access"
+                "Runs unpinned `{launcher_label} {pkg}` — pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
             )
         } else {
-            format!("Runs unpinned `{launcher_label} {pkg}` without an exact `x.y.z` version pin")
+            format!(
+                "Runs unpinned `{launcher_label} {pkg}` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+            )
         };
         out.push(McpFinding {
             rule_id: "mcp-unpinned-package",
@@ -827,7 +894,7 @@ fn emit_unpinned_pkg_finding(
             config_file: display.to_string(),
             config_path: path.to_path_buf(),
             line,
-            severity: Severity::High,
+            severity: sev,
             fingerprint: fp,
             message: msg,
         });
@@ -1130,14 +1197,24 @@ fn split_wrapper_tokens_lossy(script: &str) -> Vec<String> {
         .unwrap_or_else(|| script.split_whitespace().map(str::to_string).collect())
 }
 
-/// Peels up to 8 layers of process/environment launchers (`env` including `-u`/`-C`/`-S`,
-/// `busybox`/`toybox`, `nohup`, `setsid`, `time`, `nice`, `timeout`, `stdbuf`) so wrapped
-/// shell/interpreter invocations and unpinned package launchers cannot evade static inspection.
 fn unwrap_command_launchers(command: &str, args: &[&str]) -> (String, Vec<String>) {
+    let (cmd, unwrapped_args, _) = unwrap_command_launchers_with_priv(command, args);
+    (cmd, unwrapped_args)
+}
+
+/// Peels up to 12 layers of process, privilege, and environment launchers (`env` including
+/// `-u`/`-C`/`-S`, `sudo`, `doas`, `arch`, `caffeinate`, `direnv exec`, `xcrun`, `ionice`,
+/// `taskset`, `chrt`, `flock`, `busybox`/`toybox`, `nohup`, `setsid`, `time`, `nice`, `timeout`,
+/// `stdbuf`), returning `(effective_cmd, effective_args, privilege_escalation_tool)`.
+fn unwrap_command_launchers_with_priv(
+    command: &str,
+    args: &[&str],
+) -> (String, Vec<String>, Option<String>) {
     let mut cur_cmd = command.to_string();
     let mut cur_args: Vec<String> = args.iter().map(|&s| s.to_string()).collect();
+    let mut priv_tool: Option<String> = None;
 
-    for _layer in 0..8 {
+    for _layer in 0..12 {
         let base = normalized_cmd_base(&cur_cmd);
         match base.as_str() {
             "env" => {
@@ -1238,6 +1315,298 @@ fn unwrap_command_launchers(command: &str, args: &[&str]) -> (String, Vec<String
                     break;
                 }
                 if let Some((nc, na)) = unwrapped {
+                    cur_cmd = nc;
+                    cur_args = na;
+                    continue;
+                }
+                break;
+            }
+            "sudo" => {
+                priv_tool.get_or_insert_with(|| "sudo".to_string());
+                let mut i = 0usize;
+                let mut found = None;
+                while i < cur_args.len() {
+                    let a = cur_args[i].as_str();
+                    if a == "--" {
+                        if i + 1 < cur_args.len() {
+                            found = Some(i + 1);
+                        }
+                        break;
+                    }
+                    if matches!(
+                        a,
+                        "--user"
+                            | "--group"
+                            | "--host"
+                            | "--prompt"
+                            | "--role"
+                            | "--type"
+                            | "--close-from"
+                            | "--chdir"
+                            | "--chroot"
+                            | "--command-timeout"
+                            | "--other-user"
+                    ) {
+                        i += 2;
+                        continue;
+                    }
+                    if a.starts_with("--") {
+                        i += 1;
+                        continue;
+                    }
+                    if a.starts_with('-') && a.len() >= 2 {
+                        let shorts = &a[1..];
+                        let mut consumed = 1usize;
+                        for (c_idx, ch) in shorts.char_indices() {
+                            let rem = &shorts[c_idx + ch.len_utf8()..];
+                            if matches!(
+                                ch,
+                                'u' | 'g' | 'h' | 'p' | 'r' | 't' | 'C' | 'D' | 'R' | 'T' | 'U'
+                            ) {
+                                consumed = if rem.is_empty() { 2 } else { 1 };
+                                break;
+                            }
+                        }
+                        i += consumed;
+                        continue;
+                    }
+                    if a.contains('=') {
+                        i += 1;
+                        continue;
+                    }
+                    found = Some(i);
+                    break;
+                }
+                if let Some(pos) = found {
+                    let nc = cur_args[pos].clone();
+                    let na = cur_args[pos + 1..].to_vec();
+                    cur_cmd = nc;
+                    cur_args = na;
+                    continue;
+                }
+                break;
+            }
+            "doas" => {
+                priv_tool.get_or_insert_with(|| "doas".to_string());
+                let mut i = 0usize;
+                let mut found = None;
+                while i < cur_args.len() {
+                    let a = cur_args[i].as_str();
+                    if a == "--" {
+                        if i + 1 < cur_args.len() {
+                            found = Some(i + 1);
+                        }
+                        break;
+                    }
+                    if a.starts_with('-') && a.len() >= 2 {
+                        let shorts = &a[1..];
+                        let mut consumed = 1usize;
+                        for (c_idx, ch) in shorts.char_indices() {
+                            let rem = &shorts[c_idx + ch.len_utf8()..];
+                            if matches!(ch, 'u' | 'C') {
+                                consumed = if rem.is_empty() { 2 } else { 1 };
+                                break;
+                            }
+                        }
+                        i += consumed;
+                        continue;
+                    }
+                    found = Some(i);
+                    break;
+                }
+                if let Some(pos) = found {
+                    let nc = cur_args[pos].clone();
+                    let na = cur_args[pos + 1..].to_vec();
+                    cur_cmd = nc;
+                    cur_args = na;
+                    continue;
+                }
+                break;
+            }
+            "arch" | "caffeinate" | "xcrun" | "ionice" => {
+                let mut i = 0usize;
+                let mut found = None;
+                while i < cur_args.len() {
+                    let a = cur_args[i].as_str();
+                    if a == "--" {
+                        if i + 1 < cur_args.len() {
+                            found = Some(i + 1);
+                        }
+                        break;
+                    }
+                    let takes_val = match base.as_str() {
+                        "arch" => matches!(a, "-arch" | "-e"),
+                        "caffeinate" => matches!(a, "-t" | "-w"),
+                        "xcrun" => matches!(a, "--sdk" | "-sdk" | "--toolchain" | "-toolchain"),
+                        "ionice" => matches!(
+                            a,
+                            "-c" | "--class"
+                                | "-n"
+                                | "--classdata"
+                                | "-p"
+                                | "--pid"
+                                | "-P"
+                                | "--pgid"
+                                | "-u"
+                                | "--uid"
+                        ),
+                        _ => false,
+                    };
+                    if takes_val {
+                        i += 2;
+                        continue;
+                    }
+                    if a.starts_with('-') {
+                        i += 1;
+                        continue;
+                    }
+                    found = Some(i);
+                    break;
+                }
+                if let Some(pos) = found {
+                    let nc = cur_args[pos].clone();
+                    let na = cur_args[pos + 1..].to_vec();
+                    cur_cmd = nc;
+                    cur_args = na;
+                    continue;
+                }
+                break;
+            }
+            "direnv" => {
+                if cur_args.first().map(String::as_str) != Some("exec") {
+                    break;
+                }
+                let mut i = 1usize;
+                let mut saw_dir = false;
+                let mut found = None;
+                while i < cur_args.len() {
+                    let a = cur_args[i].as_str();
+                    if a == "--" {
+                        let start = if saw_dir { i + 1 } else { i + 2 };
+                        if start < cur_args.len() {
+                            found = Some(start);
+                        }
+                        break;
+                    }
+                    if !saw_dir {
+                        if a.starts_with("--") && !a.contains('=') {
+                            i += 2;
+                            continue;
+                        }
+                        if a.starts_with('-') {
+                            i += 1;
+                            continue;
+                        }
+                        saw_dir = true;
+                        i += 1;
+                        continue;
+                    }
+                    found = Some(i);
+                    break;
+                }
+                if let Some(pos) = found {
+                    let nc = cur_args[pos].clone();
+                    let na = cur_args[pos + 1..].to_vec();
+                    cur_cmd = nc;
+                    cur_args = na;
+                    continue;
+                }
+                break;
+            }
+            "taskset" | "chrt" => {
+                let mut i = 0usize;
+                let mut saw_mask_or_prio = false;
+                let mut found = None;
+                while i < cur_args.len() {
+                    let a = cur_args[i].as_str();
+                    if a == "--" {
+                        let start = if saw_mask_or_prio { i + 1 } else { i + 2 };
+                        if start < cur_args.len() {
+                            found = Some(start);
+                        }
+                        break;
+                    }
+                    if !saw_mask_or_prio {
+                        if base == "chrt"
+                            && matches!(
+                                a,
+                                "-T" | "--sched-runtime"
+                                    | "-P"
+                                    | "--sched-period"
+                                    | "-D"
+                                    | "--sched-deadline"
+                            )
+                        {
+                            i += 2;
+                            continue;
+                        }
+                        if a.starts_with('-') {
+                            i += 1;
+                            continue;
+                        }
+                        saw_mask_or_prio = true;
+                        i += 1;
+                        continue;
+                    }
+                    found = Some(i);
+                    break;
+                }
+                if let Some(pos) = found {
+                    let nc = cur_args[pos].clone();
+                    let na = cur_args[pos + 1..].to_vec();
+                    cur_cmd = nc;
+                    cur_args = na;
+                    continue;
+                }
+                break;
+            }
+            "flock" => {
+                let mut i = 0usize;
+                let mut saw_lockfile = false;
+                let mut found = None;
+                let mut shell_cmd_str: Option<String> = None;
+                while i < cur_args.len() {
+                    let a = cur_args[i].as_str();
+                    if a == "--" {
+                        let start = if saw_lockfile { i + 1 } else { i + 2 };
+                        if start < cur_args.len() {
+                            found = Some(start);
+                        }
+                        break;
+                    }
+                    if !saw_lockfile {
+                        if matches!(
+                            a,
+                            "-w" | "--timeout" | "--wait" | "-E" | "--conflict-exit-code"
+                        ) {
+                            i += 2;
+                            continue;
+                        }
+                        if a.starts_with('-') {
+                            i += 1;
+                            continue;
+                        }
+                        saw_lockfile = true;
+                        i += 1;
+                        continue;
+                    }
+                    if matches!(a, "-c" | "--command") {
+                        if let Some(s) = cur_args.get(i + 1) {
+                            shell_cmd_str = Some(s.clone());
+                        }
+                        break;
+                    }
+                    found = Some(i);
+                    break;
+                }
+                if let Some(sc) = shell_cmd_str {
+                    cur_cmd = "sh".to_string();
+                    cur_args = vec!["-c".to_string(), sc];
+                    continue;
+                }
+                if let Some(pos) = found {
+                    let nc = cur_args[pos].clone();
+                    let na = cur_args[pos + 1..].to_vec();
                     cur_cmd = nc;
                     cur_args = na;
                     continue;
@@ -1391,7 +1760,7 @@ fn unwrap_command_launchers(command: &str, args: &[&str]) -> (String, Vec<String
         }
     }
 
-    (cur_cmd, cur_args)
+    (cur_cmd, cur_args, priv_tool)
 }
 
 fn is_immutable_git_commit_sha(ver: &str) -> bool {
@@ -1790,7 +2159,8 @@ fn check_command_and_host_access(
     out: &mut Vec<McpFinding>,
 ) {
     let full_cmd = format!("{command} {}", args.join(" "));
-    let (eff_cmd_owned, eff_args_owned) = unwrap_command_launchers(command, args);
+    let (eff_cmd_owned, eff_args_owned, priv_wrapper) =
+        unwrap_command_launchers_with_priv(command, args);
     let eff_cmd = eff_cmd_owned.as_str();
     let eff_args_vec: Vec<&str> = eff_args_owned.iter().map(String::as_str).collect();
     let eff_args = eff_args_vec.as_slice();
@@ -1801,6 +2171,25 @@ fn check_command_and_host_access(
         unwrapped_cmd.to_ascii_lowercase()
     );
     let cmd_base = normalized_cmd_base(eff_cmd);
+
+    if let Some(priv_bin) = priv_wrapper {
+        out.push(McpFinding {
+            rule_id: "mcp-privilege-escalation",
+            server_name: server_name.to_string(),
+            config_file: display.to_string(),
+            config_path: path.to_path_buf(),
+            line: server_line,
+            severity: Severity::High,
+            fingerprint: fingerprint_match(
+                "mcp-privilege-escalation",
+                &format!("{display}:{server_name}:{priv_bin}"),
+            ),
+            message: format!(
+                "MCP server runs with elevated privileges via `{priv_bin}` (`{}`)",
+                unwrapped_cmd.trim()
+            ),
+        });
+    }
 
     // 1. Check inline RCE (`curl ... | sh`, `urllib.request` + `exec(...)`, `base64 -d | sh`, etc.)
     if let Some(snippet) =
@@ -2539,7 +2928,7 @@ fn check_container_runtime_execution(
                 config_file: display.to_string(),
                 config_path: path.to_path_buf(),
                 line,
-                severity: Severity::High,
+                severity: Severity::Medium,
                 fingerprint: fingerprint_match(
                     "mcp-unpinned-package",
                     &format!("{display}:{server_name}:{image}"),
@@ -2564,8 +2953,23 @@ fn check_hardcoded_credentials(
     engine: &RuleEngine,
     out: &mut Vec<McpFinding>,
 ) {
-    for field in ["env", "headers", "http_headers"] {
-        let Some(map) = spec.get(field).and_then(|v| v.as_object()) else {
+    let cmd_env = spec
+        .get("command")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("env"))
+        .and_then(|v| v.as_object());
+    let candidate_maps = [
+        ("env", spec.get("env").and_then(|v| v.as_object())),
+        ("command.env", cmd_env),
+        ("settings", spec.get("settings").and_then(|v| v.as_object())),
+        ("headers", spec.get("headers").and_then(|v| v.as_object())),
+        (
+            "http_headers",
+            spec.get("http_headers").and_then(|v| v.as_object()),
+        ),
+    ];
+    for (field, map_opt) in candidate_maps {
+        let Some(map) = map_opt else {
             continue;
         };
 

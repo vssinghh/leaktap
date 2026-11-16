@@ -2,11 +2,10 @@ use crate::config::PolicyConfig;
 use crate::discovery::{has_agent_session_ancestor, shorten_home};
 use crate::rules::{redact_replacement, RuleEngine};
 use crate::scanner::{
-    contains_gcp_sa_markers, contains_subslice, count_sqlite_secret_hits,
-    decode_utf16_with_endianness, encode_utf16_with_endianness, file_has_gcp_sa_markers,
-    is_multiline_pem_header, is_pem_or_pgp_continuation_line, is_sqlite_extension,
-    is_sqlite_or_wal_magic, is_wrapped_base64_continuation_line, is_wrapped_base64_start_line,
-    looks_like_utf16, MULTILINE_B64_COALESCE_CAP,
+    contains_subslice, count_sqlite_secret_hits, decode_utf16_with_endianness,
+    encode_utf16_with_endianness, is_multiline_pem_header, is_pem_or_pgp_continuation_line,
+    is_sqlite_extension, is_sqlite_or_wal_magic, is_wrapped_base64_continuation_line,
+    is_wrapped_base64_start_line, looks_like_utf16, MULTILINE_B64_COALESCE_CAP,
 };
 use serde_json::Value;
 use std::fs::{self, File};
@@ -264,7 +263,7 @@ fn process_claude_json_file(
         return Ok(None);
     };
 
-    let is_home_file = crate::discovery::home_dir().is_some_and(|h| path == h.join(".claude.json"));
+    let is_home_file = crate::discovery::is_home_claude_state_file(path);
     let saved_oauth = if is_home_file {
         root.remove("oauthAccount")
     } else {
@@ -362,8 +361,9 @@ fn redact_utf8_stream<R: BufRead>(
     let mut transformed = Vec::new();
     let mut redactions = 0usize;
     let mut line_idx = 0usize;
-    let mut doc_gcp_sa_markers: Option<bool> = None;
-    let mut saw_gcp_sa_in_stream = false;
+    let mut doc_hints: Option<crate::rules::DocHints> = None;
+    let mut stream_hints = crate::rules::DocHints::default();
+    let mut k8s_tracker = crate::rules::K8sDataTracker::default();
 
     loop {
         raw_buf.clear();
@@ -381,7 +381,7 @@ fn redact_utf8_stream<R: BufRead>(
             return Ok((Vec::new(), 0, true));
         }
 
-        // Coalesce physical multi-line PEM/PGP blocks and wrapped Base64 lines safely
+        // Coalesce physical multi-line PEM/PGP/PuTTY blocks, YAML block scalars, hexdumps, and wrapped Base64 lines safely
         if is_multiline_pem_header(&raw_buf) {
             while raw_buf.len() < 32 * 1024 {
                 let prev_len = raw_buf.len();
@@ -395,6 +395,64 @@ fn redact_utf8_stream<R: BufRead>(
                     break;
                 }
                 if !is_pem_or_pgp_continuation_line(added) {
+                    pending_line = Some(added.to_vec());
+                    raw_buf.truncate(prev_len);
+                    break;
+                }
+            }
+        } else if crate::scanner::is_multiline_putty_header(&raw_buf) {
+            while raw_buf.len() < 32 * 1024 {
+                let prev_len = raw_buf.len();
+                let extra = reader.read_until(b'\n', &mut raw_buf)?;
+                if extra == 0 {
+                    break;
+                }
+                line_idx += 1;
+                let added = &raw_buf[prev_len..];
+                if contains_subslice(added, b"Private-MAC:")
+                    || contains_subslice(added, b"Private-Hash:")
+                {
+                    break;
+                }
+                if !crate::scanner::is_putty_continuation_line(added) {
+                    pending_line = Some(added.to_vec());
+                    raw_buf.truncate(prev_len);
+                    break;
+                }
+            }
+        } else if let Some(parent_indent) =
+            crate::scanner::yaml_block_scalar_parent_indent(&raw_buf)
+        {
+            while raw_buf.len() < 32 * 1024 {
+                let prev_len = raw_buf.len();
+                let extra = reader.read_until(b'\n', &mut raw_buf)?;
+                if extra == 0 {
+                    break;
+                }
+                line_idx += 1;
+                let added = &raw_buf[prev_len..];
+                if !crate::scanner::is_yaml_block_scalar_continuation(added, parent_indent) {
+                    pending_line = Some(added.to_vec());
+                    raw_buf.truncate(prev_len);
+                    break;
+                }
+            }
+        } else if std::str::from_utf8(&raw_buf)
+            .ok()
+            .is_some_and(crate::rules::is_hexdump_line)
+        {
+            while raw_buf.len() < 32 * 1024 {
+                let prev_len = raw_buf.len();
+                let extra = reader.read_until(b'\n', &mut raw_buf)?;
+                if extra == 0 {
+                    break;
+                }
+                line_idx += 1;
+                let added = &raw_buf[prev_len..];
+                let is_cont = std::str::from_utf8(added)
+                    .ok()
+                    .is_some_and(crate::rules::is_hexdump_line);
+                if !is_cont {
                     pending_line = Some(added.to_vec());
                     raw_buf.truncate(prev_len);
                     break;
@@ -432,17 +490,38 @@ fn redact_utf8_stream<R: BufRead>(
             continue;
         };
 
-        if !saw_gcp_sa_in_stream && contains_gcp_sa_markers(line_str) {
-            saw_gcp_sa_in_stream = true;
-        }
-        let has_gcp_sa = if line_str.contains("private_key_id") {
-            saw_gcp_sa_in_stream
-                || *doc_gcp_sa_markers.get_or_insert_with(|| file_has_gcp_sa_markers(path))
+        stream_hints = stream_hints.merge(crate::rules::DocHints::from_text(line_str));
+        let needs_doc_hints = doc_hints.is_some()
+            || line_str.contains("private_key_id")
+            || line_str.contains("\"kty\"")
+            || line_str.contains("'kty'")
+            || line_str.contains("\"d\"")
+            || line_str.contains("\"k\"")
+            || line_str.contains("kind:")
+            || line_str.contains("\"kind\"")
+            || line_str.contains("data:")
+            || line_str.contains("stringData:");
+        let mut line_hints = if needs_doc_hints {
+            stream_hints
+                .merge(*doc_hints.get_or_insert_with(|| crate::scanner::file_doc_hints(path)))
         } else {
-            false
+            stream_hints
         };
+        if line_hints.is_k8s_secret_manifest
+            || k8s_tracker.is_tracking()
+            || line_str.contains("kind:")
+            || line_str.contains("\"kind\"")
+        {
+            for sub in line_str.lines() {
+                let (in_d, in_sd) = k8s_tracker.observe_line(sub);
+                line_hints.in_k8s_data_entry |= in_d;
+                line_hints.in_k8s_string_data_entry |= in_sd;
+            }
+            line_hints.is_k8s_secret_manifest =
+                k8s_tracker.is_active_secret_doc(line_hints.is_k8s_secret_manifest);
+        }
 
-        let all_matches = engine.scan_text_with_doc_hint(line_str, Some(path), has_gcp_sa);
+        let all_matches = engine.scan_text_with_hints(line_str, Some(path), line_hints);
         let matches: Vec<_> = all_matches
             .into_iter()
             .filter(|m| target_fingerprint.is_none_or(|fp| m.fingerprint == fp))
@@ -572,9 +651,9 @@ fn scrub_json_value(
 ) -> usize {
     match val {
         Value::String(s) => {
-            let has_gcp_sa = s.contains("private_key_id") && contains_gcp_sa_markers(s);
+            let hints = crate::rules::DocHints::from_text(s);
             let matches: Vec<_> = engine
-                .scan_text_with_doc_hint(s, Some(path), has_gcp_sa)
+                .scan_text_with_hints(s, Some(path), hints)
                 .into_iter()
                 .filter(|m| target_fingerprint.is_none_or(|fp| m.fingerprint == fp))
                 .collect();
@@ -618,6 +697,36 @@ fn scrub_json_value(
                     if !matches.is_empty() {
                         *pk_id = redact_replacement("gcp-service-account-key", pk_id);
                         count += 1;
+                    }
+                }
+            }
+            let kty = map
+                .get("kty")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let has_d = map.contains_key("d");
+            if matches!(kty.as_str(), "RSA" | "EC" | "OKP" | "oct") {
+                let jwk_hints = crate::rules::DocHints {
+                    has_jwk_asymmetric_kty: matches!(kty.as_str(), "RSA" | "EC" | "OKP"),
+                    has_jwk_d_param: has_d,
+                    has_jwk_oct_kty: kty == "oct",
+                    ..Default::default()
+                };
+                for jwk_field in ["d", "p", "q", "dp", "dq", "qi", "k"] {
+                    if let Some(Value::String(secret_val)) = map.get_mut(jwk_field) {
+                        let probe = format!("\"{jwk_field}\": \"{secret_val}\"");
+                        let matched = engine
+                            .scan_text_with_hints(&probe, Some(path), jwk_hints)
+                            .into_iter()
+                            .any(|m| {
+                                m.rule_id == "jwk-private-key"
+                                    && target_fingerprint.is_none_or(|fp| m.fingerprint == fp)
+                            });
+                        if matched {
+                            *secret_val = redact_replacement("jwk-private-key", secret_val);
+                            count += 1;
+                        }
                     }
                 }
             }
