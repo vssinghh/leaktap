@@ -226,7 +226,7 @@ fn is_mcp_config_filename(path: &Path, file_name: &str) -> bool {
 }
 
 fn is_transcript_filename(file_name: &str) -> bool {
-    // Skip package metadata, lockfiles, and CLI OAuth/login state files
+    // Skip package metadata, lockfiles, signed policy metadata, and CLI OAuth/login state files
     if matches!(
         file_name,
         "package.json"
@@ -242,7 +242,10 @@ fn is_transcript_filename(file_name: &str) -> bool {
             | "plugin-secrets.json"
             | "keybindings.json"
             | "onboarding.json"
-    ) {
+            | "policy-limits.json"
+    ) || file_name.ends_with(".signature.json")
+        || file_name.ends_with(".stamp.json")
+    {
         return false;
     }
 

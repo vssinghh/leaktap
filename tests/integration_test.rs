@@ -771,7 +771,7 @@ fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
         "expected streamed SSE chunk, got: {stdout}"
     );
 
-    // 2. Verify `~/.claude/backups/` is ignored during default scan
+    // 2. Verify `~/.claude/backups/` and signed policy JWS files (`*.signature.json`) are ignored during default scan
     let fake_home = TempDir::new().unwrap();
     let backups_dir = fake_home.path().join(".claude/backups");
     fs::create_dir_all(&backups_dir).unwrap();
@@ -781,6 +781,11 @@ fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
         format!(r#"{{"primaryApiKey":"{fake_anth_key}"}}"#),
     )
     .unwrap();
+    fs::write(
+        fake_home.path().join(".claude/policy-limits.json.signature.json"),
+        r#"{"jws":"eyJhbGciOiJFUzI1NiIsInR5cCI6ImNjLXNpZ25lZC1jYWNoZStqd3MifQ.eyJsaW1pdHMiOnt9fQ.sig_payload_9876543210"}"#,
+    )
+    .unwrap();
 
     let scan_out = Command::new(bin)
         .current_dir(tmp.path())
@@ -788,7 +793,7 @@ fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
         .env("HOME", fake_home.path())
         .env("USERPROFILE", fake_home.path())
         .output()
-        .expect("run scan with .claude/backups");
+        .expect("run scan with .claude/backups and policy-limits.json.signature.json");
     assert!(scan_out.status.success());
     let report: Value = serde_json::from_slice(&scan_out.stdout).unwrap();
     assert_eq!(report["summary"]["unique_secrets"], 0);
