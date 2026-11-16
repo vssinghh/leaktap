@@ -835,3 +835,216 @@ fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
         assert!(!tap_stdout.contains(&fake_stripe));
     }
 }
+
+fn encode_two_block_zstd_frame(part1: &[u8], part2: &[u8]) -> Vec<u8> {
+    let total = part1.len() + part2.len();
+    assert!(total < 256);
+    let mut out = Vec::new();
+    // RFC 8878 Zstandard frame magic + Single_Segment_Flag (0x20) + 1-byte Frame_Content_Size
+    out.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD, 0x20, total as u8]);
+    // Block 1: Last_Block = 0, Block_Type = Raw_Block (0), Block_Size = part1.len()
+    let bh1 = (part1.len() as u32) << 3;
+    out.extend_from_slice(&[bh1 as u8, (bh1 >> 8) as u8, (bh1 >> 16) as u8]);
+    out.extend_from_slice(part1);
+    // Block 2: Last_Block = 1, Block_Type = Raw_Block (0), Block_Size = part2.len()
+    let bh2 = ((part2.len() as u32) << 3) | 1;
+    out.extend_from_slice(&[bh2 as u8, (bh2 >> 8) as u8, (bh2 >> 16) as u8]);
+    out.extend_from_slice(part2);
+    out
+}
+
+#[test]
+fn codex_live_e2e_regressions_toml_mcp_zstd_websocket_and_chatgpt_routing() {
+    let bin = env!("CARGO_BIN_EXE_leaktap");
+    let fake_home = TempDir::new().unwrap();
+    let fake_workspace = TempDir::new().unwrap();
+
+    // 1. Codex `.codex/config.toml` MCP audit (env, http_headers, oauth_client_secret, safe bearer_token_env_var)
+    let codex_dir = fake_workspace.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let fake_gh = format!("ghp_{}", "x82KmN9pQrStUvWxYz0123456789AbCd91aB");
+    let fake_stripe = format!("sk_live_{}", "9f8a7B6c5D4e3F2g1H0jKlMnOp4c21");
+    let config_toml = format!(
+        r#"
+model = "gpt-5-codex"
+
+[mcp_servers.risky-toml]
+command = "npx"
+args = ["-y", "@community/db-mcp", "/"]
+oauth_client_secret = "{fake_stripe}"
+
+[mcp_servers.risky-toml.env]
+GITHUB_PERSONAL_TOKEN = "{fake_gh}"
+TELEMETRY_URL = "https://events.posthog.com/capture"
+
+[mcp_servers.risky-toml.http_headers]
+Authorization = "{fake_gh}"
+
+[mcp_servers.safe-toml]
+url = "https://mcp.acme.io/sse"
+bearer_token_env_var = "ACME_MCP_BEARER_TOKEN"
+"#
+    );
+    fs::write(codex_dir.join("config.toml"), config_toml).unwrap();
+
+    let scan_out = Command::new(bin)
+        .current_dir(fake_workspace.path())
+        .args(["scan", "--format", "json"])
+        .env("HOME", fake_home.path())
+        .env("USERPROFILE", fake_home.path())
+        .output()
+        .expect("run leaktap scan with .codex/config.toml");
+    assert!(
+        scan_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&scan_out.stderr)
+    );
+    let scan_json: Value = serde_json::from_slice(&scan_out.stdout).unwrap();
+    let mcp_arr = scan_json["mcp_risks"].as_array().unwrap();
+    assert!(
+        mcp_arr.iter().all(|f| f["server_name"] == "risky-toml"),
+        "safe-toml must have zero findings: {mcp_arr:?}"
+    );
+    assert_eq!(
+        mcp_arr.len(),
+        6,
+        "expected unpinned + broad-fs + telemetry + 3 credential hits, got: {mcp_arr:?}"
+    );
+
+    // 2. Verify WebSocket 426 fast-decline + `chatgpt-account-id` routing + zstd body inspection
+    let mock_chatgpt = TcpListener::bind("127.0.0.1:0").unwrap();
+    let chatgpt_port = mock_chatgpt.local_addr().unwrap().port();
+    let server_handle = serve_single_mock_http(
+        mock_chatgpt,
+        "text/event-stream",
+        "data: {\"type\":\"response.completed\",\"codex_ok\":true}\n\n",
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let wiretap_log = tmp.path().join("codex_zstd_tap.jsonl");
+    // Split `AKIA9Q2Z7KL8P4MX3RT9` across two zstd blocks so raw bytes do NOT contain the contiguous key
+    let zstd_payload = encode_two_block_zstd_frame(b"{\"input\":\"AKIA9Q2Z", b"7KL8P4MX3RT9\"}");
+    let raw_lossy = String::from_utf8_lossy(&zstd_payload);
+    assert!(
+        !raw_lossy.contains("AKIA9Q2Z7KL8P4MX3RT9"),
+        "raw zstd frame must split key across block boundary"
+    );
+    let payload_file = tmp.path().join("codex_body.zst");
+    fs::write(&payload_file, &zstd_payload).unwrap();
+
+    #[cfg(unix)]
+    let child_cmd: Vec<String> = vec![
+        "sh".into(),
+        "-c".into(),
+        format!(
+            "ws_code=$(curl -sS -o /dev/null -w '%{{http_code}}' --noproxy '*' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \"$OPENAI_BASE_URL/v1/responses\"); printf 'WS=%s\\n' \"$ws_code\"; curl -sS --noproxy '*' -X POST \"$OPENAI_BASE_URL/v1/responses\" -H 'chatgpt-account-id: acct_live_test' -H 'Content-Encoding: zstd' -H 'Content-Type: application/json' --data-binary @{}",
+            payload_file.display()
+        ),
+    ];
+
+    #[cfg(windows)]
+    let child_cmd: Vec<String> = vec![
+        "powershell".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        format!(
+            "$ws = curl.exe -sS -o NUL -w '%{{http_code}}' --noproxy '*' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \"$env:OPENAI_BASE_URL/v1/responses\"; Write-Output \"WS=$ws\"; curl.exe -sS --noproxy '*' -X POST \"$env:OPENAI_BASE_URL/v1/responses\" -H 'chatgpt-account-id: acct_live_test' -H 'Content-Encoding: zstd' -H 'Content-Type: application/json' --data-binary \"@{}\"",
+            payload_file.display()
+        ),
+    ];
+
+    let mut args: Vec<String> = vec![
+        "tap".into(),
+        "--inspect-api".into(),
+        "--no-net-watch".into(),
+        "--no-live-log".into(),
+        "--quiet".into(),
+        "--log".into(),
+        wiretap_log.to_string_lossy().into_owned(),
+        "--".into(),
+    ];
+    args.extend(child_cmd);
+
+    let out = Command::new(bin)
+        .args(&args)
+        .env(
+            "LEAKTAP_UPSTREAM_CHATGPT_URL",
+            format!("http://127.0.0.1:{chatgpt_port}/backend-api/codex"),
+        )
+        .env_remove("LEAKTAP_UPSTREAM_OPENAI_URL")
+        .env_remove("OPENAI_BASE_URL")
+        .output()
+        .expect("run leaktap tap with zstd + websocket + chatgpt routing");
+
+    let upstream_req_line = server_handle.join().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        upstream_req_line.contains("POST /backend-api/codex/responses HTTP/1.1"),
+        "expected /v1 stripped for ChatGPT backend, got: {upstream_req_line}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("WS=426"), "expected WS=426, got: {stdout}");
+    assert!(
+        stdout.contains("codex_ok"),
+        "expected codex_ok SSE response, got: {stdout}"
+    );
+
+    let log_content = fs::read_to_string(&wiretap_log).unwrap();
+    assert!(
+        log_content.contains("aws-access-key") && log_content.contains("secret_in_prompt"),
+        "expected zstd-decompressed AWS key alert in:\n{log_content}"
+    );
+    assert!(!log_content.contains("AKIA9Q2Z7KL8P4MX3RT9"));
+
+    // 3. Verify automatic `-c openai_base_url=...` injection and `CODEX_ACCESS_TOKEN` preservation
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = TempDir::new().unwrap();
+        let mock_codex = bin_dir.path().join("codex");
+        fs::write(
+            &mock_codex,
+            "#!/bin/sh\nprintf 'ARG1=%s|ARG2=%s|TOK=%s|STRIPE=%s\\n' \"$1\" \"$2\" \"$CODEX_ACCESS_TOKEN\" \"$STRIPE_SECRET_KEY\"\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&mock_codex).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&mock_codex, perms).unwrap();
+
+        let fake_codex_tok = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.codexAccessTokenPayload987654";
+        let tap_out = Command::new(bin)
+            .args([
+                "tap",
+                "--inspect-api",
+                "--scrub-env",
+                "--no-net-watch",
+                "--no-live-log",
+                "--quiet",
+                "--",
+                mock_codex.to_str().unwrap(),
+                "exec",
+                "hi",
+            ])
+            .env("CODEX_ACCESS_TOKEN", fake_codex_tok)
+            .env("STRIPE_SECRET_KEY", &fake_stripe)
+            .output()
+            .expect("run leaktap tap --inspect-api --scrub-env -- codex");
+
+        assert!(tap_out.status.success());
+        let tap_stdout = String::from_utf8(tap_out.stdout).unwrap();
+        assert!(
+            tap_stdout.contains("ARG1=-c|ARG2=openai_base_url=\"http://127.0.0.1:")
+                && tap_stdout.contains("/_openai/v1\"|"),
+            "expected injected -c openai_base_url, got: {tap_stdout}"
+        );
+        assert!(
+            tap_stdout.contains(&format!("TOK={fake_codex_tok}|STRIPE=")),
+            "expected CODEX_ACCESS_TOKEN preserved and STRIPE_SECRET_KEY scrubbed, got: {tap_stdout}"
+        );
+        assert!(!tap_stdout.contains(&fake_stripe));
+    }
+}

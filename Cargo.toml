@@ -1,6 +1,6 @@
 [package]
 name = "leaktap"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 rust-version = "1.75"
 description = "See what your AI coding CLIs leak. Offline secret & MCP auditor, interactive terminal UI, and live CLI wiretap."
@@ -23,9 +23,11 @@ rayon = "1.10"
 regex = "1.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rustls-native-certs = "0.7"
+ruzstd = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 webpki-roots = "0.26"
 
 [dev-dependencies]

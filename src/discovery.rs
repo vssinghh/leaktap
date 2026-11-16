@@ -94,6 +94,7 @@ pub fn discover_targets(custom_paths: &[PathBuf], include_mcp: bool) -> Discover
                     cwd.join("mcp.json"),
                     cwd.join(".agents/mcp_config.json"),
                     cwd.join(".antigravitycli/mcp_config.json"),
+                    cwd.join(".codex/config.toml"),
                     cwd.join(".cursor/mcp.json"),
                     cwd.join(".vscode/mcp.json"),
                     cwd.join(".gemini/settings.json"),
@@ -212,6 +213,12 @@ fn is_mcp_config_filename(path: &Path, file_name: &str) -> bool {
     if file_name == "settings.json" {
         let path_str = path.to_string_lossy();
         if path_str.contains(".gemini") || path_str.contains(".claude") {
+            return true;
+        }
+    }
+    if file_name == "config.toml" {
+        let path_str = path.to_string_lossy().to_ascii_lowercase();
+        if path_str.contains("codex") {
             return true;
         }
     }

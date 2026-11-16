@@ -125,8 +125,53 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     }
     exposed_env_keys.sort();
 
+    // Optional zero-cert local loopback API tap (`--inspect-api`)
+    let local_api_tap = if args.inspect_api {
+        let anth_upstream = env::var("LEAKTAP_UPSTREAM_ANTHROPIC_URL")
+            .or_else(|_| env::var("ANTHROPIC_BASE_URL"))
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+        let openai_explicit = env::var_os("LEAKTAP_UPSTREAM_OPENAI_URL").is_some()
+            || env::var_os("OPENAI_BASE_URL").is_some();
+        let oai_upstream = env::var("LEAKTAP_UPSTREAM_OPENAI_URL")
+            .or_else(|_| env::var("OPENAI_BASE_URL"))
+            .unwrap_or_else(|_| "https://api.openai.com".to_string());
+        let chatgpt_upstream = env::var("LEAKTAP_UPSTREAM_CHATGPT_URL")
+            .unwrap_or_else(|_| "https://chatgpt.com/backend-api/codex".to_string());
+        let gemini_upstream = env::var("LEAKTAP_UPSTREAM_GEMINI_URL")
+            .or_else(|_| env::var("GOOGLE_GEMINI_BASE_URL"))
+            .or_else(|_| env::var("GEMINI_API_BASE_URL"))
+            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
+
+        let tap = start_local_api_tap(
+            anth_upstream,
+            oai_upstream,
+            chatgpt_upstream,
+            openai_explicit,
+            gemini_upstream,
+            Arc::clone(&engine),
+            Arc::clone(&header_auditor),
+            Arc::clone(&emit_cb),
+        )?;
+        Some(tap)
+    } else {
+        None
+    };
+
+    let mut final_args: Vec<String> = Vec::with_capacity(cmd_args.len() + 2);
+    if let Some(ref tap) = local_api_tap {
+        let is_info_only = cmd_args
+            .iter()
+            .any(|a| matches!(a.as_str(), "-h" | "--help" | "-V" | "--version"));
+        let has_base_override = cmd_args.iter().any(|a| a.contains("openai_base_url"));
+        if program_stem(program) == "codex" && !is_info_only && !has_base_override {
+            final_args.push("-c".to_string());
+            final_args.push(format!("openai_base_url=\"{}/v1\"", tap.openai_base_url));
+        }
+    }
+    final_args.extend(cmd_args.iter().cloned());
+
     let mut cmd = Command::new(program);
-    cmd.args(cmd_args)
+    cmd.args(&final_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -162,27 +207,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         }
     }
 
-    // Optional zero-cert local loopback API tap (`--inspect-api`)
-    let local_api_tap = if args.inspect_api {
-        let anth_upstream = env::var("LEAKTAP_UPSTREAM_ANTHROPIC_URL")
-            .or_else(|_| env::var("ANTHROPIC_BASE_URL"))
-            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-        let oai_upstream = env::var("LEAKTAP_UPSTREAM_OPENAI_URL")
-            .or_else(|_| env::var("OPENAI_BASE_URL"))
-            .unwrap_or_else(|_| "https://api.openai.com".to_string());
-        let gemini_upstream = env::var("LEAKTAP_UPSTREAM_GEMINI_URL")
-            .or_else(|_| env::var("GOOGLE_GEMINI_BASE_URL"))
-            .or_else(|_| env::var("GEMINI_API_BASE_URL"))
-            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
-
-        let tap = start_local_api_tap(
-            anth_upstream,
-            oai_upstream,
-            gemini_upstream,
-            Arc::clone(&engine),
-            Arc::clone(&header_auditor),
-            Arc::clone(&emit_cb),
-        )?;
+    if let Some(ref tap) = local_api_tap {
         cmd.env("ANTHROPIC_BASE_URL", &tap.anthropic_base_url);
         cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
         cmd.env("GOOGLE_GEMINI_BASE_URL", &tap.gemini_base_url);
@@ -190,10 +215,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         let no_proxy = build_loopback_no_proxy();
         cmd.env("NO_PROXY", &no_proxy);
         cmd.env("no_proxy", &no_proxy);
-        Some(tap)
-    } else {
-        None
-    };
+    }
 
     let mut child = cmd.spawn()?;
     let child_pid = child.id();
@@ -443,25 +465,27 @@ fn parse_probable_http_header(line: &str) -> Option<(&str, &str)> {
     None
 }
 
-fn default_provider_env_keys(program: &str) -> &'static [&'static str] {
+fn program_stem(program: &str) -> String {
     let base = std::path::Path::new(program)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(program)
         .to_ascii_lowercase();
-    let stem = base
-        .strip_suffix(".exe")
+    base.strip_suffix(".exe")
         .or_else(|| base.strip_suffix(".cmd"))
         .or_else(|| base.strip_suffix(".bat"))
-        .unwrap_or(&base);
+        .unwrap_or(&base)
+        .to_string()
+}
 
-    match stem {
+fn default_provider_env_keys(program: &str) -> &'static [&'static str] {
+    match program_stem(program).as_str() {
         "claude" | "claude-code" => &[
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "CLAUDE_CODE_OAUTH_TOKEN",
         ],
-        "codex" => &["OPENAI_API_KEY"],
+        "codex" => &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"],
         "agy" | "antigravity" | "antigravity-cli" | "gemini" | "gemini-cli" => {
             &["GEMINI_API_KEY", "GOOGLE_API_KEY"]
         }
