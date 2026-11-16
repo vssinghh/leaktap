@@ -1,6 +1,6 @@
 [package]
 name = "leaktap"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 rust-version = "1.75"
 description = "See what your AI coding CLIs leak. Offline secret, MCP & plugin auditor, interactive terminal UI, and live CLI wiretap."

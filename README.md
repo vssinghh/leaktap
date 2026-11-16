@@ -32,9 +32,9 @@ Prebuilt binaries for macOS, Linux, and Windows are on [GitHub Releases](https:/
 ## Example output
 
 ```text
-$ leaktap scan
+$ leaktap
 
-leaktap v0.2.7 — local offline audit (0 network requests)
+leaktap v0.2.8 — local offline audit (0 network requests)
 Scanned 148 file(s) (49.1 MB) in 122ms across ~/.claude, ~/.codex, ~/.gemini
 
 CRITICAL  3 unique secret(s) found in local agent transcripts
@@ -58,7 +58,7 @@ MEDIUM    Identity & internal metadata in outbound context
 Next steps:
   • Open interactive dashboard:    leaktap ui
   • Preview & scrub local logs:    leaktap clean --apply
-  • Watch live headers & prompts:  leaktap tap --inspect-api --scrub-env -- claude
+  • Start a watched CLI session:   leaktap claude   (or `codex` / `agy`)
 ```
 
 ## Why I built this
@@ -67,7 +67,7 @@ When you run `claude`, `codex`, or `agy` inside a project, two things create mos
 
 OS file sandboxes like `sandbox-exec` and `bubblewrap` are good at blocking folders outside your repo like `~/.ssh`, which helps, but the CLI and its plugins still need read access to your repo and internet access to work. Once network access is open, file sandboxes can't see what goes out in prompts or headers. Full HTTPS proxies go too far the other way: they need Docker and a custom root certificate, and replacing keys with `[REDACTED]` breaks `git apply` when a patch comes back.
 
-`leaktap` is a single binary with no setup. It checks your chat logs, MCP configs, and installed plugins and hooks in ~120ms offline, gives you a terminal UI to browse and clean findings, and can wrap `claude`, `codex`, or `agy` to inspect live calls without installing root certificates.
+`leaktap` is a single binary with no setup. It checks your chat logs, MCP configs, and installed plugins and hooks in ~120ms offline, gives you a terminal UI to browse and clean findings, and starts `claude`, `codex`, or `agy` with live session watching in two words without installing root certificates.
 
 ## Usage
 
@@ -114,22 +114,23 @@ leaktap clean --apply --no-backup
 
 ### Watch live CLI sessions
 
-Wraps `claude`, `codex`, `agy`, `gemini`, or an MCP server command:
-
-- `--scrub-env` strips extra secret variables from your shell like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` before starting the command, while keeping the CLI's own API key.
-- `--inspect-api` routes outgoing API calls from `claude`, `codex`, `agy`, and `gemini` through a local port on `localhost` so `leaktap` can check HTTP headers and prompt bodies before forwarding requests over HTTPS. For Antigravity CLI, Google sign-in skips `GOOGLE_GEMINI_BASE_URL`; pass `--settings '{"modelProvider":"gemini"}'` with `GEMINI_API_KEY` set when using `--inspect-api`.
-- Outbound TCP connections opened by the CLI and its child processes are logged automatically without `sudo`.
+Start `claude`, `codex`, `agy`, or `gemini` directly through `leaktap` — any extra arguments pass straight through to the CLI:
 
 ```bash
-# Watch Claude Code or Codex CLI
-leaktap tap --inspect-api --scrub-env -- claude
-leaktap tap --inspect-api --scrub-env -- codex
+leaktap claude
+leaktap codex
+leaktap agy
+```
 
-# Watch Antigravity CLI with Google sign-in, or inspect API calls with GEMINI_API_KEY
-leaktap tap --scrub-env -- agy
-leaktap tap --inspect-api --scrub-env -- agy --settings '{"modelProvider":"gemini"}'
+What happens automatically when you run those commands:
 
-# Wrap an MCP server in .mcp.json or .agents/mcp_config.json
+- Extra secret variables in your shell like `AWS_SECRET_ACCESS_KEY` or `STRIPE_SECRET_KEY` are stripped before launch, while keeping the CLI's own API key.
+- Outgoing API calls from `claude`, `codex`, and `gemini` route through a local port on `localhost` so `leaktap` can check HTTP headers and prompt bodies before forwarding over HTTPS. For Antigravity CLI, Google sign-in skips `GOOGLE_GEMINI_BASE_URL`; pass `leaktap agy --settings '{"modelProvider":"gemini"}'` with `GEMINI_API_KEY` set if you also want prompt and header inspection.
+- Outbound TCP connections opened by the CLI and its child MCP processes are logged to `~/.leaktap/live.jsonl` without `sudo` so you can watch them live in `leaktap ui`.
+
+If you want custom flags or want to wrap an individual MCP server command in `.mcp.json` or `.agents/mcp_config.json`, use `leaktap tap`:
+
+```bash
 leaktap tap --scrub-env --quiet --log /tmp/mcp-wiretap.jsonl -- npx -y @org/some-mcp
 ```
 

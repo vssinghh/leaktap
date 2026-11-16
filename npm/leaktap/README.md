@@ -10,15 +10,15 @@ Supports **Claude Code**, **Codex CLI**, **Antigravity CLI**, and local **MCP se
 
 ```bash
 # Check local logs, MCP configs, and installed plugins offline
-npx leaktap scan
+npx leaktap
 
 # Open the interactive terminal UI
 npx leaktap ui
 
-# Watch Claude Code, Codex CLI, or Antigravity CLI live
-npx leaktap tap --inspect-api --scrub-env -- claude
-npx leaktap tap --inspect-api --scrub-env -- codex
-npx leaktap tap --scrub-env -- agy
+# Start Claude Code, Codex CLI, or Antigravity CLI with live watching
+npx leaktap claude
+npx leaktap codex
+npx leaktap agy
 ```
 
 Source and docs: https://github.com/vssinghh/leaktap

@@ -226,9 +226,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         if !report.transcripts.secret_findings.is_empty() {
             out.push_str("  • Preview & scrub local logs:    leaktap clean --apply\n");
         }
-        out.push_str(
-            "  • Watch live headers & prompts:  leaktap tap --inspect-api --scrub-env -- claude\n",
-        );
+        out.push_str("  • Start a watched CLI session: leaktap claude   (or `codex` / `agy`)\n");
     }
 
     out

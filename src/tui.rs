@@ -555,7 +555,7 @@ fn draw_live_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
         vec![
             Line::from("No live wiretap events recorded yet."),
             Line::from(
-                "Run `leaktap tap --inspect-api --scrub-env -- claude` in another terminal to stream live events here.",
+                "Run `leaktap claude` (or `leaktap codex` / `leaktap agy`) in another terminal to stream live events here.",
             ),
         ]
     };
