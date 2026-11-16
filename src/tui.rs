@@ -412,7 +412,7 @@ fn draw_secret_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
 }
 
 fn draw_mcp_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
-    let header = Row::new(vec!["Severity", "Server", "Config File", "Issue"]).style(
+    let header = Row::new(vec!["Severity", "Target", "File", "Issue"]).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -445,7 +445,7 @@ fn draw_mcp_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" MCP Server Configuration Audit "),
+            .title(" MCP, Plugin, Hook & Skill Audit "),
     )
     .row_highlight_style(
         Style::default()
@@ -462,17 +462,17 @@ fn draw_mcp_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
         if let Some(m) = app.report.mcp_findings.get(idx) {
             vec![
                 Line::from(format!(
-                    "Server `{}` in {} ({})",
+                    "`{}` in {} ({})",
                     m.server_name, m.config_file, m.rule_id
                 )),
                 Line::from(m.message.clone()),
             ]
         } else {
-            vec![Line::from("No MCP finding selected.")]
+            vec![Line::from("No finding selected.")]
         }
     } else {
         vec![Line::from(
-            "✓ Clean — 0 risky MCP server settings detected.",
+            "✓ Clean — 0 risky MCP, plugin, hook, or skill settings detected.",
         )]
     };
 

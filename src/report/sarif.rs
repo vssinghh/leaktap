@@ -34,11 +34,16 @@ pub fn render_scan_sarif(report: &FullScanReport) -> String {
     }
 
     for m in &report.mcp_findings {
+        let prefix = if m.rule_id.starts_with("plugin-") {
+            format!("[`{}`]", m.server_name)
+        } else {
+            format!("[MCP server `{}`]", m.server_name)
+        };
         results.push(json!({
             "ruleId": m.rule_id,
             "level": m.severity.sarif_level(),
             "message": {
-                "text": format!("[MCP server `{}`] {}", m.server_name, m.message)
+                "text": format!("{prefix} {}", m.message)
             },
             "locations": [{
                 "physicalLocation": {
