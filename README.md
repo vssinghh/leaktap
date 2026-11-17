@@ -7,7 +7,7 @@
 
 Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`codex`), **Antigravity CLI** (`agy`), **Gemini CLI** (`gemini`), and local MCP servers (plus OpenRouter, DeepSeek, xAI, and Groq API endpoints). Offline `scan` also checks local state, MCP configs, and rule files left by Cursor, Windsurf, Cline, Roo Code, Zed, JetBrains Junie, Amazon Q, Kiro, Augment, Trae, Continue, and Aider.
 
-> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred MCP servers on GitHub (`464,529` stars combined). **90% (`18 / 20`)** use unpinned installs or mutable tags, **35% (`7 / 20`)** put API keys in JSON configs or CLI flags, **30% (`6 / 20`)** ship default-on telemetry (**2** without `README` notice), and **30% (`6 / 20`)** opened live outbound HTTPS connections on startup before a single tool was called.
+> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred MCP servers on GitHub (`464,529` stars combined). **90% (`18 / 20`)** use unpinned installs or mutable tags, **35% (`7 / 20`)** put API keys in JSON configs or CLI flags, **30% (`6 / 20`)** ship default-on telemetry (**2** without `README` notice), and **25% (`5 / 20`)** made non-API outbound HTTPS calls on startup (telemetry, update checks, or a `140` to `190 MB` browser download) before a single tool was called.
 
 ![leaktap offline scan and live secret blocking](docs/assets/demo.svg)
 

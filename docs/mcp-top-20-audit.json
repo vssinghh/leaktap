@@ -12,6 +12,7 @@
     "pipe_to_shell_installer_count": 2,
     "live_tap_handshake_completed_count": 18,
     "live_tap_startup_network_count": 6,
+    "live_tap_non_api_startup_network_count": 5,
     "live_tap_total_tools_pinned": 470,
     "live_tap_tool_poisoning_count": 0
   },

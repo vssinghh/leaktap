@@ -409,6 +409,29 @@ def run_layer2_stdio_tap(
         }
 
 
+EXPECTED_PRIMARY_API_HOSTS: dict[str, set[str]] = {
+    "github/github-mcp-server": {"api.github.com:443"},
+    "apify/apify-mcp-server": {"api.apify.com:443"},
+    "upstash/context7": {"mcp.context7.com:443"},
+}
+
+
+def _extract_backticked_host(detail: str) -> str:
+    parts = detail.split("`")
+    return parts[1] if len(parts) >= 2 else detail
+
+
+def _has_non_api_startup_call(server: dict) -> bool:
+    lt = server.get("live_tap", {})
+    if lt.get("live_telemetry") or lt.get("live_raw_sockets"):
+        return True
+    expected = EXPECTED_PRIMARY_API_HOSTS.get(server["repo"], set())
+    for detail in lt.get("live_connect_hosts", []):
+        if _extract_backticked_host(detail) not in expected:
+            return True
+    return False
+
+
 def compute_summary(servers: list[dict]) -> dict:
     total = len(servers)
 
@@ -437,6 +460,15 @@ def compute_summary(servers: list[dict]) -> dict:
         or s.get("live_tap", {}).get("live_connect_hosts")
         or s.get("live_tap", {}).get("live_raw_sockets")
     )
+    live_non_api_outbound = sum(1 for s in servers if _has_non_api_startup_call(s))
+    total_tools_pinned = sum(
+        int(s.get("live_tap", {}).get("tools_count") or 0) for s in servers
+    )
+    tool_poisoning = sum(
+        1
+        for s in servers
+        if s.get("live_tap", {}).get("tool_poisoning_findings")
+    )
 
     return {
         "audited_count": total,
@@ -449,6 +481,9 @@ def compute_summary(servers: list[dict]) -> dict:
         "pipe_to_shell_installer_count": pipe_to_shell,
         "live_tap_handshake_completed_count": live_handshakes,
         "live_tap_startup_network_count": live_outbound,
+        "live_tap_non_api_startup_network_count": live_non_api_outbound,
+        "live_tap_total_tools_pinned": total_tools_pinned,
+        "live_tap_tool_poisoning_count": tool_poisoning,
     }
 
 
@@ -486,8 +521,12 @@ def main() -> int:
             tap_cmds[repo_key.strip()] = raw_cmd.strip().split()
 
     existing_live: dict[str, dict] = {}
+    snapshot_date = time.strftime("%Y-%m-%d")
+    leaktap_version = "0.3.0"
     if args.from_dataset:
         prev = json.loads(Path(args.from_dataset).read_text())
+        snapshot_date = prev.get("snapshot_date") or snapshot_date
+        leaktap_version = prev.get("leaktap_version") or leaktap_version
         candidates = [
             {
                 "repo": r["repo"],
@@ -532,6 +571,8 @@ def main() -> int:
         )
 
     payload = {
+        "snapshot_date": snapshot_date,
+        "leaktap_version": leaktap_version,
         "summary": compute_summary(servers_out),
         "repositories": servers_out,
     }
