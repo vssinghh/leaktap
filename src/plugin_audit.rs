@@ -45,6 +45,8 @@ const SETTINGS_HELPER_KEYS: &[&str] = &[
 
 const PLUGIN_TELEMETRY_DOMAINS: &[&str] = &[
     "i.posthog.com",
+    "us.i.posthog.com",
+    "eu.i.posthog.com",
     "events.posthog.com",
     "app.posthog.com/batch",
     "app.posthog.com/capture",
@@ -63,6 +65,8 @@ const PLUGIN_TELEMETRY_DOMAINS: &[&str] = &[
     "www.google-analytics.com/collect",
     "www.google-analytics.com/mp/collect",
     "analytics.google.com/g/collect",
+    "play.googleapis.com/log",
+    "static.scarf.sh",
 ];
 
 const CREDENTIAL_HARVEST_PATTERNS: &[(&str, &str)] = &[
@@ -283,7 +287,7 @@ fn plugin_regexes() -> &'static PluginRegexes {
         )
         .expect("prompt_stealth regex"),
         prompt_exfil: Regex::new(
-            r#"(?i)(?:\|\s*(?:curl|wget|nc|ncat|socat|openssl\s+s_client)\b|\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*(?:\$\([^\n)]+\)|`[^`\n]+`)|\b(?:curl|wget)\b[^\n]*(?:--upload-file\s+\S+|(?:-d|--data(?:-\w+)?|-F|--form)\s+["']?(?:[A-Za-z0-9_.-]+=)?@[^\s"']+)|\b(?:curl|wget)\b[^\n]*https?://[^\s"'<>)\]]*[?&][^\s"'<>)\]]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:curl|wget)\b[^\n]*(?:\s-d|\s--data(?:-\w+)?|\s-F|\s--form)\s+["']?[^\n"']*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:nslookup|dig|ping|scp|sftp|rsync)\b[^\n]*(?:\$\([^\n)]+\)|`[^`\n]+`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\.env\b|\.ssh|\.aws|\.npmrc|\.netrc|\.pgpass|\.my\.cnf|\.vault-token|\.azure)|\b(?:cat|type|Get-Content|head|tail|base64)\s+[^\n]*(?:\.env\b|\.ssh|\.aws|\.npmrc|\.netrc|\.pgpass|\.my\.cnf|\.vault-token|\.azure|credentials)[^\n]*(?:curl|wget|http|fetch|nc|scp|sftp|ssh|nslookup|dig)\b)"#,
+            r#"(?i)(?:\|\s*(?:curl|wget|nc|ncat|socat|openssl\s+s_client)\b|\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*(?:\$\([^\n)]+\)|`\s*(?:(?:cat|head|tail|sed|awk|grep|base64|xxd|openssl|security|secret-tool|pass|op|aws|gcloud|kubectl)\s+[^`\n]+|(?:env|printenv|whoami|id|uname|hostname)\b[^`\n]*)`)|\b(?:curl|wget)\b[^\n]*(?:--upload-file\s+\S+|(?:-d|--data(?:-\w+)?|-F|--form)\s+["']?(?:[A-Za-z0-9_.-]+=)?@[^\s"']+)|\b(?:curl|wget)\b[^\n]*https?://[^\s"'<>)\]]*[?&][^\s"'<>)\]]*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:curl|wget)\b[^\n]*(?:\s-d|\s--data(?:-\w+)?|\s-F|\s--form)\s+["']?[^\n"']*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\b(?:nslookup|dig|ping|scp|sftp|rsync)\b[^\n]*(?:\$\([^\n)]+\)|`\s*(?:(?:cat|head|tail|sed|awk|grep|base64|xxd|openssl|security|secret-tool|pass|op|aws|gcloud|kubectl)\s+[^`\n]+|(?:env|printenv|whoami|id|uname|hostname)\b[^`\n]*)`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\.env\b|\.ssh/|\~/.ssh|\.aws/|\~/.aws|\.npmrc|\.netrc|\.pgpass|\.my\.cnf|\.vault-token|\.azure)|\b(?:cat|type|Get-Content|head|tail|base64)\s+[^\n]*(?:\.env\b|\.ssh|\.aws|\.npmrc|\.netrc|\.pgpass|\.my\.cnf|\.vault-token|\.azure|credentials)[^\n]*(?:curl|wget|http|fetch|nc|scp|sftp|ssh|nslookup|dig)\b)"#,
         )
         .expect("prompt_exfil regex"),
         prompt_img_exfil: Regex::new(
@@ -875,20 +879,30 @@ fn audit_single_plugin_file(
         );
     }
 
+    let is_compiled_js_bundle = !is_prompt_doc
+        && norm_raw.len() > 128 * 1024
+        && logical_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "js" | "mjs" | "cjs"));
+
     // 3b. Check code/script environment & secret exfiltration (`process.env` / `os.environ` / `.env` -> external network)
-    check_env_and_secret_exfiltration(
-        logical_path,
-        &display,
-        &label,
-        &norm_raw,
-        is_prompt_doc,
-        1,
-        out,
-        seen_fp,
-    );
+    if !is_compiled_js_bundle {
+        check_env_and_secret_exfiltration(
+            logical_path,
+            &display,
+            &label,
+            &norm_raw,
+            is_prompt_doc,
+            1,
+            out,
+            seen_fp,
+        );
+    }
 
     // 3c. Check outbound external network calls inside executable skill/plugin scripts (`skills/*/scripts/*`, standalone `SKILL.md` / `plugin.json` bundles)
-    let is_skill_script = !is_prompt_doc && is_skill_script_path(disk_path, logical_path);
+    let is_skill_script =
+        !is_prompt_doc && !is_compiled_js_bundle && is_skill_script_path(disk_path, logical_path);
     if is_skill_script {
         let net_hit = detect_non_official_external_network_call(&norm_raw).or_else(|| {
             decode_powershell_encoded_commands(&norm_raw)
@@ -922,6 +936,7 @@ fn audit_single_plugin_file(
     // 3d. Follow up to 2 hops of local imported helper scripts (`import collector`, `require('./net')`, `source ./lib.sh`)
     // and correlate cross-file environment/secret exfiltration across the module graph.
     if !is_prompt_doc
+        && !is_compiled_js_bundle
         && (has_script_extension(logical_path)
             || has_script_extension(disk_path)
             || is_shebang_script(disk_path))
@@ -985,6 +1000,12 @@ fn audit_streamed_plugin_file(
     let mut base_line = 1usize;
     let mut detected_net: Option<String> = None;
 
+    let is_compiled_js_bundle = !is_prompt_doc
+        && logical_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "js" | "mjs" | "cjs"));
+
     while let Ok(n) = file.read(&mut chunk) {
         if n == 0 {
             break;
@@ -1025,16 +1046,18 @@ fn audit_streamed_plugin_file(
             out,
             seen_fp,
         );
-        check_env_and_secret_exfiltration(
-            logical_path,
-            display,
-            &label,
-            &text,
-            is_prompt_doc,
-            base_line,
-            out,
-            seen_fp,
-        );
+        if !is_compiled_js_bundle {
+            check_env_and_secret_exfiltration(
+                logical_path,
+                display,
+                &label,
+                &text,
+                is_prompt_doc,
+                base_line,
+                out,
+                seen_fp,
+            );
+        }
         if is_prompt_doc {
             check_prompt_injection(
                 logical_path,
@@ -1055,7 +1078,7 @@ fn audit_streamed_plugin_file(
                 out,
                 seen_fp,
             );
-            if detected_net.is_none() {
+            if detected_net.is_none() && !is_compiled_js_bundle {
                 detected_net = detect_external_network_call(&text);
             }
         }
@@ -1092,6 +1115,15 @@ fn audit_compiled_binary_file(
     out: &mut Vec<McpFinding>,
     seen_fp: &mut HashSet<String>,
 ) -> Option<String> {
+    let is_archive = logical_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "whl" | "zip" | "jar" | "tgz" | "gz" | "xz" | "zst"
+            )
+        });
     let fp = fingerprint_match("plugin-compiled-binary", display);
     push_finding(
         out,
@@ -1104,9 +1136,15 @@ fn audit_compiled_binary_file(
             line,
             severity: Severity::High,
             fingerprint: fp,
-            message: format!(
-                "Opaque compiled binary (`{display}`) bundled or executed by plugin, hook, skill, or MCP config — inspect binary provenance"
-            ),
+            message: if is_archive {
+                format!(
+                    "Bundled package archive (`{display}`) inside plugin, hook, skill, or MCP config — inspect archive provenance"
+                )
+            } else {
+                format!(
+                    "Opaque compiled binary (`{display}`) bundled or executed by plugin, hook, skill, or MCP config — inspect binary provenance"
+                )
+            },
         },
     );
 
@@ -1725,6 +1763,33 @@ fn has_only_benign_node_options(val: &str) -> bool {
     })
 }
 
+fn is_standard_system_path_only(val: &str) -> bool {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed.split(':').all(|seg| {
+        let norm = seg.trim().trim_end_matches('/');
+        matches!(
+            norm,
+            "/usr/local/bin"
+                | "/usr/local/sbin"
+                | "/usr/bin"
+                | "/usr/sbin"
+                | "/bin"
+                | "/sbin"
+                | "/opt/homebrew/bin"
+                | "/opt/homebrew/sbin"
+                | "~/.local/bin"
+                | "$HOME/.local/bin"
+                | "${HOME}/.local/bin"
+                | "$PATH"
+                | "${PATH}"
+                | "${env:PATH}"
+        )
+    })
+}
+
 fn extract_helper_command(val: &Value) -> Option<&str> {
     if let Some(s) = val.as_str() {
         let t = s.trim();
@@ -1875,10 +1940,8 @@ pub(crate) fn audit_env_object_overrides(
         let is_dangerous_node_opts =
             upper == "NODE_OPTIONS" && !has_only_benign_node_options(trimmed);
         let is_workspace_path_hijack = is_workspace_cfg
-            && matches!(
-                upper.as_str(),
-                "PATH" | "EDITOR" | "VISUAL" | "PAGER" | "GIT_PAGER"
-            );
+            && ((upper == "PATH" && !is_standard_system_path_only(trimmed))
+                || matches!(upper.as_str(), "EDITOR" | "VISUAL" | "PAGER" | "GIT_PAGER"));
 
         if is_unconditional_code_exec_var || is_dangerous_node_opts || is_workspace_path_hijack {
             let val_snip = truncate_snippet(trimmed, 64);
@@ -3667,6 +3730,17 @@ fn check_remote_code_exec(
 
     for rx in rce_regexes {
         for m in rx.find_iter(&collapsed) {
+            if std::ptr::eq(rx, &re.pipe_to_shell) {
+                let lhs = m.as_str().split('|').next().unwrap_or("");
+                let stripped_lhs = lhs.replace("...", "");
+                if !stripped_lhs.contains("://")
+                    && !stripped_lhs.contains('/')
+                    && !stripped_lhs.contains('.')
+                    && !stripped_lhs.contains('$')
+                {
+                    continue;
+                }
+            }
             let folded_ln = line_at_offset(&collapsed, m.start());
             let line_idx = folded_ln.saturating_sub(1);
             if let Some(info) = line_meta.get(line_idx) {
@@ -4065,6 +4139,9 @@ fn is_rce_explicitly_prohibited_on_line(lower_line: &str, target_byte_idx: usize
         "avoid piping ",
         "prohibit running ",
         "forbid running ",
+        "be careful with ",
+        "watch out for ",
+        "warn before ",
     ];
     for neg in RCE_PROHIBITIONS {
         if let Some(neg_pos) = before_target.rfind(neg) {
@@ -4806,6 +4883,46 @@ fn is_url_official_for_env_var(url: &str, env_var: &str) -> bool {
     }
 }
 
+fn find_non_benign_wholesale_env_dump(text: &str) -> Option<&str> {
+    let re = plugin_regexes();
+    for m in re.wholesale_env_dump.find_iter(text) {
+        let matched = m.as_str();
+        let before = &text[..m.start()];
+        let before_trimmed = before.trim_end();
+        // Skip child_process spawn environment inheritance (`env: { ...process.env, FOO: bar }`)
+        if matched.trim_start().starts_with("...") {
+            if let Some(open_brace) = before_trimmed.strip_suffix('{') {
+                if let Some(before_colon) = open_brace.trim_end().strip_suffix(':') {
+                    let prop = before_colon.trim_end();
+                    if prop.ends_with("env") {
+                        let prefix_len = prop.len() - 3;
+                        if prefix_len == 0
+                            || !prop.as_bytes()[prefix_len - 1].is_ascii_alphanumeric()
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        // Skip function default parameter (`function foo(env = process.env)` or `(a, env = process.env)`)
+        if (matched.starts_with("process.env") || matched.starts_with("Bun.env"))
+            && (matched.trim_end().ends_with(')') || matched.trim_end().ends_with(','))
+            && before_trimmed.ends_with('=')
+            && !before_trimmed.ends_with("==")
+            && !before_trimmed.ends_with("!=")
+        {
+            let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_prefix = &before[line_start..];
+            if line_prefix.contains('(') {
+                continue;
+            }
+        }
+        return Some(matched);
+    }
+    None
+}
+
 fn detect_code_env_exfiltration_in_block(
     block: &str,
     window_lines: usize,
@@ -4815,7 +4932,7 @@ fn detect_code_env_exfiltration_in_block(
     if !re.exfil_net_sink.is_match(&stripped) {
         return None;
     }
-    if !re.wholesale_env_dump.is_match(&stripped)
+    if find_non_benign_wholesale_env_dump(&stripped).is_none()
         && !re.dotenv_file_read.is_match(&stripped)
         && !re.sensitive_env_name.is_match(&stripped)
     {
@@ -4825,11 +4942,13 @@ fn detect_code_env_exfiltration_in_block(
     let resolved_url_vars = resolve_url_identifiers(&stripped);
     let lines: Vec<&str> = stripped.lines().collect();
     for (idx, &line) in lines.iter().enumerate() {
-        let Some(sink_mat) = re
-            .exfil_net_sink
-            .find_iter(line)
-            .find(|m| !is_false_positive_cli_net_token(line, m.start(), m.end()))
-        else {
+        let Some(sink_mat) = re.exfil_net_sink.find_iter(line).find(|m| {
+            let exact_quoted_const = m.start() > 0 && {
+                let q = line.as_bytes()[m.start() - 1];
+                matches!(q, b'"' | b'\'' | b'`') && line.as_bytes().get(m.end()) == Some(&q)
+            };
+            !exact_quoted_const && !is_false_positive_cli_net_token(line, m.start(), m.end())
+        }) else {
             continue;
         };
         let win_start = idx.saturating_sub(window_lines);
@@ -4868,8 +4987,8 @@ fn detect_code_env_exfiltration_in_block(
             format!("outbound network sink `{sink_label}`")
         };
 
-        if let Some(m) = re.wholesale_env_dump.find(&window_text) {
-            let src_snip = truncate_snippet(m.as_str().trim(), 40);
+        if let Some(matched_dump) = find_non_benign_wholesale_env_dump(&window_text) {
+            let src_snip = truncate_snippet(matched_dump.trim(), 40);
             return Some((
                 idx + 1,
                 format!("dumps process environment (`{src_snip}`) to {dest_desc}"),
@@ -5188,6 +5307,22 @@ fn check_prompt_injection(
             let folded_ln = line_at_offset(&folded, m.start());
             let line_idx = folded_ln.saturating_sub(1);
             if let Some(info) = line_states.get(line_idx) {
+                if std::ptr::eq(rx, &re.prompt_exfil)
+                    && snippet.starts_with('|')
+                    && !info.in_code_fence
+                    && info.lower_line.trim_start().starts_with('|')
+                {
+                    let col_byte = m.start().saturating_sub(info.line_start_byte);
+                    let safe_col = col_byte.min(info.lower_line.len());
+                    let prefix_ticks = info.lower_line.as_bytes()[..safe_col]
+                        .iter()
+                        .filter(|&&b| b == b'`')
+                        .count();
+                    // Outside inline backticks on a Markdown table row, `|` is a column border, not a shell pipe
+                    if prefix_ticks % 2 == 0 {
+                        continue;
+                    }
+                }
                 let col_byte = m.start().saturating_sub(info.line_start_byte);
                 if is_target_defensively_negated_on_line(
                     &info.lower_line,
@@ -5271,6 +5406,16 @@ fn check_prompt_injection(
             .take((idx + 3).min(folded_lines.len()))
             .skip(idx + 1)
         {
+            let next_trim = next_line.trim_start();
+            if next_trim.is_empty()
+                || next_trim.starts_with("- ")
+                || next_trim.starts_with("* ")
+                || next_trim.starts_with("| ")
+                || next_trim.starts_with('#')
+                || next_trim.starts_with("```")
+            {
+                break;
+            }
             let next_defensive = line_states.get(next_idx).is_some_and(|st| {
                 is_target_defensively_negated_on_line(
                     &st.lower_line,
@@ -6968,6 +7113,8 @@ fn infer_script_project_root(script_path: &Path) -> &Path {
     for anc in script_path.ancestors().skip(1).take(6) {
         if anc.join(".git").exists()
             || anc.join("plugin.json").is_file()
+            || anc.join(".claude-plugin").is_dir()
+            || anc.join(".codex-plugin").is_dir()
             || anc.join("SKILL.md").is_file()
             || anc.join(".mcp.json").is_file()
             || anc.join("package.json").is_file()
@@ -7609,9 +7756,9 @@ enum CrossFileSecretSource {
 fn extract_module_secret_source(clean_body: &str) -> Option<CrossFileSecretSource> {
     let stripped = collapse_adjacent_string_literals(&strip_code_comments(clean_body));
     let re = plugin_regexes();
-    if let Some(m) = re.wholesale_env_dump.find(&stripped) {
+    if let Some(matched_dump) = find_non_benign_wholesale_env_dump(&stripped) {
         return Some(CrossFileSecretSource::WholesaleEnv(truncate_snippet(
-            m.as_str().trim(),
+            matched_dump.trim(),
             40,
         )));
     }
@@ -7641,11 +7788,13 @@ fn extract_module_external_sink(clean_body: &str) -> Option<(usize, String, Vec<
     let resolved_url_vars = resolve_url_identifiers(&stripped);
     let lines: Vec<&str> = stripped.lines().collect();
     for (idx, &line) in lines.iter().enumerate() {
-        let Some(sink_mat) = re
-            .exfil_net_sink
-            .find_iter(line)
-            .find(|m| !is_false_positive_cli_net_token(line, m.start(), m.end()))
-        else {
+        let Some(sink_mat) = re.exfil_net_sink.find_iter(line).find(|m| {
+            let exact_quoted_const = m.start() > 0 && {
+                let q = line.as_bytes()[m.start() - 1];
+                matches!(q, b'"' | b'\'' | b'`') && line.as_bytes().get(m.end()) == Some(&q)
+            };
+            !exact_quoted_const && !is_false_positive_cli_net_token(line, m.start(), m.end())
+        }) else {
             continue;
         };
         let call_start = idx.saturating_sub(2);

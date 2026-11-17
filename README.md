@@ -7,7 +7,7 @@
 
 Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`codex`), **Antigravity CLI** (`agy`), **Gemini CLI** (`gemini`), and local MCP servers (plus OpenRouter, DeepSeek, xAI, and Groq API endpoints). Offline `scan` also checks local state, MCP configs, and rule files left by Cursor, Windsurf, Cline, Roo Code, Zed, JetBrains Junie, Amazon Q, Kiro, Augment, Trae, Continue, and Aider.
 
-> **2026 MCP Audit ([full write-up & 50-repo dataset](docs/mcp-top-50-audit.md)):** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry.
+> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred MCP servers on GitHub (`464,529` stars combined). **90% (`18 / 20`)** use unpinned installs or mutable tags, **35% (`7 / 20`)** put API keys in JSON configs or CLI flags, **30% (`6 / 20`)** ship default-on telemetry (**2** without `README` notice), and **25% (`5 / 20`)** made non-API outbound HTTPS calls on startup (telemetry, update checks, or a `140` to `190 MB` browser download) before a single tool was called.
 
 ![leaktap offline scan and live secret blocking](docs/assets/demo.svg)
 
@@ -16,15 +16,15 @@ Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`cod
 Build from a tagged release with `cargo`:
 
 ```bash
-cargo install --git https://github.com/vssinghh/leaktap --tag v0.3.0 --locked
+cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.0 --locked
 ```
 
 Download a prebuilt binary on macOS or Linux (read the script before running it):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.3.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.0/install.sh
 less install.sh
-LEAKTAP_VERSION=v0.3.0 sh install.sh
+LEAKTAP_VERSION=v0.4.0 sh install.sh
 
 # Optional: verify GitHub Actions build attestation
 gh attestation verify ~/.local/bin/leaktap --repo vssinghh/leaktap
@@ -108,7 +108,7 @@ When wrapping a session, `leaktap`:
 
 - Strips unrelated shell secrets (`AWS_SECRET_ACCESS_KEY`, `STRIPE_SECRET_KEY`, `DATABASE_URL`, `GOOGLE_APPLICATION_CREDENTIALS`, `DOCKER_CONFIG`, etc.) while keeping profile selectors (`AWS_PROFILE`, `KUBECONFIG`), the CLI's own API key, TLS CA paths, and anything in `--allow-env`.
 - Routes supported `*_BASE_URL` env vars through a local HTTP port, decodes `zstd`/`br`/`gzip`/`deflate` bodies in memory, checks headers, prompts, and MCP tool results, and forwards the request upstream over HTTPS. WebSocket upgrades get `HTTP 426` so clients fall back to HTTP/SSE. With `--block-secrets`, `leaktap` refuses to start if a repo config overrides `*_BASE_URL`.
-- Checks non-TTY MCP `tools/list` and `tools/call` traffic for tool poisoning or unexpected schema changes, and logs child TCP/UDP sockets to `~/.leaktap/live.jsonl` (`0600`, rotated at `10 MiB`).
+- Checks non-TTY MCP `tools/list` and `tools/call` traffic for tool poisoning or unexpected schema changes, records outbound `HTTP CONNECT` proxy hostnames (`http-connect` and `mcp-live-telemetry`) without custom TLS certificates, and logs child TCP/UDP sockets to `~/.leaktap/live.jsonl` (`0600`, rotated at `10 MiB`).
 
 To wrap a single MCP server inside `.mcp.json`:
 
@@ -189,7 +189,7 @@ leaktap rules --format json
 
 ## Limitations
 
-- `leaktap` runs in user space without `sudo`, custom root certificates, or kernel hooks. Direct HTTPS traffic sent by child tools to third-party hosts is logged by IP and port, not decrypted.
+- `leaktap` runs in user space without `sudo`, custom root certificates, or kernel hooks. Third-party HTTPS traffic from child tools is logged by `HTTP CONNECT` hostname (for proxy-aware runtimes) or by IP and port, without decrypting the encrypted TLS payload.
 - A hostile binary that ignores `*_BASE_URL`, uses gRPC, finishes a network connection faster than the socket poll interval (`15ms` on Linux, `500ms` on macOS), or sends raw UDP/DNS packets will bypass user-space checks. Run untrusted third-party code in `bubblewrap`, `landlock`, `sandbox-exec`, or a VM/container.
 - PII checks only cover developer email addresses and internal hostnames. They do not detect SSNs, payment cards, or medical records.
 - `leaktap clean --apply` only removes secrets from your local disk. Rotate any key that was already sent to an API or committed to a repo.

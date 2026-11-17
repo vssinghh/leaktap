@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-Security fixes ship on the latest `0.3.x` release.
+Security fixes ship on the latest `0.4.x` release.
 
 | Version | Supported |
 | :--- | :--- |
-| `0.3.x` | Yes |
-| `< 0.3.0` | No (upgrade to `0.3.0+`) |
+| `0.4.x` | Yes |
+| `< 0.4.0` | No (upgrade to `0.4.0+`) |
 
 ## Reporting a Vulnerability
 

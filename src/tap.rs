@@ -8,6 +8,7 @@ use crate::netwatch::{
     disable_process_dumpable, enable_child_subreaper, reap_reparented_zombies,
     reap_reparented_zombies_except, spawn_socket_watcher, OS_SOCKET_WATCH_SUPPORTED,
 };
+use crate::proxy_tap::start_connect_observer_tap;
 use crate::rules::{
     is_likely_placeholder, looks_like_filesystem_path, shannon_entropy, RuleCategory, RuleEngine,
 };
@@ -392,6 +393,14 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         }
     }
 
+    let local_connect_tap = if !args.no_net_watch && !is_info_only {
+        start_connect_observer_tap(Arc::clone(&emit_cb))
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
     if let Some(ref tap) = local_api_tap {
         cmd.env("ANTHROPIC_BASE_URL", &tap.anthropic_base_url);
         cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
@@ -401,6 +410,19 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         cmd.env("DEEPSEEK_BASE_URL", &tap.deepseek_base_url);
         cmd.env("XAI_BASE_URL", &tap.xai_base_url);
         cmd.env("GROQ_BASE_URL", &tap.groq_base_url);
+    }
+
+    if let Some(ref ctap) = local_connect_tap {
+        cmd.env("HTTP_PROXY", &ctap.proxy_url);
+        cmd.env("HTTPS_PROXY", &ctap.proxy_url);
+        cmd.env("http_proxy", &ctap.proxy_url);
+        cmd.env("https_proxy", &ctap.proxy_url);
+        cmd.env_remove("ALL_PROXY");
+        cmd.env_remove("all_proxy");
+        cmd.env("NODE_USE_ENV_PROXY", "1");
+    }
+
+    if local_api_tap.is_some() || local_connect_tap.is_some() {
         let no_proxy = build_loopback_no_proxy();
         cmd.env("NO_PROXY", &no_proxy);
         cmd.env("no_proxy", &no_proxy);
@@ -450,7 +472,13 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
 
     let mut child = cmd.spawn()?;
     let child_pid = child.id();
-    let ignore_tap_port = local_api_tap.as_ref().map(|t| t.port);
+    let mut ignore_tap_ports = Vec::new();
+    if let Some(ref t) = local_api_tap {
+        ignore_tap_ports.push(t.port);
+    }
+    if let Some(ref ct) = local_connect_tap {
+        ignore_tap_ports.push(ct.port);
+    }
 
     // Zero-root OS socket watcher for outbound TCP/UDP connections across child process tree
     let stop_sockets = Arc::new(AtomicBool::new(false));
@@ -459,7 +487,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         let engine_for_sock = Arc::clone(&engine);
         Some(spawn_socket_watcher(
             child_pid,
-            ignore_tap_port,
+            ignore_tap_ports,
             Arc::clone(&stop_sockets),
             move |obs| {
                 let cmd_context = sanitize_cmdline_for_log(&obs.cmdline, &engine_for_sock);
@@ -577,6 +605,9 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     if let Some(tap) = local_api_tap {
         tap.stop();
     }
+    if let Some(ctap) = local_connect_tap {
+        ctap.stop();
+    }
     if let Some(h) = socket_handle {
         let _ = h.join();
     }
@@ -678,7 +709,7 @@ fn pump_stream<R: Read, W: Write>(
 
         for &b in &buf[..n] {
             line_acc.push(b);
-            if b == b'\n' || line_acc.len() >= 64 * 1024 {
+            if b == b'\n' || line_acc.len() >= 2 * 1024 * 1024 {
                 inspect_chunk(
                     &line_acc,
                     stream_name,
@@ -781,6 +812,44 @@ fn inspect_chunk(
             if let Ok(rpc_val) = serde_json::from_str::<serde_json::Value>(json_cand) {
                 let mut mcp_findings = Vec::new();
                 if text.contains("\"tools\"") {
+                    if let Some(tools_arr) = rpc_val
+                        .get("result")
+                        .and_then(|r| r.get("tools"))
+                        .and_then(|t| t.as_array())
+                    {
+                        let tool_names: Vec<String> = tools_arr
+                            .iter()
+                            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                            .map(str::to_string)
+                            .collect();
+                        let inv_key = format!(
+                            "__mcp_tools__:{stream_name}:{}:{}",
+                            tools_arr.len(),
+                            tool_names.join(",")
+                        );
+                        let is_first = seen_domains
+                            .lock()
+                            .map(|mut s| s.insert(inv_key))
+                            .unwrap_or(false);
+                        if is_first {
+                            let detail = if tool_names.is_empty() {
+                                "Observed MCP `tools/list` response exposing 0 tool(s)".to_string()
+                            } else {
+                                format!(
+                                    "Observed MCP `tools/list` response exposing {} tool(s): {}",
+                                    tool_names.len(),
+                                    summarize_list(&tool_names, 6)
+                                )
+                            };
+                            emit(
+                                stream_name,
+                                "mcp_tools_list",
+                                "mcp-tools-inventory",
+                                "MEDIUM",
+                                detail,
+                            );
+                        }
+                    }
                     audit_mcp_tools_payload_with_options(
                         mcp_server_id,
                         stream_name,
@@ -1263,11 +1332,22 @@ fn build_loopback_no_proxy() -> String {
     let existing = env::var("NO_PROXY")
         .or_else(|_| env::var("no_proxy"))
         .unwrap_or_default();
-    let mut parts: Vec<String> = existing
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    for raw in existing.split(',') {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Normalize bracketed IPv6 literals without a port (`[::1]` -> `::1`) so Python
+        // `httpx` (< 0.28) does not crash with `InvalidURL("Invalid port: ':1]'")`.
+        let norm = trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(trimmed);
+        if !parts.iter().any(|p| p.eq_ignore_ascii_case(norm)) {
+            parts.push(norm.to_string());
+        }
+    }
     for host in ["localhost", "127.0.0.1", "::1"] {
         if !parts.iter().any(|p| p.eq_ignore_ascii_case(host)) {
             parts.push(host.to_string());

@@ -17,6 +17,8 @@ pub struct DiscoveredTargets {
 const ALWAYS_IGNORED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
+    "vendored",
+    "third_party",
     "target",
     ".venv",
     "venv",
@@ -673,6 +675,12 @@ fn has_customization_ancestor(path: &Path) -> bool {
         if is_customization_dir_name(c) {
             return true;
         }
+        if idx > 0 && comps[idx - 1] == ".github" {
+            if matches!(c, "instructions" | "prompts" | "agents") {
+                return true;
+            }
+            continue;
+        }
         if (matches!(
             c,
             "commands" | "agents" | "rules" | "workflows" | "instructions" | "prompts" | "steering"
@@ -686,7 +694,6 @@ fn has_customization_ancestor(path: &Path) -> bool {
                     | ".gemini"
                     | ".windsurf"
                     | ".roo"
-                    | ".github"
                     | ".junie"
                     | ".amazonq"
                     | ".kiro"
@@ -700,7 +707,30 @@ fn has_customization_ancestor(path: &Path) -> bool {
     false
 }
 
+fn is_software_repo_root(dir: &Path) -> bool {
+    if !dir.join(".git").exists() {
+        return false;
+    }
+    [
+        "src",
+        "packages",
+        "internal",
+        "Server",
+        "server",
+        "go.mod",
+        "Cargo.toml",
+        "pyproject.toml",
+        "setup.py",
+        "CMakeLists.txt",
+    ]
+    .iter()
+    .any(|m| dir.join(m).exists())
+}
+
 pub fn is_plugin_or_skill_root(dir: &Path) -> bool {
+    if is_software_repo_root(dir) && !has_customization_ancestor(dir) {
+        return false;
+    }
     dir.join("plugin.json").is_file()
         || dir.join(".claude-plugin").is_dir()
         || dir.join(".codex-plugin").is_dir()
