@@ -249,15 +249,36 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     }
 
     let mut exposed_env_keys = Vec::new();
+    let mut preserved_profile_keys = Vec::new();
     for (k, v) in env::vars() {
         if allow_set.contains(&k) {
             continue;
         }
         if is_sensitive_env_pair(&k, &v, &engine) {
             exposed_env_keys.push(k);
+        } else if !v.trim().is_empty()
+            && matches!(
+                k.to_ascii_uppercase().as_str(),
+                "AWS_PROFILE"
+                    | "AWS_DEFAULT_PROFILE"
+                    | "AWS_CONFIG_FILE"
+                    | "AWS_SHARED_CREDENTIALS_FILE"
+                    | "KUBECONFIG"
+                    | "CLOUDSDK_ACTIVE_CONFIG_NAME"
+            )
+        {
+            preserved_profile_keys.push(k);
         }
     }
     exposed_env_keys.sort();
+    preserved_profile_keys.sort();
+    if scrub_env_enabled && !suppress_live_stderr && !preserved_profile_keys.is_empty() {
+        let _ = writeln!(
+            io::stderr(),
+            "[leaktap:info] Preserved ambient profile/context selector(s): {} (not stripped so CLI tools do not fall back to `[default]`; use an OS filesystem sandbox to restrict `~/.aws`/`~/.kube` access).",
+            preserved_profile_keys.join(", ")
+        );
+    }
 
     let local_api_tap = if inspect_api_enabled {
         let anth_upstream = env::var("LEAKTAP_UPSTREAM_ANTHROPIC_URL")
@@ -949,38 +970,37 @@ pub fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool 
         return false;
     }
 
-    // Scrub ambient cloud/cluster credential file pointers and profile selectors by default
-    // (pass `--allow-env <VAR>` to forward intentionally to a trusted CLI/MCP server).
-    let is_credential_file_or_profile = matches!(
+    // Scrub direct credential/token grant files and token-bearing CLI config dirs by default
+    // (pass `--allow-env <VAR>` to forward intentionally), while deliberately preserving multi-context
+    // profile selectors (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`,
+    // `AWS_SHARED_CREDENTIALS_FILE`, `KUBECONFIG`, `CLOUDSDK_ACTIVE_CONFIG_NAME`) so child `aws`/`kubectl`/`gcloud`
+    // commands do not silently fall back to `[default]` / production credentials.
+    let is_credential_grant_file = matches!(
         upper.as_str(),
         "GOOGLE_APPLICATION_CREDENTIALS"
             | "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"
             | "CLOUDSDK_CONFIG"
-            | "AWS_SHARED_CREDENTIALS_FILE"
-            | "AWS_CONFIG_FILE"
             | "AWS_WEB_IDENTITY_TOKEN_FILE"
             | "AZURE_FEDERATED_TOKEN_FILE"
-            | "KUBECONFIG"
-            | "DOCKER_CONFIG"
-            | "NPM_CONFIG_USERCONFIG"
-            | "AWS_PROFILE"
-            | "AWS_DEFAULT_PROFILE"
             | "AZURE_CONFIG_DIR"
             | "GH_CONFIG_DIR"
+            | "DOCKER_CONFIG"
+            | "NPM_CONFIG_USERCONFIG"
             | "TF_CLI_CONFIG_FILE"
             | "NETRC"
             | "PGPASSFILE"
             | "VAULT_TOKEN"
-    ) || upper.ends_with("_SECRET_FILE")
-        || upper.ends_with("_PASSWORD_FILE")
-        || upper.ends_with("_PASSWD_FILE")
-        || upper.ends_with("_TOKEN_FILE")
-        || upper.ends_with("_KEY_FILE")
-        || upper.ends_with("_CREDENTIALS_FILE")
-        || upper.ends_with("_CREDENTIAL_FILE")
-        || upper.ends_with("_AUTH_FILE")
-        || upper.ends_with("_PEM_FILE");
-    if is_credential_file_or_profile {
+    ) || (upper != "AWS_SHARED_CREDENTIALS_FILE"
+        && (upper.ends_with("_SECRET_FILE")
+            || upper.ends_with("_PASSWORD_FILE")
+            || upper.ends_with("_PASSWD_FILE")
+            || upper.ends_with("_TOKEN_FILE")
+            || upper.ends_with("_KEY_FILE")
+            || upper.ends_with("_CREDENTIALS_FILE")
+            || upper.ends_with("_CREDENTIAL_FILE")
+            || upper.ends_with("_AUTH_FILE")
+            || upper.ends_with("_PEM_FILE")));
+    if is_credential_grant_file {
         return !is_bool_or_null;
     }
 

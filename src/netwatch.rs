@@ -93,8 +93,10 @@ pub fn reap_reparented_zombies_except(exclude_pid: u32) {
     }
 }
 
-/// Spawns a zero-root background poller watching outbound TCP and connected UDP sockets opened by
-/// `root_pid` and its descendants (including reparented orphans).
+/// Spawns a zero-root user-space background poller watching outbound TCP and connected UDP sockets
+/// opened by `root_pid` and its descendants (including reparented orphans).
+/// Note: User-space polling (`2ms` on Linux `/proc`, `150ms` on macOS `lsof`) is best-effort
+/// telemetry and may miss sub-millisecond socket bursts or unconnected `sendto()` UDP datagrams.
 pub fn spawn_socket_watcher<F>(
     root_pid: u32,
     ignore_loopback_port: Option<u16>,
@@ -112,20 +114,27 @@ where
             return;
         }
         #[cfg(target_os = "macos")]
-        let poll_interval = Duration::from_millis(1000);
+        let poll_interval = Duration::from_millis(150);
         #[cfg(not(target_os = "macos"))]
-        let poll_interval = Duration::from_millis(10);
+        let poll_interval = Duration::from_millis(2);
 
         #[cfg(target_os = "macos")]
         let mut mac_cmdline_cache: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
 
         let mut seen: HashSet<(String, String, String)> = HashSet::new();
+        let mut resolved_tcp_inodes: HashSet<u64> = HashSet::new();
         #[allow(unused_mut)]
-        let mut sweep = |seen: &mut HashSet<(String, String, String)>, on_socket: &mut F| {
-            for mut obs in
-                list_tree_sockets(supervisor_pid, root_pid, ignore_loopback_port, &proxy_ports)
-            {
+        let mut sweep = |seen: &mut HashSet<(String, String, String)>,
+                         resolved_tcp_inodes: &mut HashSet<u64>,
+                         on_socket: &mut F| {
+            for mut obs in list_tree_sockets(
+                supervisor_pid,
+                root_pid,
+                ignore_loopback_port,
+                &proxy_ports,
+                resolved_tcp_inodes,
+            ) {
                 let dedup_key = (obs.proto.to_string(), obs.remote.clone(), obs.comm.clone());
                 if seen.insert(dedup_key) {
                     #[cfg(target_os = "macos")]
@@ -142,11 +151,11 @@ where
         };
 
         loop {
-            sweep(&mut seen, &mut on_socket);
+            sweep(&mut seen, &mut resolved_tcp_inodes, &mut on_socket);
             if stop.load(Ordering::Relaxed) {
                 // Brief post-exit grace sweep for double-forked background children finishing TCP/UDP handshakes
                 thread::sleep(Duration::from_millis(25));
-                sweep(&mut seen, &mut on_socket);
+                sweep(&mut seen, &mut resolved_tcp_inodes, &mut on_socket);
                 break;
             }
             thread::sleep(poll_interval);
@@ -212,6 +221,7 @@ fn list_tree_sockets(
     root_pid: u32,
     ignore_loopback_port: Option<u16>,
     proxy_ports: &HashSet<u16>,
+    resolved_tcp_inodes: &mut HashSet<u64>,
 ) -> Vec<SocketObservation> {
     use std::collections::HashMap;
     use std::fs;
@@ -239,6 +249,9 @@ fn list_tree_sockets(
             if let Some(rest) = s.strip_prefix("socket:[") {
                 if let Some(num_str) = rest.strip_suffix(']') {
                     if let Ok(inode) = num_str.parse::<u64>() {
+                        if resolved_tcp_inodes.contains(&inode) {
+                            continue;
+                        }
                         let owner = proc_info
                             .get_or_insert_with(|| read_linux_proc_owner(pid))
                             .clone();
@@ -247,6 +260,10 @@ fn list_tree_sockets(
                 }
             }
         }
+    }
+
+    if resolved_tcp_inodes.len() > 4096 {
+        resolved_tcp_inodes.clear();
     }
 
     if inode_owner.is_empty() {
@@ -266,12 +283,15 @@ fn list_tree_sockets(
             }
             let state = cols[3];
             // TCP: 01=ESTABLISHED, 02=SYN_SENT, 03=SYN_RECV, 04=FIN_WAIT1, 05=FIN_WAIT2,
-            // 08=CLOSE_WAIT, 09=LAST_ACK, 0B=CLOSING (all while FD inode is still open in /proc/<pid>/fd)
+            // 07=CLOSE (while FD still open with remote peer), 08=CLOSE_WAIT, 09=LAST_ACK, 0B=CLOSING
             // UDP connected sockets use 01 (established) or 07 with non-zero rem_address
             let active = if allow_udp_states {
                 state == "01" || state == "07"
             } else {
-                matches!(state, "01" | "02" | "03" | "04" | "05" | "08" | "09" | "0B")
+                matches!(
+                    state,
+                    "01" | "02" | "03" | "04" | "05" | "07" | "08" | "09" | "0B"
+                )
             };
             if !active {
                 continue;
@@ -300,6 +320,9 @@ fn list_tree_sockets(
             let ip = Ipv4Addr::from(raw_ip.to_be());
             if ip.is_unspecified() {
                 continue;
+            }
+            if !allow_udp_states {
+                resolved_tcp_inodes.insert(inode);
             }
             let is_loopback = ip.is_loopback();
             if is_loopback && (ignore_loopback_port == Some(port) || port == 53) {
@@ -332,7 +355,10 @@ fn list_tree_sockets(
             let active = if allow_udp_states {
                 state == "01" || state == "07"
             } else {
-                matches!(state, "01" | "02" | "03" | "04" | "05" | "08" | "09" | "0B")
+                matches!(
+                    state,
+                    "01" | "02" | "03" | "04" | "05" | "07" | "08" | "09" | "0B"
+                )
             };
             if !active {
                 continue;
@@ -379,6 +405,9 @@ fn list_tree_sockets(
             let ip6 = Ipv6Addr::from(octets);
             if ip6.is_unspecified() {
                 continue;
+            }
+            if !allow_udp_states {
+                resolved_tcp_inodes.insert(inode);
             }
             let (rendered, is_loopback) = match ip6.to_ipv4_mapped() {
                 Some(v4) => (format!("{v4}:{port}"), v4.is_loopback()),
@@ -429,9 +458,59 @@ fn read_linux_proc_owner(pid: u32) -> ProcOwner {
 }
 
 #[cfg(target_os = "linux")]
+fn read_proc_task_children(pid: u32) -> Option<Vec<u32>> {
+    use std::fs;
+    let task_dir = format!("/proc/{pid}/task");
+    let entries = fs::read_dir(task_dir).ok()?;
+    let mut kids = Vec::new();
+    let mut saw_children_file = false;
+    for entry in entries.flatten() {
+        let children_path = entry.path().join("children");
+        if let Ok(raw) = fs::read_to_string(children_path) {
+            saw_children_file = true;
+            for tok in raw.split_whitespace() {
+                if let Ok(child_pid) = tok.parse::<u32>() {
+                    if !kids.contains(&child_pid) {
+                        kids.push(child_pid);
+                    }
+                }
+            }
+        }
+    }
+    if saw_children_file {
+        Some(kids)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn collect_linux_descendants(supervisor_pid: u32, root_pid: u32) -> Vec<u32> {
     use std::collections::HashMap;
     use std::fs;
+
+    // Fast O(tree) traversal via `/proc/<pid>/task/<tid>/children` when supported by the kernel.
+    if let Some(sup_kids) = read_proc_task_children(supervisor_pid) {
+        let mut result = vec![root_pid];
+        for child in sup_kids {
+            if child != supervisor_pid && !result.contains(&child) {
+                result.push(child);
+            }
+        }
+        let mut idx = 0usize;
+        while idx < result.len() {
+            let cur = result[idx];
+            idx += 1;
+            if let Some(kids) = read_proc_task_children(cur) {
+                for k in kids {
+                    if k != supervisor_pid && !result.contains(&k) {
+                        result.push(k);
+                    }
+                }
+            }
+        }
+        return result;
+    }
 
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
     if let Ok(entries) = fs::read_dir("/proc") {
@@ -528,6 +607,7 @@ fn list_tree_sockets(
     root_pid: u32,
     ignore_loopback_port: Option<u16>,
     proxy_ports: &HashSet<u16>,
+    _resolved_tcp_inodes: &mut HashSet<u64>,
 ) -> Vec<SocketObservation> {
     use std::process::Command;
 
@@ -592,6 +672,7 @@ fn list_tree_sockets(
     _root_pid: u32,
     _ignore_loopback_port: Option<u16>,
     _proxy_ports: &HashSet<u16>,
+    _resolved_tcp_inodes: &mut HashSet<u64>,
 ) -> Vec<SocketObservation> {
     Vec::new()
 }

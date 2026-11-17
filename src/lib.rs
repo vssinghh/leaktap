@@ -43,12 +43,15 @@ pub fn execute(cli: Cli) -> i32 {
     let global_config = cli.config;
     let global_policy_git_ref = cli.policy_git_ref;
     let global_trust_project_config = cli.trust_project_config;
+    let global_mcp_pins_file = cli.mcp_pins_file;
     let global_update_mcp_pins = cli.update_mcp_pins;
     let global_no_config = cli.no_config;
     let global_block_secrets = cli.block_secrets;
     let global_redact_secrets = cli.redact_secrets;
     let global_scrub_ssh_agent = cli.scrub_ssh_agent;
     let global_allow_env = cli.allow_env;
+
+    crate::mcp_inspect::set_configured_mcp_pins_path(global_mcp_pins_file.clone());
 
     match cli.command.unwrap_or(Commands::Scan(ScanArgs::default())) {
         Commands::Scan(mut args) => {
@@ -57,6 +60,9 @@ pub fn execute(cli: Cli) -> i32 {
             }
             if args.policy_git_ref.is_none() {
                 args.policy_git_ref = global_policy_git_ref;
+            }
+            if args.mcp_pins_file.is_none() {
+                args.mcp_pins_file = global_mcp_pins_file;
             }
             args.trust_project_config |= global_trust_project_config;
             args.update_mcp_pins |= global_update_mcp_pins;
@@ -122,6 +128,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.mcp_pins_file = global_mcp_pins_file;
             tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
@@ -138,6 +145,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.mcp_pins_file = global_mcp_pins_file;
             tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
@@ -154,6 +162,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.mcp_pins_file = global_mcp_pins_file;
             tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
@@ -170,6 +179,7 @@ pub fn execute(cli: Cli) -> i32 {
                 global_no_config,
             );
             tap_args.redact_secrets = global_redact_secrets;
+            tap_args.mcp_pins_file = global_mcp_pins_file;
             tap_args.update_mcp_pins = global_update_mcp_pins;
             execute_tap(&tap_args)
         }
@@ -190,6 +200,9 @@ pub fn execute(cli: Cli) -> i32 {
             }
             if args.policy_git_ref.is_none() {
                 args.policy_git_ref = global_policy_git_ref;
+            }
+            if args.mcp_pins_file.is_none() {
+                args.mcp_pins_file = global_mcp_pins_file;
             }
             execute_tap(&args)
         }
@@ -256,6 +269,9 @@ fn warn_ignored_untrusted_configs(policy: &PolicyConfig) {
 }
 
 fn execute_tap(args: &TapArgs) -> i32 {
+    if let Some(ref pins) = args.mcp_pins_file {
+        crate::mcp_inspect::set_configured_mcp_pins_path(Some(pins.clone()));
+    }
     if !args.quiet {
         warn_ci_untrusted_project_config(
             args.trust_project_config,
@@ -302,6 +318,9 @@ pub fn run_scan_report(args: &ScanArgs) -> FullScanReport {
 }
 
 pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> FullScanReport {
+    if let Some(ref pins) = args.mcp_pins_file {
+        crate::mcp_inspect::set_configured_mcp_pins_path(Some(pins.clone()));
+    }
     let started = Instant::now();
     let mut engine = RuleEngine::with_policy(!args.no_pii, Some(policy));
     engine.set_honor_inline_ignore(!args.no_inline_ignore);
@@ -443,7 +462,24 @@ pub fn execute_scan(args: &ScanArgs) -> i32 {
         }
     }
 
-    let should_fail = match (args.fail_on, report.highest_severity()) {
+    let effective_fail_on = if args.ci && args.fail_on == FailThreshold::None {
+        FailThreshold::High
+    } else {
+        args.fail_on
+    };
+
+    if effective_fail_on == FailThreshold::None
+        && is_ci_environment()
+        && report
+            .highest_severity()
+            .is_some_and(|s| s >= Severity::High)
+    {
+        eprintln!(
+            "[leaktap:info] HIGH/CRITICAL findings detected in advisory mode (`--fail-on none`, exit 0); pass `--ci` or `--fail-on high` to fail CI builds."
+        );
+    }
+
+    let should_fail = match (effective_fail_on, report.highest_severity()) {
         (FailThreshold::None, _) | (_, None) => false,
         (FailThreshold::Medium, Some(sev)) => sev >= Severity::Medium,
         (FailThreshold::High, Some(sev)) => sev >= Severity::High,

@@ -1005,9 +1005,15 @@ fn detect_tool_prompt_injection(lower: &str) -> Option<&'static str> {
         "<hidden>",
         "<!--",
         "ignore previous instructions",
+        "ignore all previous",
+        "ignore prior instructions",
         "ignore all prior instructions",
         "disregard previous",
+        "disregard all previous",
+        "disregard prior",
         "override system prompt",
+        "override safety",
+        "system override:",
         "do not mention",
         "don't mention",
         "never mention",
@@ -1416,7 +1422,20 @@ fn detect_tool_exfil_sink(cleaned: &str, lower: &str) -> Option<String> {
     None
 }
 
+static CONFIGURED_MCP_PINS_FILE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+pub fn set_configured_mcp_pins_path(path: Option<PathBuf>) {
+    if let Ok(mut guard) = CONFIGURED_MCP_PINS_FILE.write() {
+        *guard = path.filter(|p| !p.as_os_str().is_empty());
+    }
+}
+
 fn mcp_pins_file_path() -> Option<PathBuf> {
+    if let Ok(guard) = CONFIGURED_MCP_PINS_FILE.read() {
+        if let Some(p) = guard.as_ref() {
+            return Some(p.clone());
+        }
+    }
     if let Some(ovr) = std::env::var_os("LEAKTAP_MCP_PINS_FILE") {
         if !ovr.is_empty() {
             return Some(PathBuf::from(ovr));

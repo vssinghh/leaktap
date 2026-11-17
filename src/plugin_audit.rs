@@ -271,7 +271,7 @@ fn plugin_regexes() -> &'static PluginRegexes {
         )
         .expect("cred_path_join regex"),
         url_var_assign: Regex::new(
-            r#"(?m)^\s*(?:(?:const|let|var|export\s+const|final|val)\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*['"`](https?://[^'"`\s]+)['"`]"#,
+            r#"(?m)^\s*(?:(?:const|let|var|export\s+const|final|val)\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:(?:new\s+)?[A-Za-z0-9_.]+\s*\(\s*)?['"`](https?://[^'"`\s]+)['"`]"#,
         )
         .expect("url_var_assign regex"),
         prompt_override: Regex::new(
@@ -602,8 +602,16 @@ fn audit_single_plugin_file(
     let display = shorten_home(logical_path);
     let is_settings_file = matches!(file_name, "settings.json" | "settings.local.json");
     let is_hooks_file = file_name == "hooks.json" || is_settings_file;
-    let is_json_config =
-        is_hooks_file || matches!(file_name, "plugin.json" | "gemini-extension.json");
+    let is_json_config = is_hooks_file
+        || matches!(
+            file_name,
+            "plugin.json"
+                | "gemini-extension.json"
+                | "tasks.json"
+                | "devcontainer.json"
+                | ".devcontainer.json"
+                | "package.json"
+        );
     let is_prompt_doc = is_instruction_doc_file(logical_path, file_name);
 
     if !crate::scanner::is_sqlite_extension(logical_path)
@@ -710,6 +718,89 @@ fn audit_single_plugin_file(
         None
     };
 
+    // Dedicated zero-FP structured auditors for workspace `package.json`, `.vscode/tasks.json`,
+    // and `.devcontainer/devcontainer.json` (avoiding generic URL/harvest noise on dependency lists).
+    if file_name == "package.json" {
+        if let Some(ref json) = parsed_json_opt {
+            audit_package_json_manifest(
+                disk_path,
+                logical_path,
+                sandbox_remap,
+                &display,
+                &norm_raw,
+                json,
+                engine,
+                out,
+                seen_fp,
+            );
+        }
+        check_hardcoded_secrets(
+            logical_path,
+            &display,
+            &label,
+            &norm_raw,
+            1,
+            engine,
+            out,
+            seen_fp,
+        );
+        return;
+    }
+
+    if file_name.eq_ignore_ascii_case("tasks.json") {
+        if let Some(ref json) = parsed_json_opt {
+            audit_vscode_tasks_json(
+                disk_path,
+                logical_path,
+                sandbox_remap,
+                &display,
+                &norm_raw,
+                json,
+                engine,
+                out,
+                seen_fp,
+            );
+        }
+        check_hardcoded_secrets(
+            logical_path,
+            &display,
+            &label,
+            &norm_raw,
+            1,
+            engine,
+            out,
+            seen_fp,
+        );
+        return;
+    }
+
+    if matches!(file_name, "devcontainer.json" | ".devcontainer.json") {
+        if let Some(ref json) = parsed_json_opt {
+            audit_devcontainer_json(
+                disk_path,
+                logical_path,
+                sandbox_remap,
+                &display,
+                &norm_raw,
+                json,
+                engine,
+                out,
+                seen_fp,
+            );
+        }
+        check_hardcoded_secrets(
+            logical_path,
+            &display,
+            &label,
+            &norm_raw,
+            1,
+            engine,
+            out,
+            seen_fp,
+        );
+        return;
+    }
+
     // 1. Audit lifecycle hooks, helper commands, and `env` overrides in `hooks.json` and `settings*.json`
     if is_hooks_file {
         if let Some(ref json) = parsed_json_opt {
@@ -797,7 +888,8 @@ fn audit_single_plugin_file(
     );
 
     // 3c. Check outbound external network calls inside executable skill/plugin scripts (`skills/*/scripts/*`, standalone `SKILL.md` / `plugin.json` bundles)
-    if !is_prompt_doc && is_skill_script_path(disk_path, logical_path) {
+    let is_skill_script = !is_prompt_doc && is_skill_script_path(disk_path, logical_path);
+    if is_skill_script {
         let net_hit = detect_non_official_external_network_call(&norm_raw).or_else(|| {
             decode_powershell_encoded_commands(&norm_raw)
                 .into_iter()
@@ -825,6 +917,31 @@ fn audit_single_plugin_file(
                 },
             );
         }
+    }
+
+    // 3d. Follow up to 2 hops of local imported helper scripts (`import collector`, `require('./net')`, `source ./lib.sh`)
+    // and correlate cross-file environment/secret exfiltration across the module graph.
+    if !is_prompt_doc
+        && (has_script_extension(logical_path)
+            || has_script_extension(disk_path)
+            || is_shebang_script(disk_path))
+    {
+        let script_dir = disk_path.parent().unwrap_or_else(|| Path::new("."));
+        let root_bound = infer_script_project_root(disk_path);
+        let _ = audit_imported_script_graph(
+            disk_path,
+            logical_path,
+            &display,
+            &label,
+            &norm_raw,
+            script_dir,
+            root_bound,
+            sandbox_remap,
+            is_skill_script,
+            engine,
+            out,
+            seen_fp,
+        );
     }
 
     // 4. Check prompt injection, stealth directives, & exfiltration commands in markdown/rule instruction files
@@ -1473,6 +1590,7 @@ fn infer_project_root<'a>(hooks_dir: &'a Path, plugin_root: &'a Path) -> &'a Pat
                     | ".agents"
                     | ".agent"
                     | ".vscode"
+                    | ".devcontainer"
                     | ".continue"
                     | ".windsurf"
                     | ".roo"
@@ -2205,7 +2323,22 @@ fn audit_hooks_config(
                                 out,
                                 seen_fp,
                             );
-                            detect_external_network_call(&script_body)
+                            let script_dir = script_path.parent().unwrap_or(project_root);
+                            let imported_net = audit_imported_script_graph(
+                                &script_path,
+                                &logical_script_path,
+                                &script_display,
+                                &script_label,
+                                &script_body,
+                                script_dir,
+                                project_root,
+                                sandbox_remap,
+                                false,
+                                engine,
+                                out,
+                                seen_fp,
+                            );
+                            detect_external_network_call(&script_body).or(imported_net)
                         }
                         ResolvedScriptBody::StreamedLargeFile => audit_streamed_plugin_file(
                             &script_path,
@@ -5738,6 +5871,55 @@ pub(crate) fn audit_referenced_mcp_scripts(
                         out,
                         &mut seen_fp,
                     );
+                    let mcp_script_is_skill = is_skill_script_path(&cand, &logical_script_path);
+                    if mcp_script_is_skill {
+                        let net_hit = detect_non_official_external_network_call(&script_body)
+                            .or_else(|| {
+                                decode_powershell_encoded_commands(&script_body)
+                                    .into_iter()
+                                    .find_map(|(ps_ln, ps_txt)| {
+                                        detect_non_official_external_network_call(&ps_txt)
+                                            .map(|(_, desc)| (ps_ln, desc))
+                                    })
+                            });
+                        if let Some((net_line, target_desc)) = net_hit {
+                            let fp = fingerprint_match(
+                                "plugin-skill-network",
+                                &format!("{script_display}:{target_desc}"),
+                            );
+                            push_finding(
+                                out,
+                                &mut seen_fp,
+                                McpFinding {
+                                    rule_id: "plugin-skill-network",
+                                    server_name: mcp_label.clone(),
+                                    config_file: script_display.clone(),
+                                    config_path: logical_script_path.clone(),
+                                    line: net_line.max(1),
+                                    severity: Severity::Medium,
+                                    fingerprint: fp,
+                                    message: format!(
+                                        "Skill or plugin script makes an outbound network call ({target_desc}) — inspect script inputs for data exfiltration"
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                    let script_dir = cand.parent().unwrap_or(project_root);
+                    let _ = audit_imported_script_graph(
+                        &cand,
+                        &logical_script_path,
+                        &script_display,
+                        &mcp_label,
+                        &script_body,
+                        script_dir,
+                        project_root,
+                        sandbox_remap,
+                        mcp_script_is_skill,
+                        engine,
+                        out,
+                        &mut seen_fp,
+                    );
                 }
             } else {
                 let _ = audit_streamed_plugin_file(
@@ -5863,6 +6045,18 @@ fn component_label(path: &Path, raw: &str) -> String {
         return "settings-hooks".to_string();
     }
 
+    if file_name == "package.json" {
+        return "npm-scripts".to_string();
+    }
+
+    if file_name.eq_ignore_ascii_case("tasks.json") {
+        return "vscode-tasks".to_string();
+    }
+
+    if matches!(file_name, "devcontainer.json" | ".devcontainer.json") {
+        return "devcontainer".to_string();
+    }
+
     if file_name == "SKILL.md" {
         if let Some(parent) = path
             .parent()
@@ -5902,5 +6096,1653 @@ fn truncate_snippet(s: &str, max_chars: usize) -> String {
         format!("{head}...")
     } else {
         head
+    }
+}
+
+const NPM_AUTO_LIFECYCLE_KEYS: &[&str] = &[
+    "preinstall",
+    "install",
+    "postinstall",
+    "preuninstall",
+    "postuninstall",
+    "prepare",
+    "prepublish",
+];
+
+#[allow(clippy::too_many_arguments)]
+fn audit_package_json_manifest(
+    disk_path: &Path,
+    logical_path: &Path,
+    sandbox_remap: Option<(&Path, &Path)>,
+    display: &str,
+    raw_file: &str,
+    json: &Value,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) {
+    let Some(scripts_obj) = json.get("scripts").and_then(|v| v.as_object()) else {
+        return;
+    };
+    let pkg_dir = disk_path.parent().unwrap_or_else(|| Path::new("."));
+    let pkg_name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("package");
+
+    for &hook_key in NPM_AUTO_LIFECYCLE_KEYS {
+        let Some(cmd_raw) = scripts_obj.get(hook_key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let cmd_trimmed = cmd_raw.trim();
+        if cmd_trimmed.is_empty() {
+            continue;
+        }
+        let hook_line = find_line_number(raw_file, hook_key);
+        let hook_label = format!("npm:{pkg_name}:{hook_key}");
+
+        check_unicode_smuggling(
+            logical_path,
+            display,
+            &hook_label,
+            cmd_trimmed,
+            false,
+            hook_line,
+            out,
+            seen_fp,
+        );
+        let cmd = strip_invisible_unicode(cmd_trimmed);
+
+        if let Some(rce_snip) = detect_inline_rce(&cmd) {
+            let fp = fingerprint_match(
+                "npm-lifecycle-script-exec",
+                &format!("{display}:{hook_key}:rce:{rce_snip}"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "npm-lifecycle-script-exec",
+                    server_name: hook_label.clone(),
+                    config_file: display.to_string(),
+                    config_path: logical_path.to_path_buf(),
+                    line: hook_line,
+                    severity: Severity::Critical,
+                    fingerprint: fp,
+                    message: format!(
+                        "`package.json` auto-run `{hook_key}` script executes remote or decoded code payload (`{rce_snip}`)"
+                    ),
+                },
+            );
+        }
+
+        check_credential_harvest(
+            logical_path,
+            display,
+            &hook_label,
+            &cmd,
+            false,
+            hook_line,
+            out,
+            seen_fp,
+        );
+        check_env_and_secret_exfiltration(
+            logical_path,
+            display,
+            &hook_label,
+            &cmd,
+            false,
+            hook_line,
+            out,
+            seen_fp,
+        );
+        check_hardcoded_secrets(
+            logical_path,
+            display,
+            &hook_label,
+            &cmd,
+            hook_line,
+            engine,
+            out,
+            seen_fp,
+        );
+
+        if let Some((_, target_desc)) = detect_non_official_external_network_call(&cmd) {
+            let fp = fingerprint_match(
+                "npm-lifecycle-script-exec",
+                &format!("{display}:{hook_key}:net:{target_desc}"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "npm-lifecycle-script-exec",
+                    server_name: hook_label.clone(),
+                    config_file: display.to_string(),
+                    config_path: logical_path.to_path_buf(),
+                    line: hook_line,
+                    severity: Severity::High,
+                    fingerprint: fp,
+                    message: format!(
+                        "`package.json` auto-run `{hook_key}` script makes an outbound network call ({target_desc}) during package installation"
+                    ),
+                },
+            );
+        }
+
+        audit_workspace_command_local_scripts(
+            &cmd,
+            pkg_dir,
+            pkg_dir,
+            sandbox_remap,
+            logical_path,
+            display,
+            &hook_label,
+            hook_line,
+            Some(("npm-lifecycle-script-exec", hook_key)),
+            engine,
+            out,
+            seen_fp,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_vscode_tasks_json(
+    disk_path: &Path,
+    logical_path: &Path,
+    sandbox_remap: Option<(&Path, &Path)>,
+    display: &str,
+    raw_file: &str,
+    json: &Value,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) {
+    let tasks_dir = disk_path.parent().unwrap_or_else(|| Path::new("."));
+    let project_root = infer_project_root(tasks_dir, tasks_dir);
+    let Some(tasks_arr) = json.get("tasks").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    for (idx, task) in tasks_arr.iter().enumerate() {
+        let Some(task_obj) = task.as_object() else {
+            continue;
+        };
+        let task_name = task_obj
+            .get("label")
+            .or_else(|| task_obj.get("taskName"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("task#{}", idx + 1));
+
+        let runs_on_folder_open = task_obj
+            .get("runOptions")
+            .and_then(|v| v.get("runOn"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("folderOpen"));
+
+        let mut cmd_parts = Vec::new();
+        collect_vscode_task_command_strings(task_obj, &mut cmd_parts);
+        for os_key in ["windows", "osx", "linux"] {
+            if let Some(os_obj) = task_obj.get(os_key).and_then(|v| v.as_object()) {
+                collect_vscode_task_command_strings(os_obj, &mut cmd_parts);
+            }
+        }
+        let full_cmd = cmd_parts.join(" ");
+        let task_line = find_line_number(raw_file, &task_name);
+        let task_label = format!("task:{task_name}");
+
+        if runs_on_folder_open {
+            let clean_cmd = strip_invisible_unicode(&full_cmd);
+            let inline_rce = detect_inline_rce(&clean_cmd);
+            let sev = if inline_rce.is_some() {
+                Severity::Critical
+            } else {
+                Severity::High
+            };
+            let cmd_snip = if clean_cmd.trim().is_empty() {
+                "<compound task>".to_string()
+            } else {
+                truncate_snippet(clean_cmd.trim(), 64)
+            };
+            let fp = fingerprint_match(
+                "ide-folder-open-task",
+                &format!("{display}:{task_name}:{cmd_snip}"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "ide-folder-open-task",
+                    server_name: task_label.clone(),
+                    config_file: display.to_string(),
+                    config_path: logical_path.to_path_buf(),
+                    line: task_line,
+                    severity: sev,
+                    fingerprint: fp,
+                    message: format!(
+                        "IDE task `{task_name}` sets `runOptions.runOn: \"folderOpen\"` (`{cmd_snip}`) — opening this workspace executes repo-controlled commands automatically"
+                    ),
+                },
+            );
+        }
+
+        if full_cmd.trim().is_empty() {
+            continue;
+        }
+        check_unicode_smuggling(
+            logical_path,
+            display,
+            &task_label,
+            &full_cmd,
+            false,
+            task_line,
+            out,
+            seen_fp,
+        );
+        let cmd = strip_invisible_unicode(&full_cmd);
+        check_remote_code_exec(
+            logical_path,
+            display,
+            &task_label,
+            &cmd,
+            false,
+            task_line,
+            out,
+            seen_fp,
+        );
+        check_credential_harvest(
+            logical_path,
+            display,
+            &task_label,
+            &cmd,
+            false,
+            task_line,
+            out,
+            seen_fp,
+        );
+        check_env_and_secret_exfiltration(
+            logical_path,
+            display,
+            &task_label,
+            &cmd,
+            false,
+            task_line,
+            out,
+            seen_fp,
+        );
+        check_hardcoded_secrets(
+            logical_path,
+            display,
+            &task_label,
+            &cmd,
+            task_line,
+            engine,
+            out,
+            seen_fp,
+        );
+
+        let net_rule = runs_on_folder_open.then_some(("ide-folder-open-task", task_name.as_str()));
+        audit_workspace_command_local_scripts(
+            &cmd,
+            tasks_dir,
+            project_root,
+            sandbox_remap,
+            logical_path,
+            display,
+            &task_label,
+            task_line,
+            net_rule,
+            engine,
+            out,
+            seen_fp,
+        );
+    }
+}
+
+fn collect_vscode_task_command_strings(
+    obj: &serde_json::Map<String, Value>,
+    out: &mut Vec<String>,
+) {
+    if let Some(cmd) = obj.get("command").and_then(|v| v.as_str()) {
+        let t = cmd.trim();
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+    }
+    if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
+        for a in args {
+            if let Some(s) = a.as_str() {
+                out.push(s.to_string());
+            } else if let Some(val_s) = a
+                .as_object()
+                .and_then(|m| m.get("value"))
+                .and_then(|v| v.as_str())
+            {
+                out.push(val_s.to_string());
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_devcontainer_json(
+    disk_path: &Path,
+    logical_path: &Path,
+    sandbox_remap: Option<(&Path, &Path)>,
+    display: &str,
+    raw_file: &str,
+    json: &Value,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) {
+    let Some(root_obj) = json.as_object() else {
+        return;
+    };
+    let dev_dir = disk_path.parent().unwrap_or_else(|| Path::new("."));
+    let project_root = infer_project_root(dev_dir, dev_dir);
+
+    for env_key in ["containerEnv", "remoteEnv"] {
+        if let Some(env_obj) = root_obj.get(env_key).and_then(|v| v.as_object()) {
+            let prefix = format!("devcontainer:{env_key}");
+            audit_env_object_overrides(
+                logical_path,
+                display,
+                raw_file,
+                env_obj,
+                &prefix,
+                "Dev Container config",
+                true,
+                true,
+                engine,
+                out,
+                seen_fp,
+            );
+        }
+    }
+
+    if root_obj.get("privileged").and_then(|v| v.as_bool()) == Some(true) {
+        let line = find_line_number(raw_file, "privileged");
+        let fp = fingerprint_match(
+            "devcontainer-lifecycle-exec",
+            &format!("{display}:privileged"),
+        );
+        push_finding(
+            out,
+            seen_fp,
+            McpFinding {
+                rule_id: "devcontainer-lifecycle-exec",
+                server_name: "devcontainer:privileged".to_string(),
+                config_file: display.to_string(),
+                config_path: logical_path.to_path_buf(),
+                line,
+                severity: Severity::High,
+                fingerprint: fp,
+                message: "`devcontainer.json` enables `privileged: true`, granting root-equivalent host kernel and device access".to_string(),
+            },
+        );
+    }
+
+    if let Some(run_args) = root_obj.get("runArgs").and_then(|v| v.as_array()) {
+        let joined = run_args
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let lower = joined.to_ascii_lowercase();
+        let line = find_line_number(raw_file, "runArgs");
+        if lower.contains("docker.sock") {
+            let fp = fingerprint_match(
+                "devcontainer-lifecycle-exec",
+                &format!("{display}:runArgs:docker.sock"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "devcontainer-lifecycle-exec",
+                    server_name: "devcontainer:runArgs".to_string(),
+                    config_file: display.to_string(),
+                    config_path: logical_path.to_path_buf(),
+                    line,
+                    severity: Severity::Critical,
+                    fingerprint: fp,
+                    message: "`devcontainer.json` `runArgs` mounts `/var/run/docker.sock`, allowing trivial host root escape".to_string(),
+                },
+            );
+        } else if lower.contains("--privileged")
+            || lower.contains("--pid=host")
+            || lower.contains("--network=host")
+            || lower.contains("--ipc=host")
+            || lower.contains("--uts=host")
+        {
+            let snip = truncate_snippet(&joined, 64);
+            let fp = fingerprint_match(
+                "devcontainer-lifecycle-exec",
+                &format!("{display}:runArgs:{snip}"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "devcontainer-lifecycle-exec",
+                    server_name: "devcontainer:runArgs".to_string(),
+                    config_file: display.to_string(),
+                    config_path: logical_path.to_path_buf(),
+                    line,
+                    severity: Severity::High,
+                    fingerprint: fp,
+                    message: format!(
+                        "`devcontainer.json` `runArgs` weakens container isolation (`{snip}`)"
+                    ),
+                },
+            );
+        }
+        check_credential_harvest(
+            logical_path,
+            display,
+            "devcontainer:runArgs",
+            &joined,
+            false,
+            line,
+            out,
+            seen_fp,
+        );
+    }
+
+    if let Some(mounts) = root_obj.get("mounts").and_then(|v| v.as_array()) {
+        let mounts_raw = serde_json::to_string(mounts).unwrap_or_default();
+        let line = find_line_number(raw_file, "mounts");
+        if mounts_raw.to_ascii_lowercase().contains("docker.sock") {
+            let fp = fingerprint_match(
+                "devcontainer-lifecycle-exec",
+                &format!("{display}:mounts:docker.sock"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "devcontainer-lifecycle-exec",
+                    server_name: "devcontainer:mounts".to_string(),
+                    config_file: display.to_string(),
+                    config_path: logical_path.to_path_buf(),
+                    line,
+                    severity: Severity::Critical,
+                    fingerprint: fp,
+                    message: "`devcontainer.json` `mounts` binds `/var/run/docker.sock`, allowing host root escape".to_string(),
+                },
+            );
+        }
+        check_credential_harvest(
+            logical_path,
+            display,
+            "devcontainer:mounts",
+            &mounts_raw,
+            false,
+            line,
+            out,
+            seen_fp,
+        );
+    }
+
+    for &(hook_key, runs_on_host) in &[
+        ("initializeCommand", true),
+        ("onCreateCommand", false),
+        ("updateContentCommand", false),
+        ("postCreateCommand", false),
+        ("postStartCommand", false),
+        ("postAttachCommand", false),
+    ] {
+        let Some(hook_val) = root_obj.get(hook_key) else {
+            continue;
+        };
+        let cmds = extract_devcontainer_commands(hook_val);
+        if cmds.is_empty() {
+            continue;
+        }
+        let hook_line = find_line_number(raw_file, hook_key);
+        let hook_label = format!("devcontainer:{hook_key}");
+
+        for raw_cmd in cmds {
+            check_unicode_smuggling(
+                logical_path,
+                display,
+                &hook_label,
+                &raw_cmd,
+                false,
+                hook_line,
+                out,
+                seen_fp,
+            );
+            let cmd = strip_invisible_unicode(&raw_cmd);
+            let inline_rce = detect_inline_rce(&cmd);
+
+            if runs_on_host {
+                let sev = if inline_rce.is_some() {
+                    Severity::Critical
+                } else {
+                    Severity::High
+                };
+                let cmd_snip = truncate_snippet(&cmd, 64);
+                let fp = fingerprint_match(
+                    "devcontainer-lifecycle-exec",
+                    &format!("{display}:{hook_key}:{cmd_snip}"),
+                );
+                push_finding(
+                    out,
+                    seen_fp,
+                    McpFinding {
+                        rule_id: "devcontainer-lifecycle-exec",
+                        server_name: hook_label.clone(),
+                        config_file: display.to_string(),
+                        config_path: logical_path.to_path_buf(),
+                        line: hook_line,
+                        severity: sev,
+                        fingerprint: fp,
+                        message: format!(
+                            "`devcontainer.json` sets `initializeCommand` (`{cmd_snip}`), which executes directly on the host OS before container creation"
+                        ),
+                    },
+                );
+            } else if let Some(ref rce_snip) = inline_rce {
+                let fp = fingerprint_match(
+                    "devcontainer-lifecycle-exec",
+                    &format!("{display}:{hook_key}:rce:{rce_snip}"),
+                );
+                push_finding(
+                    out,
+                    seen_fp,
+                    McpFinding {
+                        rule_id: "devcontainer-lifecycle-exec",
+                        server_name: hook_label.clone(),
+                        config_file: display.to_string(),
+                        config_path: logical_path.to_path_buf(),
+                        line: hook_line,
+                        severity: Severity::Critical,
+                        fingerprint: fp,
+                        message: format!(
+                            "`devcontainer.json` `{hook_key}` executes remote or decoded code payload (`{rce_snip}`)"
+                        ),
+                    },
+                );
+            } else if let Some((_, target_desc)) = detect_non_official_external_network_call(&cmd) {
+                let fp = fingerprint_match(
+                    "devcontainer-lifecycle-exec",
+                    &format!("{display}:{hook_key}:net:{target_desc}"),
+                );
+                push_finding(
+                    out,
+                    seen_fp,
+                    McpFinding {
+                        rule_id: "devcontainer-lifecycle-exec",
+                        server_name: hook_label.clone(),
+                        config_file: display.to_string(),
+                        config_path: logical_path.to_path_buf(),
+                        line: hook_line,
+                        severity: Severity::High,
+                        fingerprint: fp,
+                        message: format!(
+                            "`devcontainer.json` `{hook_key}` makes an outbound network call ({target_desc}) automatically"
+                        ),
+                    },
+                );
+            }
+
+            check_remote_code_exec(
+                logical_path,
+                display,
+                &hook_label,
+                &cmd,
+                false,
+                hook_line,
+                out,
+                seen_fp,
+            );
+            check_credential_harvest(
+                logical_path,
+                display,
+                &hook_label,
+                &cmd,
+                false,
+                hook_line,
+                out,
+                seen_fp,
+            );
+            check_env_and_secret_exfiltration(
+                logical_path,
+                display,
+                &hook_label,
+                &cmd,
+                false,
+                hook_line,
+                out,
+                seen_fp,
+            );
+            check_hardcoded_secrets(
+                logical_path,
+                display,
+                &hook_label,
+                &cmd,
+                hook_line,
+                engine,
+                out,
+                seen_fp,
+            );
+
+            audit_workspace_command_local_scripts(
+                &cmd,
+                dev_dir,
+                project_root,
+                sandbox_remap,
+                logical_path,
+                display,
+                &hook_label,
+                hook_line,
+                Some(("devcontainer-lifecycle-exec", hook_key)),
+                engine,
+                out,
+                seen_fp,
+            );
+        }
+    }
+}
+
+fn extract_devcontainer_commands(val: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match val {
+        Value::String(s) => {
+            let t = s.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+        Value::Array(arr) => {
+            let parts: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+            if !parts.is_empty() {
+                out.push(parts.join(" "));
+            }
+        }
+        Value::Object(map) => {
+            for sub in map.values() {
+                out.extend(extract_devcontainer_commands(sub));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_workspace_command_local_scripts(
+    cmd: &str,
+    config_dir: &Path,
+    project_root: &Path,
+    sandbox_remap: Option<(&Path, &Path)>,
+    parent_logical_path: &Path,
+    parent_display: &str,
+    hook_label: &str,
+    hook_line: usize,
+    net_finding_rule: Option<(&'static str, &str)>,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) {
+    for (script_path, script_rel, resolved_body) in
+        resolve_hook_handler_scripts(cmd, config_dir, project_root, project_root, sandbox_remap)
+    {
+        if script_path
+            .components()
+            .any(|c| c.as_os_str() == "node_modules")
+        {
+            continue;
+        }
+        let logical_script_path = if let Some((sandbox_root, repo_root)) = sandbox_remap {
+            let csb = sandbox_root
+                .canonicalize()
+                .unwrap_or_else(|_| sandbox_root.to_path_buf());
+            script_path
+                .strip_prefix(&csb)
+                .or_else(|_| script_path.strip_prefix(sandbox_root))
+                .map(|r| repo_root.join(r))
+                .unwrap_or_else(|_| script_path.clone())
+        } else {
+            script_path.clone()
+        };
+        let script_display = shorten_home(&logical_script_path);
+        let net_target = match resolved_body {
+            ResolvedScriptBody::InMemory(raw_script_body) => {
+                check_unicode_smuggling(
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &raw_script_body,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                let script_body = strip_invisible_unicode(&raw_script_body);
+                check_remote_code_exec(
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &script_body,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                check_credential_harvest(
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &script_body,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                check_env_and_secret_exfiltration(
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &script_body,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                check_hardcoded_secrets(
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &script_body,
+                    1,
+                    engine,
+                    out,
+                    seen_fp,
+                );
+                check_telemetry_domains(
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &script_body,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                let script_dir = script_path.parent().unwrap_or(project_root);
+                let imported_net = audit_imported_script_graph(
+                    &script_path,
+                    &logical_script_path,
+                    &script_display,
+                    hook_label,
+                    &script_body,
+                    script_dir,
+                    project_root,
+                    sandbox_remap,
+                    false,
+                    engine,
+                    out,
+                    seen_fp,
+                );
+                detect_non_official_external_network_call(&script_body)
+                    .map(|(_, d)| d)
+                    .or(imported_net)
+            }
+            ResolvedScriptBody::StreamedLargeFile => audit_streamed_plugin_file(
+                &script_path,
+                &logical_script_path,
+                &script_display,
+                false,
+                engine,
+                out,
+                seen_fp,
+            ),
+            ResolvedScriptBody::CompiledBinary => audit_compiled_binary_file(
+                &script_path,
+                &logical_script_path,
+                &script_display,
+                hook_label,
+                hook_line,
+                engine,
+                out,
+                seen_fp,
+            ),
+        };
+
+        if let (Some((rule_id, event_key)), Some(target_desc)) = (net_finding_rule, net_target) {
+            let fp = fingerprint_match(
+                rule_id,
+                &format!("{parent_display}:{event_key}:{script_rel}:{target_desc}"),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id,
+                    server_name: hook_label.to_string(),
+                    config_file: parent_display.to_string(),
+                    config_path: parent_logical_path.to_path_buf(),
+                    line: hook_line,
+                    severity: Severity::High,
+                    fingerprint: fp,
+                    message: format!(
+                        "Auto-run `{event_key}` invokes local script `{script_rel}` making an outbound network call ({target_desc})"
+                    ),
+                },
+            );
+        }
+    }
+}
+
+fn infer_script_project_root(script_path: &Path) -> &Path {
+    let parent = script_path.parent().unwrap_or(script_path);
+    for anc in script_path.ancestors().skip(1).take(6) {
+        if anc.join(".git").exists()
+            || anc.join("plugin.json").is_file()
+            || anc.join("SKILL.md").is_file()
+            || anc.join(".mcp.json").is_file()
+            || anc.join("package.json").is_file()
+            || anc.join("pyproject.toml").is_file()
+        {
+            return anc;
+        }
+    }
+    parent
+}
+
+struct LocalImportRegexes {
+    js_static: Regex,
+    js_call: Regex,
+}
+
+fn local_import_regexes() -> &'static LocalImportRegexes {
+    static RE: OnceLock<LocalImportRegexes> = OnceLock::new();
+    RE.get_or_init(|| LocalImportRegexes {
+        js_static: Regex::new(
+            r#"(?m)(?:^|[;\s])(?:import|export)\s+(?:[^'"`\n;]{0,160}?\s+from\s+)?['"]([^'"\n]{1,180})['"]"#,
+        )
+        .expect("js_static import regex"),
+        js_call: Regex::new(r#"\b(?:require|import)\s*\(\s*['"]([^'"\n]{1,180})['"]\s*\)"#)
+            .expect("js_call import regex"),
+    })
+}
+
+fn is_python_stdlib_top_module(name: &str) -> bool {
+    matches!(
+        name,
+        "__future__"
+            | "abc"
+            | "argparse"
+            | "ast"
+            | "asyncio"
+            | "atexit"
+            | "base64"
+            | "binascii"
+            | "bisect"
+            | "builtins"
+            | "bz2"
+            | "calendar"
+            | "codecs"
+            | "collections"
+            | "concurrent"
+            | "configparser"
+            | "contextlib"
+            | "contextvars"
+            | "copy"
+            | "csv"
+            | "ctypes"
+            | "dataclasses"
+            | "datetime"
+            | "decimal"
+            | "difflib"
+            | "dis"
+            | "email"
+            | "encodings"
+            | "enum"
+            | "errno"
+            | "fcntl"
+            | "fnmatch"
+            | "fractions"
+            | "functools"
+            | "gc"
+            | "getpass"
+            | "gettext"
+            | "glob"
+            | "gzip"
+            | "hashlib"
+            | "heapq"
+            | "hmac"
+            | "html"
+            | "http"
+            | "importlib"
+            | "inspect"
+            | "io"
+            | "ipaddress"
+            | "itertools"
+            | "json"
+            | "keyword"
+            | "linecache"
+            | "locale"
+            | "logging"
+            | "lzma"
+            | "math"
+            | "mimetypes"
+            | "mmap"
+            | "multiprocessing"
+            | "numbers"
+            | "operator"
+            | "os"
+            | "pathlib"
+            | "pickle"
+            | "pkgutil"
+            | "platform"
+            | "plistlib"
+            | "posix"
+            | "pprint"
+            | "pwd"
+            | "queue"
+            | "quopri"
+            | "random"
+            | "re"
+            | "readline"
+            | "reprlib"
+            | "resource"
+            | "sched"
+            | "secrets"
+            | "select"
+            | "selectors"
+            | "shlex"
+            | "shutil"
+            | "signal"
+            | "site"
+            | "smtplib"
+            | "socket"
+            | "socketserver"
+            | "sqlite3"
+            | "ssl"
+            | "stat"
+            | "statistics"
+            | "string"
+            | "struct"
+            | "subprocess"
+            | "sys"
+            | "sysconfig"
+            | "syslog"
+            | "tarfile"
+            | "tempfile"
+            | "termios"
+            | "textwrap"
+            | "threading"
+            | "time"
+            | "timeit"
+            | "tomllib"
+            | "traceback"
+            | "tty"
+            | "types"
+            | "typing"
+            | "unicodedata"
+            | "unittest"
+            | "urllib"
+            | "uuid"
+            | "venv"
+            | "warnings"
+            | "weakref"
+            | "webbrowser"
+            | "winreg"
+            | "xml"
+            | "xmlrpc"
+            | "zipfile"
+            | "zipimport"
+            | "zlib"
+            | "zoneinfo"
+    )
+}
+
+fn is_valid_py_ident_or_dotted(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.').all(|seg| {
+            let mut chars = seg.chars();
+            chars
+                .next()
+                .is_some_and(|f| f == '_' || f.is_ascii_alphabetic())
+                && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+        })
+}
+
+/// Extracts relative path specs `(up_dirs, rel_subpath, try_project_root)` imported by Python, JS/TS, or Shell code.
+fn extract_raw_import_specs(script_ext: &str, code_raw: &str) -> Vec<(usize, String, bool)> {
+    let code = strip_code_comments(code_raw);
+    let mut specs = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_spec = |up: usize, rel: String, try_root: bool| {
+        if specs.len() < 32 && !rel.is_empty() && seen.insert((up, rel.clone(), try_root)) {
+            specs.push((up, rel, try_root));
+        }
+    };
+
+    let ext = script_ext.to_ascii_lowercase();
+    let is_py = ext == "py"
+        || (ext.is_empty()
+            && code_raw.starts_with("#!")
+            && code_raw.lines().next().unwrap_or("").contains("python"));
+    let is_js = matches!(ext.as_str(), "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx")
+        || (ext.is_empty()
+            && code_raw.starts_with("#!")
+            && code_raw.lines().next().unwrap_or("").contains("node"));
+    let is_sh = matches!(ext.as_str(), "sh" | "bash" | "zsh")
+        || (ext.is_empty() && code_raw.starts_with("#!") && !is_py && !is_js);
+
+    if is_py {
+        for line in code.lines() {
+            let trimmed = line.trim();
+            if let Some(after_from) = trimmed.strip_prefix("from ") {
+                if let Some((mod_part, imp_part)) = after_from.split_once(" import ") {
+                    let mod_spec = mod_part.trim();
+                    let dots = mod_spec.chars().take_while(|&c| c == '.').count();
+                    let rem = mod_spec[dots..].trim();
+                    let up_dirs = dots.saturating_sub(1);
+                    let try_root = dots == 0;
+                    if dots == 0 {
+                        let first_seg = rem.split('.').next().unwrap_or("");
+                        if is_python_stdlib_top_module(first_seg) {
+                            continue;
+                        }
+                    }
+                    let names_clean = imp_part.trim().trim_matches(['(', ')']);
+                    if !rem.is_empty() && is_valid_py_ident_or_dotted(rem) {
+                        let base_rel = rem.replace('.', "/");
+                        push_spec(up_dirs, format!("{base_rel}.py"), try_root);
+                        push_spec(up_dirs, format!("{base_rel}/__init__.py"), try_root);
+                        for raw_n in names_clean.split(',') {
+                            let ident = raw_n.split_whitespace().next().unwrap_or("").trim();
+                            if ident != "*" && is_valid_py_ident_or_dotted(ident) {
+                                push_spec(up_dirs, format!("{base_rel}/{ident}.py"), try_root);
+                            }
+                        }
+                    } else if rem.is_empty() && dots >= 1 {
+                        for raw_n in names_clean.split(',') {
+                            let ident = raw_n.split_whitespace().next().unwrap_or("").trim();
+                            if ident != "*" && is_valid_py_ident_or_dotted(ident) {
+                                push_spec(up_dirs, format!("{ident}.py"), false);
+                                push_spec(up_dirs, format!("{ident}/__init__.py"), false);
+                            }
+                        }
+                    }
+                }
+            } else if let Some(after_imp) = trimmed.strip_prefix("import ") {
+                for raw_mod in after_imp.split(',') {
+                    let mod_name = raw_mod.split_whitespace().next().unwrap_or("").trim();
+                    if !is_valid_py_ident_or_dotted(mod_name) {
+                        continue;
+                    }
+                    let first_seg = mod_name.split('.').next().unwrap_or("");
+                    if is_python_stdlib_top_module(first_seg) {
+                        continue;
+                    }
+                    let base_rel = mod_name.replace('.', "/");
+                    push_spec(0, format!("{base_rel}.py"), true);
+                    push_spec(0, format!("{base_rel}/__init__.py"), true);
+                }
+            }
+        }
+    }
+
+    if is_js {
+        let re = local_import_regexes();
+        let raw_js_specs = re
+            .js_static
+            .captures_iter(&code)
+            .chain(re.js_call.captures_iter(&code))
+            .filter_map(|c| c.get(1).map(|m| m.as_str().trim()));
+
+        for sp in raw_js_specs {
+            let norm = sp.replace('\\', "/");
+            if !(norm.starts_with("./") || norm.starts_with("../")) {
+                continue;
+            }
+            let mut cur = norm.as_str();
+            let mut up = 0usize;
+            loop {
+                if let Some(rest) = cur.strip_prefix("./") {
+                    cur = rest;
+                } else if let Some(rest) = cur.strip_prefix("../") {
+                    up += 1;
+                    cur = rest;
+                } else {
+                    break;
+                }
+            }
+            if cur.is_empty() || cur.contains("..") {
+                continue;
+            }
+            let p = Path::new(cur);
+            if has_script_extension(p) {
+                push_spec(up, cur.to_string(), false);
+                if let Some(stem) = cur.strip_suffix(".js") {
+                    push_spec(up, format!("{stem}.ts"), false);
+                    push_spec(up, format!("{stem}.tsx"), false);
+                } else if let Some(stem) = cur.strip_suffix(".mjs") {
+                    push_spec(up, format!("{stem}.mts"), false);
+                    push_spec(up, format!("{stem}.ts"), false);
+                }
+            } else {
+                for suffix in [
+                    ".js",
+                    ".mjs",
+                    ".cjs",
+                    ".ts",
+                    ".tsx",
+                    ".jsx",
+                    "/index.js",
+                    "/index.mjs",
+                    "/index.ts",
+                ] {
+                    push_spec(up, format!("{cur}{suffix}"), false);
+                }
+            }
+        }
+    }
+
+    if is_sh {
+        for line in code.lines() {
+            for seg in line.split([';', '&', '|']) {
+                let toks = split_shell_tokens(seg.trim());
+                if toks.len() < 2 {
+                    continue;
+                }
+                let cmd0 = toks[0].as_str();
+                if !matches!(
+                    cmd0,
+                    "source" | "." | "sh" | "bash" | "zsh" | "python" | "python3" | "node"
+                ) {
+                    continue;
+                }
+                for tok in &toks[1..] {
+                    if tok.starts_with('-') || tok.contains("://") {
+                        continue;
+                    }
+                    let norm = tok.replace('\\', "/");
+                    let cleaned = norm
+                        .strip_prefix("${BASH_SOURCE%/*}/")
+                        .or_else(|| norm.strip_prefix("$(dirname \"$0\")/"))
+                        .or_else(|| norm.strip_prefix("$(dirname $0)/"))
+                        .or_else(|| norm.strip_prefix("${SCRIPT_DIR}/"))
+                        .or_else(|| norm.strip_prefix("$SCRIPT_DIR/"))
+                        .or_else(|| norm.strip_prefix("${DIR}/"))
+                        .or_else(|| norm.strip_prefix("$DIR/"))
+                        .or_else(|| norm.strip_prefix("./"))
+                        .unwrap_or(&norm);
+                    if cleaned.is_empty() || cleaned.starts_with('$') || cleaned.starts_with('/') {
+                        continue;
+                    }
+                    let mut cur = cleaned;
+                    let mut up = 0usize;
+                    while let Some(rest) = cur.strip_prefix("../") {
+                        up += 1;
+                        cur = rest;
+                    }
+                    if !cur.is_empty() && !cur.contains("..") {
+                        push_spec(up, cur.to_string(), up == 0);
+                    }
+                }
+            }
+        }
+    }
+
+    specs
+}
+
+fn normalize_rel_path_with_up(base_dir_rel: &str, up_dirs: usize, sub_rel: &str) -> Option<String> {
+    let mut parts: Vec<&str> = base_dir_rel
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if up_dirs > parts.len() {
+        return None;
+    }
+    for _ in 0..up_dirs {
+        parts.pop();
+    }
+    for seg in sub_rel.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            parts.pop()?;
+        } else {
+            parts.push(seg);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// Used by `git_scan` to materialize local helper modules imported by a hook or MCP script blob.
+pub(crate) fn extract_local_import_candidate_relpaths(
+    script_rel: &str,
+    script_bytes: &[u8],
+) -> Vec<String> {
+    let text = String::from_utf8_lossy(script_bytes);
+    let ext = Path::new(script_rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let base_dir = Path::new(script_rel)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (up, sub_rel, try_root) in extract_raw_import_specs(ext, &text) {
+        if let Some(rel) = normalize_rel_path_with_up(base_dir, up, &sub_rel) {
+            if seen.insert(rel.clone()) {
+                out.push(rel);
+            }
+        }
+        if try_root {
+            if let Some(root_rel) = normalize_rel_path_with_up("", 0, &sub_rel) {
+                if seen.insert(root_rel.clone()) {
+                    out.push(root_rel);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn is_ignored_import_dir_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("node_modules" | ".venv" | "venv" | "target" | ".git" | "__pycache__" | "dist")
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_imported_script_graph(
+    entry_disk_path: &Path,
+    entry_logical_path: &Path,
+    entry_display: &str,
+    label: &str,
+    entry_clean_body: &str,
+    entry_dir: &Path,
+    project_root: &Path,
+    sandbox_remap: Option<(&Path, &Path)>,
+    emit_skill_network: bool,
+    engine: &RuleEngine,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) -> Option<String> {
+    let allowed_root = sandbox_remap.map_or(project_root, |(sb, _)| sb);
+    let canon_allowed =
+        fs::canonicalize(allowed_root).unwrap_or_else(|_| allowed_root.to_path_buf());
+    let entry_canon =
+        fs::canonicalize(entry_disk_path).unwrap_or_else(|_| entry_disk_path.to_path_buf());
+
+    let mut visited_canon = HashSet::new();
+    visited_canon.insert(entry_canon);
+
+    let mut queue: std::collections::VecDeque<(PathBuf, String, usize)> =
+        std::collections::VecDeque::new();
+    queue.push_back((
+        entry_disk_path.to_path_buf(),
+        entry_clean_body.to_string(),
+        0,
+    ));
+
+    // Module graph `(logical_path, display, clean_body)` starting with entry script at index 0
+    let mut modules: Vec<(PathBuf, String, String)> = vec![(
+        entry_logical_path.to_path_buf(),
+        entry_display.to_string(),
+        entry_clean_body.to_string(),
+    )];
+    let mut first_imported_net: Option<String> = None;
+
+    while let Some((cur_disk, cur_body, depth)) = queue.pop_front() {
+        if depth >= 2 || modules.len() >= 13 {
+            continue;
+        }
+        let cur_ext = cur_disk.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let cur_dir = cur_disk.parent().unwrap_or(entry_dir);
+
+        for (up, sub_rel, try_root) in extract_raw_import_specs(cur_ext, &cur_body) {
+            if modules.len() >= 13 {
+                break;
+            }
+            let mut bases = Vec::with_capacity(2);
+            let mut stepped = Some(cur_dir);
+            for _ in 0..up {
+                stepped = stepped.and_then(Path::parent);
+            }
+            if let Some(b) = stepped {
+                bases.push(b.join(&sub_rel));
+            }
+            if try_root {
+                bases.push(project_root.join(&sub_rel));
+            }
+
+            for cand in bases {
+                if is_ignored_import_dir_component(&cand) {
+                    continue;
+                }
+                let Ok(meta) = fs::metadata(&cand) else {
+                    continue;
+                };
+                if !meta.is_file() || meta.len() > MAX_PLUGIN_FILE_BYTES {
+                    continue;
+                }
+                let Ok(canon) = fs::canonicalize(&cand) else {
+                    continue;
+                };
+                if !canon.starts_with(&canon_allowed) || !visited_canon.insert(canon) {
+                    continue;
+                }
+                if is_likely_compiled_binary(&cand) {
+                    continue;
+                }
+                let Ok(raw_imp) =
+                    crate::scanner::read_text_auto_encoding(&cand, MAX_PLUGIN_FILE_BYTES)
+                else {
+                    continue;
+                };
+
+                let logical_imp = if let Some((sb_root, repo_root)) = sandbox_remap {
+                    let csb = sb_root
+                        .canonicalize()
+                        .unwrap_or_else(|_| sb_root.to_path_buf());
+                    cand.strip_prefix(&csb)
+                        .or_else(|_| cand.strip_prefix(sb_root))
+                        .map(|r| repo_root.join(r))
+                        .unwrap_or_else(|_| cand.clone())
+                } else {
+                    cand.clone()
+                };
+                let imp_display = shorten_home(&logical_imp);
+
+                check_unicode_smuggling(
+                    &logical_imp,
+                    &imp_display,
+                    label,
+                    &raw_imp,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                let imp_clean = strip_invisible_unicode(&raw_imp);
+                check_remote_code_exec(
+                    &logical_imp,
+                    &imp_display,
+                    label,
+                    &imp_clean,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                check_credential_harvest(
+                    &logical_imp,
+                    &imp_display,
+                    label,
+                    &imp_clean,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                check_env_and_secret_exfiltration(
+                    &logical_imp,
+                    &imp_display,
+                    label,
+                    &imp_clean,
+                    false,
+                    1,
+                    out,
+                    seen_fp,
+                );
+                check_hardcoded_secrets(
+                    &logical_imp,
+                    &imp_display,
+                    label,
+                    &imp_clean,
+                    1,
+                    engine,
+                    out,
+                    seen_fp,
+                );
+                check_telemetry_domains(
+                    &logical_imp,
+                    &imp_display,
+                    label,
+                    &imp_clean,
+                    1,
+                    out,
+                    seen_fp,
+                );
+
+                if let Some((net_ln, target_desc)) =
+                    detect_non_official_external_network_call(&imp_clean)
+                {
+                    if first_imported_net.is_none() {
+                        first_imported_net = Some(target_desc.clone());
+                    }
+                    if emit_skill_network {
+                        let fp = fingerprint_match(
+                            "plugin-skill-network",
+                            &format!("{imp_display}:{target_desc}"),
+                        );
+                        push_finding(
+                            out,
+                            seen_fp,
+                            McpFinding {
+                                rule_id: "plugin-skill-network",
+                                server_name: label.to_string(),
+                                config_file: imp_display.clone(),
+                                config_path: logical_imp.clone(),
+                                line: net_ln.max(1),
+                                severity: Severity::Medium,
+                                fingerprint: fp,
+                                message: format!(
+                                    "Imported helper module makes an outbound network call ({target_desc}) — inspect script inputs for data exfiltration"
+                                ),
+                            },
+                        );
+                    }
+                } else if first_imported_net.is_none() {
+                    first_imported_net = detect_external_network_call(&imp_clean);
+                }
+
+                queue.push_back((cand, imp_clean.clone(), depth + 1));
+                modules.push((logical_imp, imp_display, imp_clean));
+                break;
+            }
+        }
+    }
+
+    if modules.len() >= 2 {
+        check_cross_file_env_exfiltration(&modules, label, out, seen_fp);
+    }
+
+    first_imported_net
+}
+
+enum CrossFileSecretSource {
+    WholesaleEnv(String),
+    DotenvRead(String),
+    SensitiveVars(Vec<String>),
+}
+
+fn extract_module_secret_source(clean_body: &str) -> Option<CrossFileSecretSource> {
+    let stripped = collapse_adjacent_string_literals(&strip_code_comments(clean_body));
+    let re = plugin_regexes();
+    if let Some(m) = re.wholesale_env_dump.find(&stripped) {
+        return Some(CrossFileSecretSource::WholesaleEnv(truncate_snippet(
+            m.as_str().trim(),
+            40,
+        )));
+    }
+    if let Some(m) = re.dotenv_file_read.find(&stripped) {
+        return Some(CrossFileSecretSource::DotenvRead(truncate_snippet(
+            m.as_str().trim(),
+            40,
+        )));
+    }
+    let vars: Vec<String> = re
+        .sensitive_env_name
+        .find_iter(&stripped)
+        .map(|m| m.as_str().to_string())
+        .collect();
+    if !vars.is_empty() {
+        return Some(CrossFileSecretSource::SensitiveVars(vars));
+    }
+    None
+}
+
+fn extract_module_external_sink(clean_body: &str) -> Option<(usize, String, Vec<String>)> {
+    let stripped = collapse_adjacent_string_literals(&strip_code_comments(clean_body));
+    let re = plugin_regexes();
+    if !re.exfil_net_sink.is_match(&stripped) {
+        return None;
+    }
+    let resolved_url_vars = resolve_url_identifiers(&stripped);
+    let lines: Vec<&str> = stripped.lines().collect();
+    for (idx, &line) in lines.iter().enumerate() {
+        let Some(sink_mat) = re
+            .exfil_net_sink
+            .find_iter(line)
+            .find(|m| !is_false_positive_cli_net_token(line, m.start(), m.end()))
+        else {
+            continue;
+        };
+        let call_start = idx.saturating_sub(2);
+        let call_end = (idx + 6).min(lines.len());
+        let call_site_text = lines[call_start..call_end].join("\n");
+        let urls_at_sink = urls_for_call_window(&call_site_text, &resolved_url_vars);
+        let non_local_urls: Vec<String> = urls_at_sink
+            .iter()
+            .copied()
+            .filter(|u| !is_localhost_url(u))
+            .map(str::to_string)
+            .collect();
+        if !urls_at_sink.is_empty() && non_local_urls.is_empty() {
+            continue;
+        }
+        if urls_at_sink.is_empty() && call_window_targets_localhost_only(&call_site_text) {
+            continue;
+        }
+        let sink_label = sink_mat
+            .as_str()
+            .trim()
+            .trim_end_matches('(')
+            .trim()
+            .to_string();
+        let dest_desc = if let Some(first_url) = non_local_urls.first() {
+            let host = extract_url_host(first_url).unwrap_or(first_url.as_str());
+            format!("`{host}` via `{sink_label}`")
+        } else {
+            format!("outbound network sink `{sink_label}`")
+        };
+        return Some((idx + 1, dest_desc, non_local_urls));
+    }
+    None
+}
+
+fn check_cross_file_env_exfiltration(
+    modules: &[(PathBuf, String, String)],
+    label: &str,
+    out: &mut Vec<McpFinding>,
+    seen_fp: &mut HashSet<String>,
+) {
+    let sources: Vec<Option<CrossFileSecretSource>> = modules
+        .iter()
+        .map(|(_, _, body)| extract_module_secret_source(body))
+        .collect();
+    let sinks: Vec<Option<(usize, String, Vec<String>)>> = modules
+        .iter()
+        .map(|(_, _, body)| extract_module_external_sink(body))
+        .collect();
+
+    for (src_idx, src_opt) in sources.iter().enumerate() {
+        let Some(src_kind) = src_opt else {
+            continue;
+        };
+        for (sink_idx, sink_opt) in sinks.iter().enumerate() {
+            if src_idx == sink_idx {
+                continue;
+            }
+            let Some((sink_line, dest_desc, non_local_urls)) = sink_opt else {
+                continue;
+            };
+            let src_file_short = modules[src_idx]
+                .0
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&modules[src_idx].1);
+            let sink_file_short = modules[sink_idx]
+                .0
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&modules[sink_idx].1);
+
+            let detail = match src_kind {
+                CrossFileSecretSource::WholesaleEnv(snip) => {
+                    format!(
+                        "`{src_file_short}` dumps process environment (`{snip}`) while `{sink_file_short}` sends data to {dest_desc}"
+                    )
+                }
+                CrossFileSecretSource::DotenvRead(snip) => {
+                    format!(
+                        "`{src_file_short}` reads `.env`/credential file (`{snip}`) while `{sink_file_short}` sends data to {dest_desc}"
+                    )
+                }
+                CrossFileSecretSource::SensitiveVars(vars) => {
+                    let all_official = !non_local_urls.is_empty()
+                        && non_local_urls
+                            .iter()
+                            .all(|u| vars.iter().all(|v| is_url_official_for_env_var(u, v)));
+                    if all_official {
+                        continue;
+                    }
+                    format!(
+                        "`{src_file_short}` reads `{}` while `{sink_file_short}` sends data to {dest_desc}",
+                        vars[0]
+                    )
+                }
+            };
+
+            let sink_display = &modules[sink_idx].1;
+            let fp = fingerprint_match(
+                "plugin-env-exfiltration",
+                &format!("cross:{}:{sink_display}:{dest_desc}", modules[src_idx].1),
+            );
+            push_finding(
+                out,
+                seen_fp,
+                McpFinding {
+                    rule_id: "plugin-env-exfiltration",
+                    server_name: label.to_string(),
+                    config_file: sink_display.clone(),
+                    config_path: modules[sink_idx].0.clone(),
+                    line: *sink_line,
+                    severity: Severity::Critical,
+                    fingerprint: fp,
+                    message: format!("Cross-file secret exfiltration: {detail}"),
+                },
+            );
+            return;
+        }
     }
 }

@@ -63,7 +63,7 @@ pub struct CompiledRule {
 }
 
 pub const MAX_B64_CANDIDATE_CHARS: usize = 131_072;
-const MAX_B64_DECODED_BYTES: usize = 98_304;
+const MAX_B64_DECODED_BYTES: usize = 131_072;
 
 #[derive(Debug, Clone)]
 pub struct RawMatch {
@@ -1121,9 +1121,42 @@ const RULE_SPECS: &[RuleSpec] = &[
         min_entropy: 3.8,
     },
     RuleSpec {
+        id: "dockerhub-pat",
+        name: "Docker Hub Personal Access Token",
+        description: "Docker Hub personal or organization access token (`dckr_pat_...` / `dckr_oat_...`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["dckr_pat_", "dckr_oat_"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(dckr_(?:pat|oat)_[A-Za-z0-9_-]{24,64})\b"#,
+        secret_group: 1,
+        min_entropy: 3.4,
+    },
+    RuleSpec {
+        id: "onepassword-service-token",
+        name: "1Password Service Account Token",
+        description: "1Password Service Account or Connect token (`ops_eyJ...`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["ops_eyJ"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(ops_eyJ[A-Za-z0-9+/=_\-.]{40,2048})"#,
+        secret_group: 1,
+        min_entropy: 3.7,
+    },
+    RuleSpec {
+        id: "azure-servicebus-key",
+        name: "Azure SharedAccessKey Connection Secret",
+        description: "Azure Service Bus, Event Hubs, IoT Hub, or Relay connection string `SharedAccessKey` secret.",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["SharedAccessKey="],
+        pattern: r#"SharedAccessKey\s*=\s*([A-Za-z0-9+/]{28,88}={0,2})"#,
+        secret_group: 1,
+        min_entropy: 3.7,
+    },
+    RuleSpec {
         id: "dotenv-generic-secret",
         name: "Secret Assignment",
-        description: "High-entropy secret assigned to API_KEY, PASSWORD, SECRET, TOKEN, or camelCase/snake_case secret fields in .env, shell, YAML, or JSON.",
+        description: "High-entropy secret assigned to API_KEY, PASSWORD, PASSPHRASE, SECRET, TOKEN, or camelCase/snake_case secret fields in .env, shell, YAML, or JSON.",
         severity: Severity::High,
         category: RuleCategory::Secret,
         anchors: &[
@@ -1140,6 +1173,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "_AUTH_KEY",
             "_HMAC_KEY",
             "_PASSWORD",
+            "_PASSPHRASE",
             "_PASSWD",
             "_PASS",
             "_PWD",
@@ -1151,6 +1185,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "REFRESH_TOKEN",
             "PRIVATE_KEY",
             "PASSWORD",
+            "PASSPHRASE",
             "PASSWD",
             "SECRET",
             "TOKEN",
@@ -1168,6 +1203,8 @@ const RULE_SPECS: &[RuleSpec] = &[
             "_api_key",
             "_token",
             "_password",
+            "_passphrase",
+            "-passphrase",
             "_passwd",
             "_pass",
             "_private_key",
@@ -1179,6 +1216,11 @@ const RULE_SPECS: &[RuleSpec] = &[
             "_storage_key",
             "api_key",
             "password",
+            "passphrase",
+            "Passphrase",
+            "sshPassphrase",
+            "keyPassphrase",
+            "pgpPassphrase",
             "passwd",
             "secret",
             "token",
@@ -1226,9 +1268,9 @@ const RULE_SPECS: &[RuleSpec] = &[
             "client-secret",
             "access-token",
         ],
-        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passwd|_pass|_token|-secret|-api-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|ApiKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password)|API_KEY|APIKEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSWD|SECRET|TOKEN|api_key|apikey|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passwd|apiKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?(),;]{12,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"([^\s"\\]{12,180})\\+"|"([^\s"\\]{12,180})"|'([^\s'\\]{12,180})'|\\+u0022([^\s"'\\]{12,180})\\+u0022|\\+u0027([^\s"'\\]{12,180})\\+u0027|([A-Za-z0-9/+=\-_!@#$%^&*~.?]{12,180})))"#,
+        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSPHRASE|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passphrase|_passwd|_pass|_token|-secret|-api-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|-passphrase|ApiKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password|Passphrase)|API_KEY|APIKEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSPHRASE|PASSWD|SECRET|TOKEN|api_key|apikey|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passphrase|sshPassphrase|keyPassphrase|pgpPassphrase|passwd|apiKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?(),;]{8,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"([^\r\n"\\]{8,180})\\+"|"((?:\\["'\\bfnrt/]|[^"\\\r\n]){8,180})"|'((?:\\['"\\bfnrt/]|[^'\\\r\n]){8,180})'|\\+u0022([^\r\n"'\\]{8,180})\\+u0022|\\+u0027([^\r\n"'\\]{8,180})\\+u0027|([A-Za-z0-9/+=\-_!@#$%^&*~.?]{8,180})))"#,
         secret_group: 1,
-        min_entropy: 3.30,
+        min_entropy: 3.00,
     },
     RuleSpec {
         id: "jwk-private-key",
@@ -1437,17 +1479,16 @@ const RULE_SPECS: &[RuleSpec] = &[
     RuleSpec {
         id: "internal-hostname",
         name: "Internal Hostname",
-        description: "Internal corporate or cluster hostname (*.corp, *.internal, *.intranet, *.svc.cluster.local).",
+        description: "Internal corporate or intranet hostname (*.corp, *.internal, *.intranet, *.localdomain).",
         severity: Severity::Medium,
         category: RuleCategory::Pii,
         anchors: &[
             ".corp",
             ".internal",
             ".intranet",
-            ".svc.cluster.local",
             ".localdomain",
         ],
-        pattern: r#"(?:^|[^A-Za-z0-9.\-_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])((?:https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(?:\.corp|\.internal|\.intranet|\.svc\.cluster\.local|\.localdomain))\b"#,
+        pattern: r#"(?:^|[^A-Za-z0-9.\-_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])((?:https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(?:\.corp|\.internal|\.intranet|\.localdomain))\b"#,
         secret_group: 1,
         min_entropy: 0.0,
     },
@@ -1505,6 +1546,22 @@ const NON_SECRET_KEY_SUBSTRINGS: &[&str] = &[
     "PARTITION_KEY",
     "SORT_KEY",
     "IDEMPOTENCY",
+    "LABEL",
+    "HINT",
+    "ERROR",
+    "MESSAGE",
+    "_MSG",
+    "TITLE",
+    "DESCRIPTION",
+    "_DESC",
+    "HELP",
+    "PLACEHOLDER",
+    "PROMPT",
+    "WARNING",
+    "REGEX",
+    "PATTERN",
+    "POLICY",
+    "HEADER_NAME",
 ];
 
 const CODE_RECEIVER_LABELS: &[&str] = &[
@@ -2591,7 +2648,7 @@ impl RuleEngine {
             let mut decoded: Vec<u8> = Vec::new();
             let mut valid = true;
 
-            while k < len && decoded.len() < 8192 {
+            while k < len && decoded.len() < 65_536 {
                 while k < len && matches!(bytes[k], b' ' | b'\t' | b'\r' | b'\n') {
                     k += 1;
                 }
@@ -2709,7 +2766,7 @@ impl RuleEngine {
                 let sep = bytes[j];
                 let mut total_hex = first_grp_len;
                 let mut end = j;
-                while end < len && total_hex < 16384 {
+                while end < len && total_hex < 262_144 {
                     let mut k = end;
                     if bytes[k] == sep {
                         k += 1;
@@ -2771,8 +2828,8 @@ impl RuleEngine {
 
             // Case 2: Continuous or `xxd -p` line-wrapped hex strings
             let mut wrapped = false;
-            if (j - hex_start) >= 32 && (j - hex_start) < 16384 {
-                while j - hex_start < 16384 {
+            if (j - hex_start) >= 32 && (j - hex_start) < 262_144 {
+                while j - hex_start < 262_144 {
                     if let Some(next_hex) = peek_wrapped_hex_continuation(bytes, j) {
                         wrapped = true;
                         j = next_hex;
@@ -2788,7 +2845,7 @@ impl RuleEngine {
             let end = j;
             i = end;
             let hex_len = end - hex_start;
-            if !(36..=16384).contains(&hex_len) {
+            if !(36..=262_144).contains(&hex_len) {
                 continue;
             }
 
@@ -2839,7 +2896,7 @@ impl RuleEngine {
         for (line_start, line_end) in split_logical_lines_with_offsets(text) {
             let line = &text[line_start..line_end];
             if let Some(line_hex) = parse_hexdump_line_hex(line) {
-                if clean_hex.len() + line_hex.len() <= 16384 {
+                if clean_hex.len() + line_hex.len() <= 262_144 {
                     if block_start.is_none() {
                         block_start = Some(line_start);
                     }
@@ -2908,7 +2965,7 @@ impl RuleEngine {
             let even_len = (hex_str.len() - shift) & !1;
             let slice = &hex_str.as_bytes()[shift..shift + even_len];
             let byte_len = slice.len() / 2;
-            if !(16..=8192).contains(&byte_len) {
+            if !(16..=131_072).contains(&byte_len) {
                 continue;
             }
             let mut decoded = Vec::with_capacity(byte_len);
@@ -3509,7 +3566,12 @@ fn decode_percent_inline_with_spans(text: &str) -> Option<(String, Vec<usize>, V
 fn extract_matched_key_name(rule_id: &str, full_match: &str) -> Option<String> {
     if !matches!(
         rule_id,
-        "dotenv-generic-secret" | "url-query-secret" | "aws-secret-key" | "jwk-private-key"
+        "dotenv-generic-secret"
+            | "url-query-secret"
+            | "aws-secret-key"
+            | "jwk-private-key"
+            | "azure-storage-key"
+            | "azure-servicebus-key"
     ) {
         return None;
     }
@@ -3781,14 +3843,61 @@ fn passes_post_filter(
             let has_upper = val.bytes().any(|b| b.is_ascii_uppercase());
             let has_lower = val.bytes().any(|b| b.is_ascii_lowercase());
             let has_digit = val.bytes().any(|b| b.is_ascii_digit());
-            let has_pw_symbol = val
-                .bytes()
-                .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'_' | b'-' | b'.' | b'/'));
+            let has_pw_symbol = val.bytes().any(|b| {
+                !b.is_ascii_alphanumeric() && !matches!(b, b'_' | b'-' | b'.' | b'/' | b' ' | b'\t')
+            });
             let has_pw_complexity = has_upper
                 && has_lower
                 && has_digit
-                && val.bytes().any(|b| !b.is_ascii_alphanumeric());
-            if val.len() < 16 {
+                && val
+                    .bytes()
+                    .any(|b| !b.is_ascii_alphanumeric() && !b.is_ascii_whitespace());
+
+            let has_whitespace = val.bytes().any(|b| b.is_ascii_whitespace());
+            let mut is_diceware_passphrase = false;
+            if has_whitespace {
+                if val.trim().len() < 8
+                    || val.contains(" = ")
+                    || val.contains("SELECT ")
+                    || val.contains("FROM ")
+                    || val.contains("WHERE ")
+                    || val.contains("function ")
+                    || val.contains("return ")
+                    || val.contains("import ")
+                    || val.starts_with('<')
+                {
+                    return false;
+                }
+                let words: Vec<&str> = val.split_whitespace().collect();
+                if words.len() > 6 {
+                    return false;
+                }
+                let key_is_passphrase = key_part.contains("PASSPHRASE")
+                    || key_part.contains("PASSWORD")
+                    || key_part.contains("PASSWD")
+                    || key_part.contains("SECRET");
+                if key_is_passphrase
+                    && (4..=6).contains(&words.len())
+                    && words
+                        .iter()
+                        .all(|w| w.len() >= 3 && w.bytes().all(|b| b.is_ascii_lowercase()))
+                    && ent >= 3.50
+                {
+                    is_diceware_passphrase = true;
+                } else if !((has_digit || has_pw_symbol)
+                    && !val.ends_with('.')
+                    && !val.ends_with('?')
+                    && ent >= 3.20)
+                {
+                    return false;
+                }
+            }
+
+            if val.len() < 12 {
+                if !(has_upper && has_lower && has_digit && has_pw_symbol && ent >= 3.00) {
+                    return false;
+                }
+            } else if val.len() < 16 {
                 let class_count = u8::from(has_upper)
                     + u8::from(has_lower)
                     + u8::from(has_digit)
@@ -3798,8 +3907,7 @@ fn passes_post_filter(
                 if !ok_short {
                     return false;
                 }
-            }
-            if !is_pure_hex && !has_pw_complexity && ent < 3.50 {
+            } else if !is_pure_hex && !has_pw_complexity && !is_diceware_passphrase && ent < 3.50 {
                 return false;
             }
             // Preserve 32/40-char hex keys on explicit API/app/auth/private/signing/secret/password names
@@ -3833,6 +3941,7 @@ fn passes_post_filter(
                 return false;
             }
             let all_lower_ident = !is_pure_hex
+                && !is_diceware_passphrase
                 && val
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || matches!(c, '_' | '-' | '.'));
@@ -3908,16 +4017,17 @@ fn passes_post_filter(
                 .strip_prefix("https://")
                 .or_else(|| lower.strip_prefix("http://"))
                 .unwrap_or(&lower);
-            if matches!(
-                host_only,
-                "host.docker.internal"
-                    | "gateway.docker.internal"
-                    | "vm.docker.internal"
-                    | "host.containers.internal"
-                    | "host.lima.internal"
-                    | "host.minikube.internal"
-                    | "kubernetes.default.svc.cluster.local"
-            ) {
+            if host_only.ends_with(".cluster.local")
+                || matches!(
+                    host_only,
+                    "host.docker.internal"
+                        | "gateway.docker.internal"
+                        | "vm.docker.internal"
+                        | "host.containers.internal"
+                        | "host.lima.internal"
+                        | "host.minikube.internal"
+                )
+            {
                 return false;
             }
             let labels: Vec<&str> = host_only.split('.').collect();
@@ -3955,6 +4065,23 @@ fn passes_post_filter(
         }
         "pii-email" => {
             let lower = val.to_ascii_lowercase();
+            let line_start = full_text[..match_start]
+                .rfind('\n')
+                .map_or(0, |idx| idx + 1);
+            let line_prefix = full_text[line_start..match_start].trim_start();
+            let ssh_check = line_prefix.trim_start_matches(['"', '\'', ' ']);
+            if ssh_check.starts_with("ssh-ed25519 ")
+                || ssh_check.starts_with("ssh-rsa ")
+                || ssh_check.starts_with("ssh-dss ")
+                || ssh_check.starts_with("ecdsa-sha2-nistp")
+                || ssh_check.starts_with("sk-ssh-ed25519@openssh.com ")
+                || ssh_check.starts_with("sk-ecdsa-sha2-nistp256@openssh.com ")
+                || line_prefix.contains("ssh-ed25519 AAAAC3")
+                || line_prefix.contains("ssh-rsa AAAAB3")
+                || line_prefix.contains("ecdsa-sha2-nistp")
+            {
+                return false;
+            }
             if match_start > 0 {
                 let prev_byte = full_text.as_bytes()[match_start - 1];
                 if prev_byte == b'/' || prev_byte == b'@' {
@@ -4076,6 +4203,17 @@ pub fn is_likely_placeholder(val: &str) -> bool {
     ) {
         return true;
     }
+    if lower.starts_with("mock_")
+        || lower.starts_with("mock-")
+        || lower.starts_with("fake_")
+        || lower.starts_with("fake-")
+        || lower.starts_with("dummy_")
+        || lower.starts_with("dummy-")
+        || lower.starts_with("test_key_")
+        || lower.starts_with("test_secret_")
+    {
+        return true;
+    }
     const UNCONDITIONAL_MARKERS: &[&str] = &[
         "your_api_key",
         "your-api-key",
@@ -4113,6 +4251,19 @@ pub fn is_likely_placeholder(val: &str) -> bool {
         "changeme",
         "change_me",
         "change-me",
+        "mock_",
+        "mock-",
+        "fake_",
+        "fake-",
+        "fixture",
+        "unittest",
+        "unit_test",
+        "unit-test",
+        "test_key",
+        "test-key",
+        "test_secret",
+        "test-secret",
+        "stub_",
     ];
     if SOFT_DOC_WORDS.iter().any(|w| lower.contains(w)) {
         // Do not discard complex real passwords (`K9#mP2$vL8@exampleProdDb99!`, `ChAnGeMe!9#kL2$vP8@Prod`)
@@ -4215,6 +4366,8 @@ pub fn mask_value(rule_id: &str, raw: &str) -> String {
             | "url-query-secret"
             | "http-bearer-token"
             | "aws-secret-key"
+            | "azure-storage-key"
+            | "azure-servicebus-key"
             | "jwk-private-key"
             | "kubernetes-secret-data"
     ) {
@@ -4306,6 +4459,8 @@ fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
         ("neon-api-key", &["napi_"]),
         ("cerebras-api-key", &["csk-"]),
         ("fireworks-api-key", &["fw_"]),
+        ("dockerhub-pat", &["dckr_pat_", "dckr_oat_"]),
+        ("onepassword-service-token", &["ops_eyJ"]),
         ("notion-api-token", &["ntn_", "secret_"]),
         ("airtable-pat", &["pat"]),
         ("hubspot-pat", &["pat-na1-", "pat-eu1-"]),

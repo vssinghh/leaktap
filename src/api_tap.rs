@@ -789,12 +789,18 @@ fn handle_client(
                                 }
                             }
                         }
-                        inspect_api_mcp_and_tool_results(
+                        let critical_mcp_inj = inspect_api_mcp_and_tool_results(
                             provider,
                             &json_val,
                             upstreams.update_mcp_pins,
                             emit,
                         );
+                        if upstreams.block_secrets && blocked_summary.is_none() {
+                            if let Some((inj_rule, inj_msg)) = critical_mcp_inj {
+                                blocked_summary =
+                                    Some((inj_rule, inj_msg, "leaktap_prompt_injection_blocked"));
+                            }
+                        }
                         parsed_json_body = Some(json_val);
                     }
                 }
@@ -837,8 +843,6 @@ fn handle_client(
                             if let Ok(redacted_bytes) = serde_json::to_vec(&json_doc) {
                                 decoded_body_override = Some(redacted_bytes);
                                 redacted_total += cnt;
-                            } else {
-                                decoded_body_override = decoded;
                             }
                         } else {
                             let (scrubbed_str, raw_cnt) = redact_text_secrets(&body_text, engine);
@@ -847,8 +851,6 @@ fn handle_client(
                             {
                                 decoded_body_override = Some(scrubbed_str.into_bytes());
                                 redacted_total += raw_cnt;
-                            } else {
-                                decoded_body_override = decoded;
                             }
                         }
                     } else {
@@ -856,8 +858,24 @@ fn handle_client(
                         if cnt > 0 {
                             decoded_body_override = Some(scrubbed_str.into_bytes());
                             redacted_total += cnt;
-                        } else {
-                            decoded_body_override = decoded;
+                        }
+                    }
+
+                    // Strict fail-closed verification: never forward a request upstream under
+                    // `--redact-secrets` if in-place redaction failed or any secret remains.
+                    let post_bytes = decoded_body_override.as_deref().unwrap_or(&[]);
+                    if redacted_total == 0
+                        || post_bytes.is_empty()
+                        || payload_still_has_secret(post_bytes, engine)
+                    {
+                        decoded_body_override = None;
+                        redacted_total = 0;
+                        if blocked_summary.is_none() {
+                            blocked_summary = Some((
+                                "unredactable-secret".to_string(),
+                                "detected secret could not be safely redacted in-place; blocking request fail-closed".to_string(),
+                                "leaktap_secret_redaction_failed",
+                            ));
                         }
                     }
                 } else {
@@ -2179,10 +2197,30 @@ fn redact_json_secrets_in_place(
             }
             count
         }
-        serde_json::Value::Array(arr) => arr
-            .iter_mut()
-            .map(|item| redact_json_secrets_in_place(item, depth + 1, engine))
-            .sum(),
+        serde_json::Value::Array(arr) => {
+            if (16..=65536).contains(&arr.len())
+                && arr
+                    .iter()
+                    .all(|v| v.as_u64().is_some_and(|b| b <= u8::MAX as u64))
+            {
+                let raw_bytes: Vec<u8> = arr
+                    .iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect();
+                let as_str = String::from_utf8_lossy(&raw_bytes);
+                let (scrubbed, byte_cnt) = redact_text_secrets(&as_str, engine);
+                if byte_cnt > 0 {
+                    *arr = scrubbed
+                        .bytes()
+                        .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                        .collect();
+                    return byte_cnt;
+                }
+            }
+            arr.iter_mut()
+                .map(|item| redact_json_secrets_in_place(item, depth + 1, engine))
+                .sum()
+        }
         serde_json::Value::Object(map) => {
             let mut count = 0usize;
             let is_gcp_sa_obj = map
@@ -2234,6 +2272,19 @@ fn redact_json_secrets_in_place(
                     }
                 }
             }
+            let keys_with_secrets: Vec<(String, String, usize)> = map
+                .keys()
+                .filter_map(|k| {
+                    let (sk, kc) = redact_text_secrets(k, engine);
+                    (kc > 0).then(|| (k.clone(), sk, kc))
+                })
+                .collect();
+            for (old_k, new_k, kc) in keys_with_secrets {
+                if let Some(v) = map.remove(&old_k) {
+                    map.insert(new_k, v);
+                    count += kc;
+                }
+            }
             for v in map.values_mut() {
                 count += redact_json_secrets_in_place(v, depth + 1, engine);
             }
@@ -2241,6 +2292,63 @@ fn redact_json_secrets_in_place(
         }
         _ => 0,
     }
+}
+
+fn payload_still_has_secret(payload: &[u8], engine: &RuleEngine) -> bool {
+    let text = String::from_utf8_lossy(payload);
+    if engine
+        .scan_text(&text)
+        .iter()
+        .any(|m| m.category == RuleCategory::Secret)
+    {
+        return true;
+    }
+    if text.contains('%') {
+        let pct1 = percent_decode(&text);
+        if pct1 != text {
+            if engine
+                .scan_text(&pct1)
+                .iter()
+                .any(|m| m.category == RuleCategory::Secret)
+            {
+                return true;
+            }
+            if pct1.contains('%') {
+                let pct2 = percent_decode(&pct1);
+                if pct2 != pct1
+                    && engine
+                        .scan_text(&pct2)
+                        .iter()
+                        .any(|m| m.category == RuleCategory::Secret)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(payload) {
+        let mut flattened = String::with_capacity(payload.len().min(65536));
+        collect_json_value_strings(&json_val, 0, &mut flattened);
+        if engine
+            .scan_text(&flattened)
+            .iter()
+            .any(|m| m.category == RuleCategory::Secret)
+        {
+            return true;
+        }
+        if flattened.contains('%') {
+            let pct_flat = percent_decode(&flattened);
+            if pct_flat != flattened
+                && engine
+                    .scan_text(&pct_flat)
+                    .iter()
+                    .any(|m| m.category == RuleCategory::Secret)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Performs a bounded single HTTP/1.1 request/response exchange (supporting TLS via `rustls` and
@@ -2500,7 +2608,7 @@ fn inspect_api_mcp_and_tool_results(
     json_val: &serde_json::Value,
     update_mcp_pins: bool,
     emit: &TapCallback,
-) {
+) -> Option<(String, String)> {
     let mut mcp_findings = Vec::new();
     let api_path = std::path::Path::new("api-request");
 
@@ -2583,8 +2691,18 @@ fn inspect_api_mcp_and_tool_results(
         );
     }
 
+    let mut critical_hit: Option<(String, String)> = None;
     let mut emitted_fps = HashSet::new();
     for mf in mcp_findings {
+        if critical_hit.is_none()
+            && mf.severity == crate::rules::Severity::Critical
+            && matches!(
+                mf.rule_id,
+                "mcp-tool-poisoning" | "mcp-indirect-prompt-injection"
+            )
+        {
+            critical_hit = Some((mf.rule_id.to_string(), mf.message.clone()));
+        }
         if emitted_fps.insert(mf.fingerprint.clone()) {
             emit(
                 "http-body",
@@ -2595,6 +2713,7 @@ fn inspect_api_mcp_and_tool_results(
             );
         }
     }
+    critical_hit
 }
 
 fn append_tool_content_value(val: &serde_json::Value, depth: usize, out: &mut String) {

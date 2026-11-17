@@ -414,7 +414,22 @@ fn audit_staged_index_configs(
                 else {
                     continue;
                 };
-                let refs = extract_companion_script_candidates(&norm_cfg, &cfg_blob);
+                let mut refs = extract_companion_script_candidates(&norm_cfg, &cfg_blob);
+                let direct_refs = refs.clone();
+                for dr in direct_refs {
+                    let dr_spec = format!(":{dr}");
+                    if let Some(sb) =
+                        run_git_bytes_capped(repo_root, &["cat-file", "-p", &dr_spec], 512 * 1024)
+                    {
+                        for imp in
+                            crate::plugin_audit::extract_local_import_candidate_relpaths(&dr, &sb)
+                        {
+                            if !refs.contains(&imp) {
+                                refs.push(imp);
+                            }
+                        }
+                    }
+                }
                 if refs.iter().any(|r| staged_non_cfg_rels.contains(r))
                     && candidate_set.insert(norm_cfg.clone())
                 {
@@ -557,7 +572,23 @@ fn audit_history_configs(
             if let Some(cfg_blob) =
                 run_git_bytes_capped(repo_root, &["cat-file", "-p", &spec], 2 * 1024 * 1024)
             {
-                for cand_rel in extract_companion_script_candidates(&norm_cfg, &cfg_blob) {
+                let mut refs = extract_companion_script_candidates(&norm_cfg, &cfg_blob);
+                let direct_refs = refs.clone();
+                for dr in direct_refs {
+                    let dr_spec = format!("HEAD:{dr}");
+                    if let Some(sb) =
+                        run_git_bytes_capped(repo_root, &["cat-file", "-p", &dr_spec], 512 * 1024)
+                    {
+                        for imp in
+                            crate::plugin_audit::extract_local_import_candidate_relpaths(&dr, &sb)
+                        {
+                            if !refs.contains(&imp) {
+                                refs.push(imp);
+                            }
+                        }
+                    }
+                }
+                for cand_rel in refs {
                     script_to_configs
                         .entry(cand_rel)
                         .or_default()
@@ -820,6 +851,10 @@ fn is_hook_bearing_config_rel(rel: &str) -> bool {
                 "hooks.json"
                     | "settings.json"
                     | "settings.local.json"
+                    | "tasks.json"
+                    | "devcontainer.json"
+                    | ".devcontainer.json"
+                    | "package.json"
                     | ".mcp.json"
                     | "mcp.json"
                     | "mcp_config.json"
@@ -855,8 +890,11 @@ fn extract_companion_script_candidates(config_rel: &str, config_blob: &[u8]) -> 
         let stripped = norm_tok
             .strip_prefix("${CLAUDE_PLUGIN_ROOT}/")
             .or_else(|| norm_tok.strip_prefix("$CLAUDE_PLUGIN_ROOT/"))
-            .or_else(|| norm_tok.strip_prefix("${PLUGIN_ROOT}/"))
-            .or_else(|| norm_tok.strip_prefix("$PLUGIN_ROOT/"))
+            .or_else(|| {
+                norm_tok
+                    .strip_prefix("${PLUGIN_ROOT}/")
+                    .or_else(|| norm_tok.strip_prefix("$PLUGIN_ROOT/"))
+            })
             .or_else(|| norm_tok.strip_prefix("${CLAUDE_PROJECT_DIR}/"))
             .or_else(|| norm_tok.strip_prefix("$CLAUDE_PROJECT_DIR/"))
             .or_else(|| norm_tok.strip_prefix("${PROJECT_DIR}/"))
@@ -937,7 +975,13 @@ fn materialize_companion_hook_scripts(
     sub_root: &Path,
     loaded: &mut HashSet<String>,
 ) {
-    for norm in extract_companion_script_candidates(config_rel, config_blob) {
+    let mut queue: std::collections::VecDeque<(String, usize)> =
+        extract_companion_script_candidates(config_rel, config_blob)
+            .into_iter()
+            .map(|r| (r, 0usize))
+            .collect();
+
+    while let Some((norm, hop)) = queue.pop_front() {
         if !loaded.insert(norm.clone()) {
             continue;
         }
@@ -954,10 +998,22 @@ fn materialize_companion_hook_scripts(
                     MAX_GIT_BINARY_SCAN_BYTES as usize,
                 ) {
                     let _ = sandbox.write_rel_blob(sub_root, &norm, &script_bytes);
+                    if hop < 2 && script_bytes.len() <= 2 * 1024 * 1024 {
+                        for imp_rel in crate::plugin_audit::extract_local_import_candidate_relpaths(
+                            &norm,
+                            &script_bytes,
+                        ) {
+                            if validate_safe_rel_path(&imp_rel).is_some()
+                                && !loaded.contains(&imp_rel)
+                            {
+                                queue.push_back((imp_rel, hop + 1));
+                            }
+                        }
+                    }
                 }
             }
         }
-        if loaded.len() >= 48 {
+        if loaded.len() >= 64 {
             return;
         }
     }

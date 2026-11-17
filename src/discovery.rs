@@ -256,6 +256,10 @@ fn discover_targets_internal(
                         cwd.join("CLAUDE.md"),
                         cwd.join("AGENTS.md"),
                         cwd.join("GEMINI.md"),
+                        cwd.join("package.json"),
+                        cwd.join(".devcontainer.json"),
+                        cwd.join(".devcontainer"),
+                        cwd.join(".vscode/tasks.json"),
                         cwd.join(".cursorrules"),
                         cwd.join(".windsurfrules"),
                         cwd.join(".clinerules"),
@@ -484,7 +488,7 @@ fn discover_dotdir_in_subpackage(dotdir: &Path, name: &str, ctx: &mut WalkContex
             }
         }
         ".vscode" => {
-            for f in ["mcp.json", "settings.json"] {
+            for f in ["mcp.json", "settings.json", "tasks.json"] {
                 let cfg = dotdir.join(f);
                 if cfg.is_file() {
                     classify_file(&cfg, ctx, false, false);
@@ -644,6 +648,7 @@ fn is_customization_dir_name(name: &str) -> bool {
             | "hooks"
             | "hooks-handlers"
             | ".clinerules"
+            | ".devcontainer"
             | ".agents"
             | ".agent"
             | ".antigravitycli"
@@ -921,6 +926,9 @@ fn is_top_level_instruction_or_plugin_file(path: &Path, file_name: &str) -> bool
         "hooks.json"
             | "plugin.json"
             | "gemini-extension.json"
+            | "devcontainer.json"
+            | ".devcontainer.json"
+            | "package.json"
             | "SKILL.md"
             | "CLAUDE.md"
             | "AGENTS.md"
@@ -932,6 +940,17 @@ fn is_top_level_instruction_or_plugin_file(path: &Path, file_name: &str) -> bool
             | "copilot-instructions.md"
     ) {
         return true;
+    }
+    if file_name == "tasks.json" {
+        let has_ide_dir = path.components().any(|c| match c {
+            Component::Normal(s) => {
+                matches!(s.to_str(), Some(".vscode" | ".cursor" | ".windsurf"))
+            }
+            _ => false,
+        });
+        if has_ide_dir {
+            return true;
+        }
     }
     if file_name == "guidelines.md" && path.to_string_lossy().contains(".junie") {
         return true;

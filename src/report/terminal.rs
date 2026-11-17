@@ -295,6 +295,14 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
         out.push_str(
             "  • Start a watched CLI session:   leaktap --block-secrets claude   (or `--redact-secrets`)\n",
         );
+        if report
+            .highest_severity()
+            .is_some_and(|s| s >= Severity::High)
+        {
+            out.push_str(
+                "  • Gate CI / pre-commit builds:   leaktap scan --ci                (exits 1 on HIGH/CRITICAL)\n",
+            );
+        }
     }
 
     out

@@ -1098,10 +1098,22 @@ for tbl in tables:
                 s_val = val
                 kind = "s"
             elif isinstance(val, (bytes, bytearray)):
+                raw_b = bytes(val)
                 try:
-                    s_val = bytes(val).decode("utf-8")
+                    s_val = raw_b.decode("utf-8")
                     kind = "b"
                 except Exception:
+                    if col_name in cand_set and len(raw_b) >= 8:
+                        print(json.dumps({
+                            "t": tbl,
+                            "pks": pks,
+                            "pk_raw": pk_raw,
+                            "ids": pk_vals,
+                            "c": col_name,
+                            "k": "r",
+                            "v": base64.b64encode(raw_b).decode("ascii"),
+                            "pk_k": prev_k,
+                        }))
                     s_val = None
             if col_name in cand_set and s_val is not None and len(s_val) >= 8:
                 print(json.dumps({"t": tbl, "pks": pks, "pk_raw": pk_raw, "ids": pk_vals, "c": col_name, "k": kind, "v": s_val, "pk_k": prev_k}))
@@ -1132,7 +1144,13 @@ for line in sys.stdin:
     q_col = '"' + item["c"].replace('"', '""') + '"'
     pk_vals = [dec_pk(x) for x in item["ids"]]
     where_parts = []
-    bind_vals = [item["v"].encode("utf-8") if item["k"] == "b" else item["v"]]
+    if item["k"] == "r":
+        raw_col = base64.b64decode(item["v"])
+    elif item["k"] == "b":
+        raw_col = item["v"].encode("utf-8")
+    else:
+        raw_col = item["v"]
+    bind_vals = [raw_col]
     for pk_name, pv in zip(item["pks"], pk_vals):
         q_pk = pk_name if item.get("pk_raw") else ('"' + pk_name.replace('"', '""') + '"')
         if pv is None:
@@ -1154,6 +1172,677 @@ conn.close()
 if not chk or chk[0] != "ok":
     sys.exit(2)
 "#;
+
+fn same_len_redaction_bytes(rule_id: &str, raw_slice: &[u8]) -> Vec<u8> {
+    let n = raw_slice.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let raw_str = std::str::from_utf8(raw_slice).unwrap_or("");
+    let repl_owned = if !raw_str.is_empty() {
+        Some(redact_replacement(rule_id, raw_str))
+    } else {
+        None
+    };
+    let pfx = repl_owned
+        .as_deref()
+        .and_then(|r| r.strip_suffix("[REDACTED_BY_LEAKTAP]"))
+        .unwrap_or("");
+    let pfx_bytes = pfx.as_bytes();
+    let keep_pfx = if !pfx_bytes.is_empty() && pfx_bytes.len() + 10 <= n {
+        pfx_bytes
+    } else {
+        &[][..]
+    };
+    let rem = n - keep_pfx.len();
+    let mut out = Vec::with_capacity(n);
+    out.extend_from_slice(keep_pfx);
+    if rem >= 21 {
+        out.extend_from_slice(b"[REDACTED_BY_LEAKTAP");
+        out.resize(n - 1, b'*');
+        out.push(b']');
+    } else if rem >= 10 {
+        out.extend_from_slice(b"[REDACTED");
+        out.resize(n - 1, b'*');
+        out.push(b']');
+    } else {
+        out.resize(n, b'*');
+    }
+    out
+}
+
+fn scrub_utf8_bytes_in_place_same_len(
+    buf: &mut [u8],
+    prev_key_col: Option<&str>,
+    engine: &RuleEngine,
+    path: &Path,
+    target_fingerprint: Option<&str>,
+) -> usize {
+    let Ok(s) = std::str::from_utf8(buf) else {
+        return 0;
+    };
+    let hints = crate::rules::DocHints::from_text(s);
+    let matches: Vec<_> = engine
+        .scan_text_with_hints(s, Some(path), hints)
+        .into_iter()
+        .filter(|m| {
+            m.start < m.end
+                && m.end <= buf.len()
+                && target_fingerprint.is_none_or(|fp| m.fingerprint == fp)
+        })
+        .collect();
+    if !matches.is_empty() {
+        let mut count = 0usize;
+        let mut last_start = buf.len() + 1;
+        for m in matches.iter().rev() {
+            if m.end <= last_start {
+                let repl = same_len_redaction_bytes(&m.rule_id, &buf[m.start..m.end]);
+                buf[m.start..m.end].copy_from_slice(&repl);
+                last_start = m.start;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            return count;
+        }
+    }
+
+    if let Some(pk_key) = prev_key_col {
+        if let Ok(s2) = std::str::from_utf8(buf) {
+            if (2..=96).contains(&pk_key.len())
+                && (8..=256).contains(&s2.len())
+                && s2
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() && !matches!(b, b'"' | b'\''))
+            {
+                let synthetic = format!("{pk_key}={s2}");
+                let prefix_len = pk_key.len() + 1;
+                let kv_matches: Vec<_> = engine
+                    .scan_text_for_path(&synthetic, Some(path))
+                    .into_iter()
+                    .filter(|m| {
+                        m.start >= prefix_len
+                            && m.end <= synthetic.len()
+                            && target_fingerprint.is_none_or(|fp| m.fingerprint == fp)
+                    })
+                    .collect();
+                let mut count = 0usize;
+                let mut last_start = buf.len() + 1;
+                for m in kv_matches.iter().rev() {
+                    let rel_s = m.start - prefix_len;
+                    let rel_e = m.end - prefix_len;
+                    if rel_s < rel_e && rel_e <= buf.len() && rel_e <= last_start {
+                        let repl = same_len_redaction_bytes(&m.rule_id, &buf[rel_s..rel_e]);
+                        buf[rel_s..rel_e].copy_from_slice(&repl);
+                        last_start = rel_s;
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    return count;
+                }
+            }
+        }
+    }
+    0
+}
+
+fn read_protobuf_varint_len(buf: &[u8]) -> Option<(usize, usize)> {
+    let mut val = 0usize;
+    let mut shift = 0u32;
+    for (i, &b) in buf.iter().take(4).enumerate() {
+        val |= ((b & 0x7f) as usize) << shift;
+        if (b & 0x80) == 0 {
+            return Some((val, i + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// Scrubs secrets inside arbitrary binary/protobuf `BLOB` bytes using exact same-length byte
+/// replacements so surrounding binary framing and protobuf varint lengths remain 100% intact.
+fn scrub_binary_bytes_same_len(
+    buf: &mut [u8],
+    prev_key_col: Option<&str>,
+    engine: &RuleEngine,
+    path: &Path,
+    target_fingerprint: Option<&str>,
+) -> usize {
+    if buf.len() < 8 {
+        return 0;
+    }
+    let mut redactions = 0usize;
+
+    // Pass 1: Protobuf length-delimited (`wire_type == 2`) UTF-8 string fields so single-byte
+    // alphanumeric length varints (e.g. `0x41` == `'A'` for a 65-byte string) never merge into the value!
+    let mut p = 0usize;
+    while p + 2 < buf.len() {
+        let tag = buf[p];
+        if tag != 0 && (tag & 0x07) == 2 {
+            if let Some((str_len, v_bytes)) = read_protobuf_varint_len(&buf[p + 1..]) {
+                let start = p + 1 + v_bytes;
+                if (8..=65_536).contains(&str_len) && start + str_len <= buf.len() {
+                    let field_slice = &buf[start..start + str_len];
+                    let printable_ok = field_slice
+                        .iter()
+                        .all(|&b| b >= 0x20 || matches!(b, b'\t' | b'\r' | b'\n'));
+                    if printable_ok && std::str::from_utf8(field_slice).is_ok() {
+                        redactions += scrub_utf8_bytes_in_place_same_len(
+                            &mut buf[start..start + str_len],
+                            prev_key_col,
+                            engine,
+                            path,
+                            target_fingerprint,
+                        );
+                        p = start + str_len;
+                        continue;
+                    }
+                }
+            }
+        }
+        p += 1;
+    }
+
+    // Pass 2: Contiguous valid UTF-8 runs across the remaining binary payload
+    let mut i = 0usize;
+    while i < buf.len() {
+        let b = buf[i];
+        if b == 0 || (b < 0x20 && !matches!(b, b'\t' | b'\r' | b'\n')) || b == 0x7f {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < buf.len() {
+            let c = buf[i];
+            if c == 0 || (c < 0x20 && !matches!(c, b'\t' | b'\r' | b'\n')) || c == 0x7f {
+                break;
+            }
+            i += 1;
+        }
+        let run_end = i;
+        let mut sub_off = run_start;
+        while sub_off + 8 <= run_end {
+            match std::str::from_utf8(&buf[sub_off..run_end]) {
+                Ok(_) => {
+                    redactions += scrub_utf8_bytes_in_place_same_len(
+                        &mut buf[sub_off..run_end],
+                        prev_key_col,
+                        engine,
+                        path,
+                        target_fingerprint,
+                    );
+                    break;
+                }
+                Err(err) => {
+                    let valid_len = err.valid_up_to();
+                    if valid_len >= 8 {
+                        redactions += scrub_utf8_bytes_in_place_same_len(
+                            &mut buf[sub_off..sub_off + valid_len],
+                            prev_key_col,
+                            engine,
+                            path,
+                            target_fingerprint,
+                        );
+                    }
+                    let skip = err.error_len().unwrap_or(1).max(1);
+                    sub_off += valid_len + skip;
+                }
+            }
+        }
+    }
+    redactions
+}
+
+fn read_sqlite_varint_local(buf: &[u8]) -> Option<(u64, usize)> {
+    if buf.is_empty() {
+        return None;
+    }
+    let mut val = 0u64;
+    for (i, &b) in buf.iter().take(9).enumerate() {
+        if i == 8 {
+            val = (val << 8) | (b as u64);
+            return Some((val, 9));
+        }
+        val = (val << 7) | ((b & 0x7f) as u64);
+        if (b & 0x80) == 0 {
+            return Some((val, i + 1));
+        }
+    }
+    None
+}
+
+fn scrub_sqlite_leaf_page_in_place(
+    page_buf: &mut [u8],
+    page_no: u32,
+    reserved_bytes: usize,
+    engine: &RuleEngine,
+    path: &Path,
+    target_fingerprint: Option<&str>,
+) -> usize {
+    let page_size = page_buf.len();
+    if page_size < 512 || reserved_bytes >= page_size {
+        return 0;
+    }
+    let usable = page_size - reserved_bytes;
+    let btree_hdr_off = if page_no == 1 { 100usize } else { 0usize };
+    if btree_hdr_off + 8 > usable {
+        return 0;
+    }
+    let page_type = page_buf[btree_hdr_off];
+    // Only scrub table leaf (`0x0d`) and index/WITHOUT ROWID leaf (`0x0a`) pages cleanly at
+    // column boundaries; never touch interior B-tree pointer pages (`0x02`, `0x05`).
+    if page_type != 0x0d && page_type != 0x0a {
+        return 0;
+    }
+    let hdr_len = 8usize;
+    let cell_count =
+        u16::from_be_bytes([page_buf[btree_hdr_off + 3], page_buf[btree_hdr_off + 4]]) as usize;
+    if btree_hdr_off + hdr_len + cell_count * 2 > usable {
+        return 0;
+    }
+    let max_local = if page_type == 0x0d {
+        usable - 35
+    } else {
+        ((usable - 12) * 64 / 255).saturating_sub(23)
+    };
+    let min_local = ((usable - 12) * 32 / 255).saturating_sub(23);
+    if min_local > max_local || max_local == 0 {
+        return 0;
+    }
+
+    let mut cell_ranges: Vec<(usize, usize)> = Vec::with_capacity(cell_count);
+    for cell_idx in 0..cell_count {
+        let ptr_pos = btree_hdr_off + hdr_len + cell_idx * 2;
+        let raw_cell_off = u16::from_be_bytes([page_buf[ptr_pos], page_buf[ptr_pos + 1]]);
+        let mut cursor = if raw_cell_off == 0 && page_size == 65536 {
+            65536
+        } else {
+            raw_cell_off as usize
+        };
+        if cursor >= usable {
+            continue;
+        }
+        let Some((payload_size_u64, v1_len)) = read_sqlite_varint_local(&page_buf[cursor..usable])
+        else {
+            continue;
+        };
+        if payload_size_u64 == 0 || payload_size_u64 > 4 * 1024 * 1024 {
+            continue;
+        }
+        let payload_size = payload_size_u64 as usize;
+        cursor += v1_len;
+        if page_type == 0x0d {
+            if cursor >= usable {
+                continue;
+            }
+            let Some((_rowid, v2_len)) = read_sqlite_varint_local(&page_buf[cursor..usable]) else {
+                continue;
+            };
+            cursor += v2_len;
+        }
+        let has_overflow = payload_size > max_local;
+        let local_len = if !has_overflow {
+            payload_size
+        } else {
+            let k = min_local + ((payload_size - min_local) % (usable - 4));
+            if k <= max_local {
+                k
+            } else {
+                min_local
+            }
+        };
+        if cursor + local_len <= usable {
+            cell_ranges.push((cursor, cursor + local_len));
+        }
+    }
+
+    let mut redactions = 0usize;
+    for (c_start, c_end) in cell_ranges {
+        let payload = &mut page_buf[c_start..c_end];
+        let Some((hdr_sz_u64, mut hdr_pos)) = read_sqlite_varint_local(payload) else {
+            continue;
+        };
+        if hdr_sz_u64 < hdr_pos as u64 || hdr_sz_u64 > payload.len() as u64 || hdr_sz_u64 > 65536 {
+            continue;
+        }
+        let hdr_sz = hdr_sz_u64 as usize;
+        let mut col_specs: Vec<(usize, usize, bool, bool)> = Vec::new();
+        let mut body_pos = hdr_sz;
+        while hdr_pos < hdr_sz && col_specs.len() < 2048 {
+            let Some((serial_type, v_len)) = read_sqlite_varint_local(&payload[hdr_pos..hdr_sz])
+            else {
+                break;
+            };
+            hdr_pos += v_len;
+            let (col_len, is_text, is_blob) = match serial_type {
+                0 | 8 | 9 => (0usize, false, false),
+                1 => (1, false, false),
+                2 => (2, false, false),
+                3 => (3, false, false),
+                4 => (4, false, false),
+                5 => (6, false, false),
+                6 | 7 => (8, false, false),
+                10 | 11 => break,
+                n if n >= 12 && n % 2 == 0 => (((n - 12) / 2) as usize, false, true),
+                n => (((n - 13) / 2) as usize, true, false),
+            };
+            if body_pos + col_len > payload.len() {
+                break;
+            }
+            col_specs.push((body_pos, body_pos + col_len, is_text, is_blob));
+            body_pos += col_len;
+        }
+
+        let mut prev_key_col: Option<String> = None;
+        for (col_idx, (cs, ce, is_text, is_blob)) in col_specs.into_iter().enumerate() {
+            if !(is_text || is_blob) || cs == ce {
+                prev_key_col = None;
+                continue;
+            }
+            let next_key = std::str::from_utf8(&payload[cs..ce])
+                .ok()
+                .filter(|s| {
+                    (2..=96).contains(&s.len())
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+                })
+                .map(str::to_string);
+
+            // On index / WITHOUT ROWID leaf pages (`0x0a`), skip column 0 so index sort order is never perturbed
+            if !(page_type == 0x0a && col_idx == 0) {
+                redactions += scrub_binary_bytes_same_len(
+                    &mut payload[cs..ce],
+                    prev_key_col.as_deref(),
+                    engine,
+                    path,
+                    target_fingerprint,
+                );
+            }
+            prev_key_col = next_key;
+        }
+    }
+    redactions
+}
+
+fn sqlite_wal_checksum_words(data: &[u8], native_be: bool, mut s0: u32, mut s1: u32) -> (u32, u32) {
+    for &chunk in data.as_chunks::<8>().0 {
+        let w0 = if native_be {
+            u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        } else {
+            u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        };
+        let w1 = if native_be {
+            u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]])
+        } else {
+            u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]])
+        };
+        s0 = s0.wrapping_add(w0).wrapping_add(s1);
+        s1 = s1.wrapping_add(w1).wrapping_add(s0);
+    }
+    (s0, s1)
+}
+
+fn scrub_sqlite_wal_bytes_in_place(
+    wal: &mut Vec<u8>,
+    reserved_bytes: usize,
+    engine: &RuleEngine,
+    path: &Path,
+    target_fingerprint: Option<&str>,
+) -> Option<usize> {
+    if wal.len() < 32 {
+        return Some(0);
+    }
+    let magic = u32::from_be_bytes([wal[0], wal[1], wal[2], wal[3]]);
+    let native_be = match magic {
+        0x377f0682 => false,
+        0x377f0683 => true,
+        _ => return None,
+    };
+    let page_size = u32::from_be_bytes([wal[8], wal[9], wal[10], wal[11]]) as usize;
+    if !(512..=65536).contains(&page_size) || !page_size.is_multiple_of(8) {
+        return None;
+    }
+    let hdr_s0 = u32::from_be_bytes([wal[24], wal[25], wal[26], wal[27]]);
+    let hdr_s1 = u32::from_be_bytes([wal[28], wal[29], wal[30], wal[31]]);
+    // Self-verify WAL header checksum before touching any frames
+    if sqlite_wal_checksum_words(&wal[0..24], native_be, 0, 0) != (hdr_s0, hdr_s1) {
+        return None;
+    }
+    let salt1 = [wal[16], wal[17], wal[18], wal[19]];
+    let salt2 = [wal[20], wal[21], wal[22], wal[23]];
+
+    let frame_len = 24 + page_size;
+    let mut orig_s0 = hdr_s0;
+    let mut orig_s1 = hdr_s1;
+    let mut new_s0 = hdr_s0;
+    let mut new_s1 = hdr_s1;
+    let mut pos = 32usize;
+    let mut redactions = 0usize;
+
+    while pos + frame_len <= wal.len() {
+        if wal[pos + 8..pos + 12] != salt1 || wal[pos + 12..pos + 16] != salt2 {
+            break;
+        }
+        let stored_s0 =
+            u32::from_be_bytes([wal[pos + 16], wal[pos + 17], wal[pos + 18], wal[pos + 19]]);
+        let stored_s1 =
+            u32::from_be_bytes([wal[pos + 20], wal[pos + 21], wal[pos + 22], wal[pos + 23]]);
+        let (chk_h0, chk_h1) =
+            sqlite_wal_checksum_words(&wal[pos..pos + 8], native_be, orig_s0, orig_s1);
+        let (chk_s0, chk_s1) = sqlite_wal_checksum_words(
+            &wal[pos + 24..pos + 24 + page_size],
+            native_be,
+            chk_h0,
+            chk_h1,
+        );
+        if (chk_s0, chk_s1) != (stored_s0, stored_s1) {
+            break;
+        }
+        orig_s0 = chk_s0;
+        orig_s1 = chk_s1;
+
+        let page_no = u32::from_be_bytes([wal[pos], wal[pos + 1], wal[pos + 2], wal[pos + 3]]);
+        redactions += scrub_sqlite_leaf_page_in_place(
+            &mut wal[pos + 24..pos + 24 + page_size],
+            page_no,
+            reserved_bytes,
+            engine,
+            path,
+            target_fingerprint,
+        );
+        (new_s0, new_s1) = sqlite_wal_checksum_words(&wal[pos..pos + 8], native_be, new_s0, new_s1);
+        (new_s0, new_s1) = sqlite_wal_checksum_words(
+            &wal[pos + 24..pos + 24 + page_size],
+            native_be,
+            new_s0,
+            new_s1,
+        );
+        wal[pos + 16..pos + 20].copy_from_slice(&new_s0.to_be_bytes());
+        wal[pos + 20..pos + 24].copy_from_slice(&new_s1.to_be_bytes());
+        pos += frame_len;
+    }
+
+    // Truncate dead post-checkpoint slack frames at `pos` so stale frames from earlier WAL epochs
+    // never retain plaintext secrets on disk.
+    if pos < wal.len() {
+        let slack_text = String::from_utf8_lossy(&wal[pos..]);
+        let slack_hits = engine
+            .scan_text_for_path(&slack_text, Some(path))
+            .into_iter()
+            .filter(|m| {
+                m.category == crate::rules::RuleCategory::Secret
+                    && target_fingerprint.is_none_or(|fp| m.fingerprint == fp)
+            })
+            .count();
+        redactions += slack_hits;
+        wal.truncate(pos);
+    }
+
+    Some(redactions)
+}
+
+/// Pure-Rust zero-Python fallback that scrubs SQLite B-tree leaf cells (`0x0d` / `0x0a`) and
+/// companion `-wal` frames in-place using same-length byte replacements and cumulative WAL
+/// checksum recomputation when `python3` is unavailable on `PATH`.
+fn try_scrub_sqlite_db_pure_rust(
+    path: &Path,
+    orig_meta: &fs::Metadata,
+    engine: &RuleEngine,
+    apply: bool,
+    create_backup: bool,
+    target_fingerprint: Option<&str>,
+) -> io::Result<Option<(CleanedFileSummary, usize)>> {
+    if orig_meta.len() > 128 * 1024 * 1024 {
+        return Ok(None);
+    }
+    let mut db_bytes = fs::read(path)?;
+    if db_bytes.len() < 100 || !db_bytes.starts_with(b"SQLite format 3\0") {
+        return Ok(None);
+    }
+    let raw_ps = u16::from_be_bytes([db_bytes[16], db_bytes[17]]);
+    let page_size = if raw_ps == 1 {
+        65536usize
+    } else {
+        raw_ps as usize
+    };
+    if !(512..=65536).contains(&page_size) || !page_size.is_power_of_two() {
+        return Ok(None);
+    }
+    let reserved_bytes = db_bytes[20] as usize;
+
+    let mut total_redactions = 0usize;
+    let num_pages = db_bytes.len() / page_size;
+    for idx in 0..num_pages {
+        let p_start = idx * page_size;
+        let p_end = p_start + page_size;
+        total_redactions += scrub_sqlite_leaf_page_in_place(
+            &mut db_bytes[p_start..p_end],
+            (idx + 1) as u32,
+            reserved_bytes,
+            engine,
+            path,
+            target_fingerprint,
+        );
+    }
+
+    let wal_path = companion_sqlite_path(path, "-wal");
+    let mut wal_meta_and_bytes: Option<(fs::Metadata, Vec<u8>, usize)> = None;
+    if let Ok(wm) = fs::symlink_metadata(&wal_path) {
+        if wm.file_type().is_file() && !wm.file_type().is_symlink() && wm.len() <= 128 * 1024 * 1024
+        {
+            if let Ok(mut wbytes) = fs::read(&wal_path) {
+                if let Some(w_hits) = scrub_sqlite_wal_bytes_in_place(
+                    &mut wbytes,
+                    reserved_bytes,
+                    engine,
+                    &wal_path,
+                    target_fingerprint,
+                ) {
+                    total_redactions += w_hits;
+                    wal_meta_and_bytes = Some((wm, wbytes, w_hits));
+                }
+            }
+        }
+    }
+
+    if total_redactions == 0 {
+        return Ok(None);
+    }
+
+    let display_file = shorten_home(path);
+    if !apply {
+        return Ok(Some((
+            CleanedFileSummary {
+                display_file,
+                secrets_redacted: total_redactions,
+                backup_file: None,
+            },
+            0,
+        )));
+    }
+
+    let (tmp_db, mut tmp_file) = create_unique_temp_file(path, orig_meta)?;
+    if tmp_file.write_all(&db_bytes).is_err() || tmp_file.sync_all().is_err() {
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Ok(None);
+    }
+    drop(tmp_file);
+
+    let mut tmp_wal_to_commit: Option<PathBuf> = None;
+    if let Some((ref wm, ref wbytes, _)) = wal_meta_and_bytes {
+        let (tw, mut tw_file) = create_unique_temp_file(&wal_path, wm)?;
+        if tw_file.write_all(wbytes).is_err() || tw_file.sync_all().is_err() {
+            let _ = fs::remove_file(&tw);
+            cleanup_temp_sqlite_family(&tmp_db);
+            return Ok(None);
+        }
+        drop(tw_file);
+        // Copy temp wal next to `tmp_db` too so `count_sqlite_secret_hits` checks both cleanly
+        let comp_tmp_wal = companion_sqlite_path(&tmp_db, "-wal");
+        let _ = copy_file_private_perms(&tw, &comp_tmp_wal);
+        tmp_wal_to_commit = Some(tw);
+    }
+
+    let mut remaining = count_sqlite_secret_hits(&tmp_db, engine, target_fingerprint);
+    let comp_tmp_wal = companion_sqlite_path(&tmp_db, "-wal");
+    if comp_tmp_wal.is_file() {
+        remaining += count_sqlite_secret_hits(&comp_tmp_wal, engine, target_fingerprint);
+        let _ = fs::remove_file(&comp_tmp_wal);
+    }
+
+    let pre_write_meta = fs::symlink_metadata(path)?;
+    if pre_write_meta.file_type().is_symlink() || !pre_write_meta.file_type().is_file() {
+        if let Some(tw) = tmp_wal_to_commit {
+            let _ = fs::remove_file(&tw);
+        }
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to clean non-regular SQLite file or symlink",
+        ));
+    }
+
+    let mut backup_display = None;
+    if create_backup {
+        let bak_path = companion_sqlite_path(path, ".leaktap.bak");
+        copy_file_private_perms(path, &bak_path)?;
+        if wal_meta_and_bytes.is_some() {
+            let wal_bak = companion_sqlite_path(&wal_path, ".leaktap.bak");
+            let _ = copy_file_private_perms(&wal_path, &wal_bak);
+        }
+        backup_display = Some(shorten_home(&bak_path));
+    }
+
+    if let Err(rename_err) = fs::rename(&tmp_db, path) {
+        if let Some(tw) = tmp_wal_to_commit {
+            let _ = fs::remove_file(&tw);
+        }
+        cleanup_temp_sqlite_family(&tmp_db);
+        return Err(rename_err);
+    }
+
+    if let Some(tw) = tmp_wal_to_commit {
+        if let Ok(pre_wm) = fs::symlink_metadata(&wal_path) {
+            if pre_wm.file_type().is_file() && !pre_wm.file_type().is_symlink() {
+                let _ = fs::rename(&tw, &wal_path);
+            } else {
+                let _ = fs::remove_file(&tw);
+            }
+        } else {
+            let _ = fs::remove_file(&tw);
+        }
+    }
+
+    Ok(Some((
+        CleanedFileSummary {
+            display_file,
+            secrets_redacted: total_redactions,
+            backup_file: backup_display,
+        },
+        remaining,
+    )))
+}
 
 fn find_python_for_sqlite() -> Option<&'static str> {
     ["python3", "python"].into_iter().find(|&cand| {
@@ -1183,11 +1872,14 @@ fn try_scrub_sqlite_db(
     target_fingerprint: Option<&str>,
 ) -> io::Result<Option<(CleanedFileSummary, usize)>> {
     let Some(py_bin) = find_python_for_sqlite() else {
-        eprintln!(
-            "[leaktap:warn] Cannot scrub SQLite database {}: `python3` (with `sqlite3` stdlib) was not found on PATH.",
-            shorten_home(path)
+        return try_scrub_sqlite_db_pure_rust(
+            path,
+            orig_meta,
+            engine,
+            apply,
+            create_backup,
+            target_fingerprint,
         );
-        return Ok(None);
     };
 
     let (tmp_db, tmp_file) = create_unique_temp_file(path, orig_meta)?;
@@ -1228,13 +1920,22 @@ fn try_scrub_sqlite_db(
         .spawn()
     else {
         cleanup_temp_sqlite_family(&tmp_db);
-        return Ok(None);
+        return try_scrub_sqlite_db_pure_rust(
+            path,
+            orig_meta,
+            engine,
+            apply,
+            create_backup,
+            target_fingerprint,
+        );
     };
 
     let mut updates_jsonl = Vec::<u8>::new();
     let mut total_redactions = 0usize;
 
     if let Some(stdout) = dump_child.stdout.take() {
+        use base64::engine::general_purpose::STANDARD as B64_STD;
+        use base64::Engine as _;
         let reader = BufReader::new(stdout);
         for line_res in reader.lines() {
             let Ok(line) = line_res else {
@@ -1246,10 +1947,38 @@ fn try_scrub_sqlite_db(
             let Ok(mut row_obj) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            let kind = row_obj.get("k").and_then(Value::as_str).unwrap_or("s");
             let Some(cell_val) = row_obj.get("v").and_then(Value::as_str) else {
                 continue;
             };
             let prev_k = row_obj.get("pk_k").and_then(Value::as_str);
+
+            if kind == "r" {
+                if let Ok(mut raw_blob) = B64_STD.decode(cell_val) {
+                    let count = scrub_binary_bytes_same_len(
+                        &mut raw_blob,
+                        prev_k,
+                        engine,
+                        path,
+                        target_fingerprint,
+                    );
+                    if count > 0 {
+                        let reencoded = B64_STD.encode(&raw_blob);
+                        if let Some(map) = row_obj.as_object_mut() {
+                            map.insert("v".to_string(), Value::String(reencoded));
+                            map.remove("pk_k");
+                            if let Ok(mut encoded) = serde_json::to_vec(&Value::Object(map.clone()))
+                            {
+                                encoded.push(b'\n');
+                                updates_jsonl.extend_from_slice(&encoded);
+                                total_redactions += count;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
             if let Some((scrubbed, count)) =
                 scrub_sqlite_cell_string(cell_val, prev_k, engine, path, target_fingerprint)
             {
@@ -1268,7 +1997,14 @@ fn try_scrub_sqlite_db(
     let dump_ok = dump_child.wait().is_ok_and(|s| s.success());
     if !dump_ok || total_redactions == 0 {
         cleanup_temp_sqlite_family(&tmp_db);
-        return Ok(None);
+        return try_scrub_sqlite_db_pure_rust(
+            path,
+            orig_meta,
+            engine,
+            apply,
+            create_backup,
+            target_fingerprint,
+        );
     }
 
     let display_file = shorten_home(path);

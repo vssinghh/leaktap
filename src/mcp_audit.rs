@@ -978,7 +978,10 @@ fn check_unpinned_execution(
     let has_auto_install = eff_args
         .iter()
         .any(|&a| matches!(a, "-y" | "--yes" | "-A" | "--allow-all"))
-        || matches!(cmd_base.as_str(), "uvx" | "uv" | "bunx")
+        || matches!(
+            cmd_base.as_str(),
+            "uvx" | "uv" | "bunx" | "go" | "nix" | "jbang" | "cargo"
+        )
         || launcher_label.ends_with(" dlx");
 
     let explicit_pkgs = collect_explicit_package_flag_args(&cmd_base, pkg_slice);
@@ -1102,6 +1105,64 @@ fn extract_package_launcher<'a>(
                 None
             }
         }
+        "go" => {
+            let pos = args.iter().position(|&a| a == "run")?;
+            let rem = &args[pos + 1..];
+            let target = find_target_package_arg("go", rem)?;
+            let is_local = target.starts_with('.')
+                || target.starts_with('/')
+                || target.starts_with('\\')
+                || target.ends_with(".go");
+            let looks_remote_mod = target.contains('@')
+                || target
+                    .split('/')
+                    .next()
+                    .is_some_and(|first| first.contains('.'));
+            if !is_local && looks_remote_mod {
+                Some(("go run".to_string(), rem))
+            } else {
+                None
+            }
+        }
+        "nix" => {
+            let pos = args.iter().position(|&a| matches!(a, "run" | "shell"))?;
+            let sub = args[pos];
+            let rem = &args[pos + 1..];
+            let target = find_target_package_arg("nix", rem)?;
+            let is_local = target.starts_with('.')
+                || target.starts_with('/')
+                || target.starts_with('\\')
+                || target.starts_with("path:");
+            if !is_local {
+                Some((format!("nix {sub}"), rem))
+            } else {
+                None
+            }
+        }
+        "jbang" => {
+            let rem = if let Some(pos) = args.iter().position(|&a| a == "run") {
+                &args[pos + 1..]
+            } else {
+                args
+            };
+            let target = find_target_package_arg("jbang", rem)?;
+            let is_local_file = !target.starts_with("http://")
+                && !target.starts_with("https://")
+                && !target.contains('@')
+                && !target.contains(':')
+                && (target.starts_with('.')
+                    || target.starts_with('/')
+                    || target.starts_with('\\')
+                    || target.ends_with(".java")
+                    || target.ends_with(".jar")
+                    || target.ends_with(".jsh")
+                    || target.ends_with(".kt"));
+            if !is_local_file {
+                Some(("jbang".to_string(), rem))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -1152,6 +1213,17 @@ fn find_target_package_arg<'a>(cmd_base: &str, args: &'a [&'a str]) -> Option<&'
                 | "--config-file"
                 | "--import-map"
                 | "--lock"
+                | "-mod"
+                | "-modfile"
+                | "-overlay"
+                | "-C"
+                | "--expr"
+                | "--file"
+                | "--deps"
+                | "--java"
+                | "--main"
+                | "--cp"
+                | "--class-path"
         ) || (is_uv && matches!(a, "-p" | "-c"))
         {
             i += 2;
@@ -1814,6 +1886,42 @@ fn is_exact_semver_or_digest(ver: &str) -> bool {
 }
 
 fn is_pinned_package_spec(pkg: &str) -> bool {
+    if pkg.contains("narHash=sha256-") {
+        return true;
+    }
+    for param in pkg.split(['?', '&']).skip(1) {
+        if let Some(rev) = param.strip_prefix("rev=") {
+            let rev_clean = rev.split('#').next().unwrap_or(rev);
+            if is_immutable_git_commit_sha(rev_clean) {
+                return true;
+            }
+        }
+    }
+    if pkg.starts_with("github:") || pkg.starts_with("gitlab:") || pkg.starts_with("sourcehut:") {
+        let before_hash = pkg.split(['#', '?']).next().unwrap_or(pkg);
+        if before_hash
+            .rsplit('/')
+            .next()
+            .is_some_and(is_immutable_git_commit_sha)
+        {
+            return true;
+        }
+    }
+    let colon_parts: Vec<&str> = pkg.split(':').collect();
+    if (colon_parts.len() == 3 || colon_parts.len() == 4)
+        && !pkg.contains("://")
+        && !colon_parts[0].is_empty()
+        && colon_parts[0].contains('.')
+    {
+        let mav_ver = colon_parts[2];
+        if !mav_ver.to_ascii_uppercase().contains("SNAPSHOT")
+            && !matches!(mav_ver.to_ascii_uppercase().as_str(), "LATEST" | "RELEASE")
+            && (is_exact_semver_or_digest(mav_ver) || is_exact_pep440_pin(mav_ver))
+        {
+            return true;
+        }
+        return false;
+    }
     if let Some((_, digest)) = pkg.rsplit_once('@') {
         if digest.starts_with("sha256:") || is_immutable_git_commit_sha(digest) {
             return is_exact_semver_or_digest(digest);
@@ -1834,6 +1942,8 @@ fn is_pinned_package_spec(pkg: &str) -> bool {
         || pkg.starts_with("http://")
         || pkg.starts_with("git+")
         || pkg.starts_with("github:")
+        || pkg.starts_with("gitlab:")
+        || pkg.starts_with("sourcehut:")
     {
         return pkg
             .rsplit_once('@')
@@ -1849,6 +1959,11 @@ fn has_explicit_version_pin(pkg: &str) -> bool {
     if let Some((lhs, py_ver)) = pkg.split_once("==") {
         if !lhs.ends_with(['~', '!', '>', '<']) {
             return is_exact_semver_or_digest(py_ver) || is_exact_pep440_pin(py_ver);
+        }
+    }
+    if let Some((before_at, ver)) = pkg.rsplit_once('@') {
+        if !before_at.is_empty() && !ver.contains('/') {
+            return is_exact_semver_or_digest(ver);
         }
     }
     let core = pkg
