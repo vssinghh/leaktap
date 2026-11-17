@@ -289,7 +289,7 @@ def run_layer2_stdio_tap(
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "leaktap-audit", "version": "0.3.0"},
+                    "clientInfo": {"name": "leaktap-audit", "version": "0.4.0"},
                 },
             }
             assert proc.stdin is not None
@@ -522,7 +522,7 @@ def main() -> int:
 
     existing_live: dict[str, dict] = {}
     snapshot_date = time.strftime("%Y-%m-%d")
-    leaktap_version = "0.3.0"
+    leaktap_version = "0.4.0"
     if args.from_dataset:
         prev = json.loads(Path(args.from_dataset).read_text())
         snapshot_date = prev.get("snapshot_date") or snapshot_date

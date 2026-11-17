@@ -163,10 +163,10 @@
   </g>
   <g class="l16">
     <line x1="37.5" y1="349.8" x2="37.5" y2="369.3" stroke="#e6edf3" stroke-width="1.2"/>
-    <text x="72.6" y="364.0" fill="#e6edf3" xml:space="preserve" class="t">Runs unpinned `npx @community/db-mcp` — pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin</text>
+    <text x="72.6" y="364.0" fill="#e6edf3" xml:space="preserve" class="t">Runs unpinned `npx @community/db-mcp` — pulls mutable remote package code on install, cache refresh, or `@latest` startup</text>
   </g>
   <g class="l17">
-    <text x="18.0" y="383.5" fill="#e6edf3" xml:space="preserve" class="t">transitive `^`/`~` dependencies)</text>
+    <text x="18.0" y="383.5" fill="#e6edf3" xml:space="preserve" class="t">(pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)</text>
   </g>
   <g class="l18">
     <path d="M 37.5 388.8 V 398.6 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>

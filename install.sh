@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installer for leaktap (https://github.com/vssinghh/leaktap)
 # Inspect before running:
-#   curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.3.0/install.sh
+#   curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.0/install.sh
 #   less install.sh && sh install.sh
 
 set -eu
@@ -52,7 +52,7 @@ if [ -z "$VERSION" ]; then
       | head -n 1
   )"
   if [ -z "$VERSION" ]; then
-    err "failed to resolve latest release tag from GitHub; set LEAKTAP_VERSION=v0.3.0 manually"
+    err "failed to resolve latest release tag from GitHub; set LEAKTAP_VERSION=v0.4.0 manually"
   fi
 fi
 

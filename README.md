@@ -16,15 +16,15 @@ Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`cod
 Build from a tagged release with `cargo`:
 
 ```bash
-cargo install --git https://github.com/vssinghh/leaktap --tag v0.3.0 --locked
+cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.0 --locked
 ```
 
 Download a prebuilt binary on macOS or Linux (read the script before running it):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.3.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.0/install.sh
 less install.sh
-LEAKTAP_VERSION=v0.3.0 sh install.sh
+LEAKTAP_VERSION=v0.4.0 sh install.sh
 
 # Optional: verify GitHub Actions build attestation
 gh attestation verify ~/.local/bin/leaktap --repo vssinghh/leaktap

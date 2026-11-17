@@ -4,7 +4,7 @@
 
 **MCP (Model Context Protocol)** is a standard way for AI coding tools like Claude Code, Codex CLI, Cursor, and Gemini CLI to call external tools such as GitHub, browsers, Figma, and databases. Most MCP servers run as local child processes on your laptop (usually started with `npx`, `uvx`, or `docker run`) with access to your local files, shell environment variables, and internet connection.
 
-Every finding in this report comes directly from running `leaktap` (`v0.3.0`) in two layers across the **20 most-starred open-source MCP server repositories on GitHub** (`11,969` to `84,118` stars; **`464,529` combined stars**):
+Every finding in this report comes directly from running `leaktap` (`v0.4.0`) in two layers across the **20 most-starred open-source MCP server repositories on GitHub** (`11,969` to `84,118` stars; **`464,529` combined stars**):
 
 1. **Layer 1: Static Repository & Config Scan (`leaktap scan <repo> --no-pii --format json`).** Scans each cloned repository offline for unpinned `npx`/`uvx`/`docker` commands, API keys placed in JSON config examples or CLI flags, pipe-to-shell install commands (`curl ... | sh`), auto-run workspace hooks, lifecycle scripts, and default-on telemetry code.
 2. **Layer 2: Live Wire & Socket Audit (`leaktap tap`).** Starts each server inside `leaktap tap`, runs a live MCP JSON-RPC handshake (`initialize` followed by `tools/list`, the standard startup messages an AI client sends over standard input/output to ask a server what tools it offers), computes a SHA-256 hash of every returned tool schema, checks live tool descriptions for hidden prompt-injection instructions, and logs every outbound network connection (`HTTP CONNECT` proxy tunnels and OS sockets) opened during startup before any tool is called.
