@@ -5,12 +5,15 @@ pub mod terminal;
 use crate::mcp_audit::McpFinding;
 use crate::rules::Severity;
 use crate::scanner::TranscriptScanResult;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub struct FullScanReport {
     pub roots: Vec<String>,
+    pub scan_paths: Vec<PathBuf>,
     pub mcp_files_scanned: usize,
     pub mcp_bytes_scanned: u64,
+    pub active_checks: bool,
     pub duration: Duration,
     pub transcripts: TranscriptScanResult,
     pub mcp_findings: Vec<McpFinding>,

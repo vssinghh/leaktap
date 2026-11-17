@@ -1,21 +1,31 @@
-use crate::api_tap::{start_local_api_tap, TapCallback};
+use crate::api_tap::{start_local_api_tap_full, TapCallback};
 use crate::cli::TapArgs;
+use crate::config::PolicyConfig;
 use crate::discovery::home_dir;
 use crate::header_audit::HeaderAuditor;
-use crate::netwatch::spawn_socket_watcher;
-use crate::rules::{is_likely_placeholder, shannon_entropy, RuleCategory, RuleEngine};
+use crate::mcp_inspect::{audit_mcp_tool_call_text, audit_mcp_tools_payload_with_options};
+use crate::netwatch::{
+    disable_process_dumpable, enable_child_subreaper, reap_reparented_zombies,
+    reap_reparented_zombies_except, spawn_socket_watcher, OS_SOCKET_WATCH_SUPPORTED,
+};
+use crate::rules::{
+    is_likely_placeholder, looks_like_filesystem_path, shannon_entropy, RuleCategory, RuleEngine,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Maximum size (`10 MiB`) of `~/.leaktap/live.jsonl` before rotating to `live.jsonl.1`.
+pub const LIVE_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WiretapEvent {
@@ -27,23 +37,114 @@ pub struct WiretapEvent {
     pub detail: String,
 }
 
+struct LogSink {
+    path: PathBuf,
+    rotate_at_bytes: Option<u64>,
+    bytes_written: u64,
+    file: File,
+}
+
+impl LogSink {
+    fn open(path: PathBuf, rotate_at_bytes: Option<u64>) -> io::Result<Self> {
+        if let Some(limit) = rotate_at_bytes {
+            let _ = rotate_log_file_if_exceeded(&path, limit);
+        }
+        let existing_len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let file = open_private_append_file(&path)?;
+        Ok(Self {
+            path,
+            rotate_at_bytes,
+            bytes_written: existing_len,
+            file,
+        })
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let _ = writeln!(self.file, "{line}");
+        let _ = self.file.flush();
+        self.bytes_written = self.bytes_written.saturating_add(line.len() as u64 + 1);
+        if let Some(limit) = self.rotate_at_bytes {
+            if self.bytes_written >= limit {
+                let rotated = rotated_backup_path(&self.path);
+                if fs::rename(&self.path, &rotated).is_ok() {
+                    enforce_private_permissions(&rotated);
+                    if let Ok(fresh) = open_private_append_file(&self.path) {
+                        self.file = fresh;
+                        self.bytes_written = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn rotated_backup_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".1");
+    PathBuf::from(os)
+}
+
+fn enforce_private_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Rotates `path` to `<path>.1` (`0600`) when its current size meets or exceeds `max_bytes`.
+pub fn rotate_log_file_if_exceeded(path: &Path, max_bytes: u64) -> io::Result<bool> {
+    let len = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if len < max_bytes {
+        return Ok(false);
+    }
+    let rotated = rotated_backup_path(path);
+    fs::rename(path, &rotated)?;
+    enforce_private_permissions(&rotated);
+    Ok(true)
+}
+
 const SENSITIVE_ENV_NAMES: &[&str] = &[
     "SECRET",
     "TOKEN",
     "PASSWORD",
+    "PASSWD",
+    "MYSQL_PWD",
+    "PGPASSWORD",
     "API_KEY",
     "PRIVATE_KEY",
     "ACCESS_KEY",
+    "CLIENT_SECRET",
+    "WEBHOOK_SECRET",
+    "CREDENTIAL",
+    "CONNECTION_STRING",
+    "CONN_STR",
     "DATABASE_URL",
     "REDIS_URL",
     "MONGODB_URI",
+];
+
+const PASSWORD_ENV_NAMES: &[&str] = &[
+    "PASSWORD",
+    "PASSWD",
+    "MYSQL_PWD",
+    "PGPASSWORD",
+    "REDISCLI_AUTH",
 ];
 
 pub fn default_live_log_path() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".leaktap").join("live.jsonl"))
 }
 
-fn open_private_append_file(path: &PathBuf) -> io::Result<File> {
+fn open_private_append_file(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -75,33 +176,50 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     let is_fullscreen_tui =
         inherit_tty && !is_info_only && !is_oneshot_cli_invocation(program, cmd_args);
 
+    let block_secrets_enabled = args.block_secrets || env_flag_enabled("LEAKTAP_BLOCK_SECRETS");
+    let redact_secrets_enabled = args.redact_secrets || env_flag_enabled("LEAKTAP_REDACT_SECRETS");
     let scrub_env_enabled = args.scrub_env && !args.no_scrub_env;
-    let inspect_api_enabled = args.inspect_api && !args.no_inspect_api && !is_info_only;
+    let inspect_api_enabled = (args.inspect_api || block_secrets_enabled || redact_secrets_enabled)
+        && !args.no_inspect_api
+        && !is_info_only;
 
-    let engine = Arc::new(RuleEngine::all_rules());
+    let policy = PolicyConfig::load_with_git_ref(
+        args.config.as_deref(),
+        args.policy_git_ref.as_deref(),
+        &[],
+        args.trust_project_config,
+        args.no_config,
+    )
+    .ok();
+    let engine = Arc::new(RuleEngine::with_policy(true, policy.as_ref()));
     let header_auditor = Arc::new(HeaderAuditor::new());
     let url_regex = Arc::new(
         Regex::new(r#"https?://([a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})(?::\d+)?(?:/[^\s"'<>)]*)?"#)
             .expect("valid url regex"),
     );
 
-    let mut writers: Vec<File> = Vec::new();
+    let default_live_path = default_live_log_path();
+    let mut writers: Vec<LogSink> = Vec::new();
     if let Some(ref p) = args.log {
-        writers.push(open_private_append_file(p)?);
+        let rotate = if default_live_path.as_ref() == Some(p) {
+            Some(LIVE_LOG_MAX_BYTES)
+        } else {
+            None
+        };
+        writers.push(LogSink::open(p.clone(), rotate)?);
     }
     if !args.no_live_log && !is_info_only {
-        if let Some(default_log) = default_live_log_path() {
+        if let Some(default_log) = default_live_path {
             let same_as_explicit = args.log.as_ref().is_some_and(|p| p == &default_log);
             if !same_as_explicit {
-                if let Ok(f) = open_private_append_file(&default_log) {
-                    writers.push(f);
+                if let Ok(sink) = LogSink::open(default_log, Some(LIVE_LOG_MAX_BYTES)) {
+                    writers.push(sink);
                 }
             }
         }
     }
     let log_writers = Arc::new(Mutex::new(writers));
 
-    // Avoid writing stderr alerts mid-session over an active full-screen TUI; log to live.jsonl instead
     let suppress_live_stderr = args.quiet || is_fullscreen_tui || is_info_only;
     let alert_count = Arc::new(AtomicUsize::new(0));
     let alert_count_for_cb = Arc::clone(&alert_count);
@@ -131,17 +249,37 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     }
 
     let mut exposed_env_keys = Vec::new();
+    let mut preserved_profile_keys = Vec::new();
     for (k, v) in env::vars() {
         if allow_set.contains(&k) {
             continue;
         }
         if is_sensitive_env_pair(&k, &v, &engine) {
             exposed_env_keys.push(k);
+        } else if !v.trim().is_empty()
+            && matches!(
+                k.to_ascii_uppercase().as_str(),
+                "AWS_PROFILE"
+                    | "AWS_DEFAULT_PROFILE"
+                    | "AWS_CONFIG_FILE"
+                    | "AWS_SHARED_CREDENTIALS_FILE"
+                    | "KUBECONFIG"
+                    | "CLOUDSDK_ACTIVE_CONFIG_NAME"
+            )
+        {
+            preserved_profile_keys.push(k);
         }
     }
     exposed_env_keys.sort();
+    preserved_profile_keys.sort();
+    if scrub_env_enabled && !suppress_live_stderr && !preserved_profile_keys.is_empty() {
+        let _ = writeln!(
+            io::stderr(),
+            "[leaktap:info] Preserved ambient profile/context selector(s): {} (not stripped so CLI tools do not fall back to `[default]`; use an OS filesystem sandbox to restrict `~/.aws`/`~/.kube` access).",
+            preserved_profile_keys.join(", ")
+        );
+    }
 
-    // Optional zero-cert local loopback API tap (`--inspect-api`)
     let local_api_tap = if inspect_api_enabled {
         let anth_upstream = env::var("LEAKTAP_UPSTREAM_ANTHROPIC_URL")
             .or_else(|_| env::var("ANTHROPIC_BASE_URL"))
@@ -158,12 +296,15 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             .or_else(|_| env::var("GEMINI_API_BASE_URL"))
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
 
-        let tap = start_local_api_tap(
+        let tap = start_local_api_tap_full(
             anth_upstream,
             oai_upstream,
             chatgpt_upstream,
             openai_explicit,
             gemini_upstream,
+            block_secrets_enabled,
+            redact_secrets_enabled,
+            args.update_mcp_pins,
             Arc::clone(&engine),
             Arc::clone(&header_auditor),
             Arc::clone(&emit_cb),
@@ -226,42 +367,124 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         }
     }
 
+    if !is_info_only
+        && !allow_set.contains("SSH_AUTH_SOCK")
+        && env::var_os("SSH_AUTH_SOCK").is_some_and(|v| !v.is_empty())
+    {
+        if args.scrub_ssh_agent {
+            cmd.env_remove("SSH_AUTH_SOCK");
+            cmd.env_remove("SSH_AGENT_PID");
+            emit_cb(
+                "env",
+                "ssh_agent_scrubbed",
+                "env-ssh-agent",
+                "MEDIUM",
+                "Scrubbed `SSH_AUTH_SOCK` agent socket before launch".to_string(),
+            );
+        } else {
+            emit_cb(
+                "env",
+                "ssh_agent_inherited",
+                "env-ssh-agent",
+                "MEDIUM",
+                "Child session inherits active `SSH_AUTH_SOCK` agent socket (pass --scrub-ssh-agent to strip)".to_string(),
+            );
+        }
+    }
+
     if let Some(ref tap) = local_api_tap {
         cmd.env("ANTHROPIC_BASE_URL", &tap.anthropic_base_url);
         cmd.env("OPENAI_BASE_URL", &tap.openai_base_url);
         cmd.env("GOOGLE_GEMINI_BASE_URL", &tap.gemini_base_url);
         cmd.env("GEMINI_API_BASE_URL", &tap.gemini_base_url);
+        cmd.env("OPENROUTER_BASE_URL", &tap.openrouter_base_url);
+        cmd.env("DEEPSEEK_BASE_URL", &tap.deepseek_base_url);
+        cmd.env("XAI_BASE_URL", &tap.xai_base_url);
+        cmd.env("GROQ_BASE_URL", &tap.groq_base_url);
         let no_proxy = build_loopback_no_proxy();
         cmd.env("NO_PROXY", &no_proxy);
         cmd.env("no_proxy", &no_proxy);
     }
 
     if is_fullscreen_tui && !args.quiet {
+        let mode_label = if block_secrets_enabled {
+            "active secret blocking enabled"
+        } else if redact_secrets_enabled {
+            "in-transit secret redaction enabled"
+        } else {
+            "audit mode"
+        };
         let _ = writeln!(
             io::stderr(),
-            "[leaktap] Watching `{}` — live events streaming to ~/.leaktap/live.jsonl (`leaktap ui` to view)",
+            "[leaktap] Watching `{}` ({mode_label}) — live events streaming to ~/.leaktap/live.jsonl (`leaktap ui` to view)",
             program_stem(program)
         );
     }
 
+    if inspect_api_enabled {
+        let has_workspace_tamper = emit_api_tap_bypass_warnings(program, args.quiet, &emit_cb);
+        if block_secrets_enabled && has_workspace_tamper {
+            let _ = writeln!(
+                io::stderr(),
+                "[leaktap:CRITICAL] Workspace configuration overrides API base URL or cloud routing while `--block-secrets` is active; refusing to launch `{}` so DLP enforcement cannot be bypassed.",
+                program_stem(program)
+            );
+            return Ok(1);
+        }
+    }
+
+    if !args.no_net_watch && !is_info_only && !OS_SOCKET_WATCH_SUPPORTED && !args.quiet {
+        let _ = writeln!(
+            io::stderr(),
+            "[leaktap:note] Per-process OS socket telemetry is only supported on Linux and macOS; HTTP API inspection and env scrubbing remain active."
+        );
+    }
+
+    if scrub_env_enabled && !is_info_only {
+        disable_process_dumpable();
+    }
+
+    if !args.no_net_watch && !is_info_only {
+        enable_child_subreaper();
+    }
+
     let mut child = cmd.spawn()?;
     let child_pid = child.id();
+    let ignore_tap_port = local_api_tap.as_ref().map(|t| t.port);
 
-    // Zero-root OS socket watcher for outbound TCP connections across child process tree
+    // Zero-root OS socket watcher for outbound TCP/UDP connections across child process tree
     let stop_sockets = Arc::new(AtomicBool::new(false));
     let socket_handle = if !args.no_net_watch && !is_info_only {
         let emit_sock = Arc::clone(&emit_cb);
+        let engine_for_sock = Arc::clone(&engine);
         Some(spawn_socket_watcher(
             child_pid,
+            ignore_tap_port,
             Arc::clone(&stop_sockets),
-            move |remote| {
-                emit_sock(
-                    "socket",
-                    "outbound_socket",
-                    "tcp-connection",
-                    "MEDIUM",
-                    format!("Outbound TCP connection opened to {remote}"),
-                );
+            move |obs| {
+                let cmd_context = sanitize_cmdline_for_log(&obs.cmdline, &engine_for_sock);
+                let cmd_suffix = if cmd_context.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {cmd_context}")
+                };
+                let detail = if obs.is_proxy_loopback {
+                    format!(
+                        "Outbound {} connection via local proxy {} by {} (pid {}{})",
+                        obs.proto, obs.remote, obs.comm, obs.pid, cmd_suffix
+                    )
+                } else {
+                    format!(
+                        "Outbound {} connection opened to {} by {} (pid {}{})",
+                        obs.proto, obs.remote, obs.comm, obs.pid, cmd_suffix
+                    )
+                };
+                let rule_id = if obs.proto == "UDP" {
+                    "udp-connection"
+                } else {
+                    "tcp-connection"
+                };
+                emit_sock("socket", "outbound_socket", rule_id, "MEDIUM", detail);
             },
         ))
     } else {
@@ -273,19 +496,23 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         let child_stdout = child.stdout.take().expect("piped stdout");
         let child_stderr = child.stderr.take().expect("piped stderr");
         let seen_domains: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mcp_server_id = Arc::new(format!("stdio:{}", args.command.join(" ")));
+        let update_mcp_pins = args.update_mcp_pins;
 
-        // stdin pump (detached so non-closing parent stdin does not hang after child exits)
         {
             let engine = Arc::clone(&engine);
             let auditor = Arc::clone(&header_auditor);
             let url_re = Arc::clone(&url_regex);
             let domains = Arc::clone(&seen_domains);
+            let server_id = Arc::clone(&mcp_server_id);
             let emit = Arc::clone(&emit_cb);
             thread::spawn(move || {
                 pump_stream(
                     io::stdin(),
                     child_stdin,
                     "stdin",
+                    &server_id,
+                    update_mcp_pins,
                     &engine,
                     &auditor,
                     &url_re,
@@ -295,18 +522,20 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             });
         }
 
-        // stdout pump — preserves exact raw bytes so MCP JSON-RPC framing is never altered
         let stdout_handle = {
             let engine = Arc::clone(&engine);
             let auditor = Arc::clone(&header_auditor);
             let url_re = Arc::clone(&url_regex);
             let domains = Arc::clone(&seen_domains);
+            let server_id = Arc::clone(&mcp_server_id);
             let emit = Arc::clone(&emit_cb);
             thread::spawn(move || {
                 pump_stream(
                     child_stdout,
                     io::stdout(),
                     "stdout",
+                    &server_id,
+                    update_mcp_pins,
                     &engine,
                     &auditor,
                     &url_re,
@@ -316,18 +545,20 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             })
         };
 
-        // stderr pump
         let stderr_handle = {
             let engine = Arc::clone(&engine);
             let auditor = Arc::clone(&header_auditor);
             let url_re = Arc::clone(&url_regex);
             let domains = Arc::clone(&seen_domains);
+            let server_id = Arc::clone(&mcp_server_id);
             let emit = Arc::clone(&emit_cb);
             thread::spawn(move || {
                 pump_stream(
                     child_stderr,
                     io::stderr(),
                     "stderr",
+                    &server_id,
+                    update_mcp_pins,
                     &engine,
                     &auditor,
                     &url_re,
@@ -341,7 +572,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
         None
     };
 
-    let status = child.wait()?;
+    let status = wait_for_child_and_reap_orphans(&mut child, !args.no_net_watch && !is_info_only)?;
     stop_sockets.store(true, Ordering::Relaxed);
     if let Some(tap) = local_api_tap {
         tap.stop();
@@ -349,6 +580,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     if let Some(h) = socket_handle {
         let _ = h.join();
     }
+    reap_reparented_zombies();
     if let Some((stdout_handle, stderr_handle)) = pipe_handles {
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
@@ -367,11 +599,62 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+fn wait_for_child_and_reap_orphans(
+    child: &mut Child,
+    subreaper_active: bool,
+) -> io::Result<ExitStatus> {
+    if !subreaper_active || cfg!(not(target_os = "linux")) {
+        return child.wait();
+    }
+    let child_pid = child.id();
+    let mut last_reap = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        thread::sleep(Duration::from_millis(10));
+        if last_reap.elapsed() >= Duration::from_millis(250) {
+            reap_reparented_zombies_except(child_pid);
+            last_reap = Instant::now();
+        }
+    }
+}
+
+fn env_flag_enabled(var: &str) -> bool {
+    env::var(var)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn sanitize_cmdline_for_log(cmdline: &str, engine: &RuleEngine) -> String {
+    let trimmed = cmdline.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut scrubbed = trimmed.to_string();
+    let matches = engine.scan_text(&scrubbed);
+    for m in matches.iter().rev() {
+        if m.category == RuleCategory::Secret {
+            scrubbed.replace_range(m.start..m.end, &m.masked);
+        }
+    }
+    let collapsed: String = scrubbed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let head: String = chars.by_ref().take(96).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pump_stream<R: Read, W: Write>(
     mut reader: R,
     mut writer: W,
     stream_name: &'static str,
+    mcp_server_id: &str,
+    update_mcp_pins: bool,
     engine: &RuleEngine,
     header_auditor: &HeaderAuditor,
     url_regex: &Regex,
@@ -399,6 +682,8 @@ fn pump_stream<R: Read, W: Write>(
                 inspect_chunk(
                     &line_acc,
                     stream_name,
+                    mcp_server_id,
+                    update_mcp_pins,
                     engine,
                     header_auditor,
                     url_regex,
@@ -414,6 +699,8 @@ fn pump_stream<R: Read, W: Write>(
         inspect_chunk(
             &line_acc,
             stream_name,
+            mcp_server_id,
+            update_mcp_pins,
             engine,
             header_auditor,
             url_regex,
@@ -423,9 +710,12 @@ fn pump_stream<R: Read, W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inspect_chunk(
     bytes: &[u8],
     stream_name: &'static str,
+    mcp_server_id: &str,
+    update_mcp_pins: bool,
     engine: &RuleEngine,
     header_auditor: &HeaderAuditor,
     url_regex: &Regex,
@@ -434,7 +724,6 @@ fn inspect_chunk(
 ) {
     let text = String::from_utf8_lossy(bytes);
 
-    // Check if the line looks like an HTTP header dump (`> User-Agent: ...` or `User-Agent: ...`)
     let trimmed = text.trim_start_matches(['>', '<', ' ', '\t']);
     if let Some((hdr_k, hdr_v)) = parse_probable_http_header(trimmed) {
         for hf in header_auditor.inspect_header(hdr_k, hdr_v, engine) {
@@ -456,7 +745,7 @@ fn inspect_chunk(
         emit(
             stream_name,
             kind,
-            m.rule_id,
+            &m.rule_id,
             m.severity.as_str(),
             format!("{} ({}) crossed `{stream_name}`", m.rule_name, m.masked),
         );
@@ -482,6 +771,51 @@ fn inspect_chunk(
                 "MEDIUM",
                 format!("Endpoint referenced on `{stream_name}`: {host}"),
             );
+        }
+    }
+
+    // Passively audit MCP `tools/list` and `tools/call` JSON-RPC responses crossing stdio streams
+    if text.contains("\"jsonrpc\"") {
+        let json_cand = text.trim();
+        if json_cand.starts_with('{') {
+            if let Ok(rpc_val) = serde_json::from_str::<serde_json::Value>(json_cand) {
+                let mut mcp_findings = Vec::new();
+                if text.contains("\"tools\"") {
+                    audit_mcp_tools_payload_with_options(
+                        mcp_server_id,
+                        stream_name,
+                        Path::new(mcp_server_id),
+                        &rpc_val,
+                        true,
+                        update_mcp_pins,
+                        &mut mcp_findings,
+                    );
+                }
+                if let Some(res_obj) = rpc_val.get("result") {
+                    if let Some(content_arr) = res_obj.get("content").and_then(|c| c.as_array()) {
+                        for item in content_arr {
+                            if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
+                                audit_mcp_tool_call_text(
+                                    mcp_server_id,
+                                    stream_name,
+                                    Path::new(mcp_server_id),
+                                    txt,
+                                    &mut mcp_findings,
+                                );
+                            }
+                        }
+                    }
+                }
+                for mf in mcp_findings {
+                    emit(
+                        stream_name,
+                        "mcp_tool_risk",
+                        mf.rule_id,
+                        mf.severity.as_str(),
+                        mf.message,
+                    );
+                }
+            }
         }
     }
 }
@@ -570,7 +904,7 @@ fn default_provider_env_keys(program: &str) -> &'static [&'static str] {
 
 fn emit_alert(
     quiet: bool,
-    log_writers: &Arc<Mutex<Vec<File>>>,
+    log_writers: &Arc<Mutex<Vec<LogSink>>>,
     stream: &str,
     kind: &str,
     rule_id: &str,
@@ -591,9 +925,8 @@ fn emit_alert(
     };
     if let Ok(line) = serde_json::to_string(&ev) {
         if let Ok(mut guard) = log_writers.lock() {
-            for w in guard.iter_mut() {
-                let _ = writeln!(w, "{line}");
-                let _ = w.flush();
+            for sink in guard.iter_mut() {
+                sink.write_line(&line);
             }
         }
     }
@@ -603,29 +936,327 @@ fn emit_alert(
     }
 }
 
-fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool {
-    if val.len() < 12 || is_likely_placeholder(val) {
+pub fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
         return false;
     }
-    if engine
-        .scan_text(val)
-        .iter()
-        .any(|m| m.category == RuleCategory::Secret)
-    {
-        return true;
-    }
+    let lower_val = trimmed.to_ascii_lowercase();
+    let is_bool_or_null = matches!(
+        lower_val.as_str(),
+        "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" | "none" | "null"
+    );
     let upper = key.to_ascii_uppercase();
     if matches!(
         upper.as_str(),
-        "PATH" | "HOME" | "PWD" | "SHELL" | "TERM" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"
-    ) || upper.ends_with("_FILE")
+        "PATH"
+            | "HOME"
+            | "PWD"
+            | "OLDPWD"
+            | "SHELL"
+            | "TERM"
+            | "COLORTERM"
+            | "LANG"
+            | "LC_ALL"
+            | "HTTP_PROXY"
+            | "HTTPS_PROXY"
+            | "ALL_PROXY"
+            | "NO_PROXY"
+            | "LESSKEY"
+            | "SSL_CERT_FILE"
+            | "SSL_CERT_DIR"
+            | "NODE_EXTRA_CA_CERTS"
+            | "REQUESTS_CA_BUNDLE"
+            | "CURL_CA_BUNDLE"
+            | "GIT_SSL_CAINFO"
+    ) || upper.contains("PUBLIC_KEY")
+        || upper.contains("PUBKEY")
+        || upper.contains("GPG_KEY")
+        || upper.contains("CACHE_KEY")
+        || upper.contains("HOST_KEY")
+    {
+        return false;
+    }
+
+    // Scrub direct credential/token grant files and token-bearing CLI config dirs by default
+    // (pass `--allow-env <VAR>` to forward intentionally), while deliberately preserving multi-context
+    // profile selectors (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`,
+    // `AWS_SHARED_CREDENTIALS_FILE`, `KUBECONFIG`, `CLOUDSDK_ACTIVE_CONFIG_NAME`) so child `aws`/`kubectl`/`gcloud`
+    // commands do not silently fall back to `[default]` / production credentials.
+    let is_credential_grant_file = matches!(
+        upper.as_str(),
+        "GOOGLE_APPLICATION_CREDENTIALS"
+            | "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"
+            | "CLOUDSDK_CONFIG"
+            | "AWS_WEB_IDENTITY_TOKEN_FILE"
+            | "AZURE_FEDERATED_TOKEN_FILE"
+            | "AZURE_CONFIG_DIR"
+            | "GH_CONFIG_DIR"
+            | "DOCKER_CONFIG"
+            | "NPM_CONFIG_USERCONFIG"
+            | "TF_CLI_CONFIG_FILE"
+            | "NETRC"
+            | "PGPASSFILE"
+            | "VAULT_TOKEN"
+    ) || (upper != "AWS_SHARED_CREDENTIALS_FILE"
+        && (upper.ends_with("_SECRET_FILE")
+            || upper.ends_with("_PASSWORD_FILE")
+            || upper.ends_with("_PASSWD_FILE")
+            || upper.ends_with("_TOKEN_FILE")
+            || upper.ends_with("_KEY_FILE")
+            || upper.ends_with("_CREDENTIALS_FILE")
+            || upper.ends_with("_CREDENTIAL_FILE")
+            || upper.ends_with("_AUTH_FILE")
+            || upper.ends_with("_PEM_FILE")));
+    if is_credential_grant_file {
+        return !is_bool_or_null;
+    }
+
+    if upper.ends_with("_FILE")
         || upper.ends_with("_PATH")
         || upper.ends_with("_DIR")
         || upper.ends_with("_SOCK")
     {
         return false;
     }
-    SENSITIVE_ENV_NAMES.iter().any(|kw| upper.contains(kw)) && shannon_entropy(val) >= 3.5
+    if is_bool_or_null {
+        return false;
+    }
+
+    let is_template_marker = trimmed.starts_with("${")
+        || (trimmed.starts_with('<') && trimmed.ends_with('>'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+
+    let is_pass_token = upper == "PASS" || upper.ends_with("_PASS") || upper.contains("_PASS_");
+    let is_direct_secret_or_key_var = upper == "SECRET"
+        || upper == "API_KEY"
+        || upper.ends_with("_SECRET")
+        || upper.ends_with("_API_KEY");
+    let is_unambiguous_password_or_cloud_secret =
+        PASSWORD_ENV_NAMES.iter().any(|kw| upper.contains(kw))
+            || upper.ends_with("_PWD")
+            || is_pass_token
+            || is_direct_secret_or_key_var
+            || matches!(
+                upper.as_str(),
+                "AWS_SECRET_ACCESS_KEY" | "AWS_SESSION_TOKEN" | "AZURE_STORAGE_KEY"
+            );
+    if is_unambiguous_password_or_cloud_secret && !is_template_marker {
+        return true;
+    }
+
+    if is_likely_placeholder(trimmed) {
+        return false;
+    }
+
+    if trimmed.len() < 8 {
+        return false;
+    }
+    if engine
+        .scan_text(trimmed)
+        .iter()
+        .any(|m| m.category == RuleCategory::Secret)
+    {
+        return true;
+    }
+
+    // Do not treat genuine local filesystem paths (`/usr/local/bin/node`, `./key.pem`, `C:\creds\...`)
+    // as inline secrets, while still scrubbing Base64 secrets that happen to start with `/` (`APP_SECRET=/9j4kL8m...=`).
+    let looks_like_local_path = looks_like_filesystem_path(trimmed)
+        && !trimmed.contains("://")
+        && !trimmed.contains("-----BEGIN");
+    if looks_like_local_path {
+        return false;
+    }
+
+    let is_pat_token = upper == "PAT" || upper.ends_with("_PAT") || upper.contains("_PAT_");
+    let has_sensitive_name = SENSITIVE_ENV_NAMES.iter().any(|kw| upper.contains(kw))
+        || upper.ends_with("_KEY")
+        || upper == "KEY"
+        || is_pat_token;
+    trimmed.len() >= 12 && has_sensitive_name && shannon_entropy(trimmed) >= 3.4
+}
+
+fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallback) -> bool {
+    let mut warnings: Vec<String> = Vec::new();
+    let mut has_workspace_tamper = false;
+    let stem = program_stem(program);
+
+    for var in [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ] {
+        if env_flag_enabled(var) {
+            warnings.push(format!(
+                "`{var}=1` routes model traffic directly via cloud SDK endpoints, bypassing local HTTP API inspection/blocking"
+            ));
+        }
+    }
+
+    if matches!(stem.as_str(), "agy" | "antigravity" | "antigravity-cli")
+        && env::var("GEMINI_API_KEY")
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        && env::var("GOOGLE_API_KEY")
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
+        warnings.push(
+            "Antigravity without `GEMINI_API_KEY` / `GOOGLE_API_KEY` may use Google OAuth/gRPC channels that bypass local HTTP API inspection/blocking".to_string(),
+        );
+    }
+
+    // Check workspace and user `.claude/settings*.json` and `.gemini/settings.json` for `env` overrides
+    // that hijack BASE_URL or cloud routing after launch
+    let mut settings_candidates: Vec<(PathBuf, bool)> = Vec::new();
+    if let Ok(cwd) = env::current_dir() {
+        settings_candidates.push((cwd.join(".claude").join("settings.json"), true));
+        settings_candidates.push((cwd.join(".claude").join("settings.local.json"), true));
+        settings_candidates.push((cwd.join(".gemini").join("settings.json"), true));
+    }
+    if let Some(home) = home_dir() {
+        settings_candidates.push((home.join(".claude").join("settings.json"), false));
+        settings_candidates.push((home.join(".gemini").join("settings.json"), false));
+    }
+    for (cand, is_workspace) in settings_candidates {
+        let Ok(raw) = fs::read_to_string(&cand) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(env_obj) = val.get("env").and_then(|e| e.as_object()) else {
+            continue;
+        };
+        for k in env_obj.keys() {
+            let ku = k.to_ascii_uppercase();
+            if matches!(
+                ku.as_str(),
+                "ANTHROPIC_BASE_URL"
+                    | "OPENAI_BASE_URL"
+                    | "GOOGLE_GEMINI_BASE_URL"
+                    | "GEMINI_API_BASE_URL"
+                    | "OPENROUTER_BASE_URL"
+                    | "DEEPSEEK_BASE_URL"
+                    | "XAI_BASE_URL"
+                    | "GROQ_BASE_URL"
+                    | "CLAUDE_CODE_USE_BEDROCK"
+                    | "CLAUDE_CODE_USE_VERTEX"
+                    | "CLAUDE_CODE_USE_FOUNDRY"
+            ) {
+                if is_workspace {
+                    has_workspace_tamper = true;
+                }
+                warnings.push(format!(
+                    "`{}` defines `env.{k}`, which can override `leaktap`'s local API tap URL after startup",
+                    cand.display()
+                ));
+            }
+        }
+    }
+
+    // Check workspace and user `.codex/config.toml` for `[model_providers]` `base_url` or env overrides
+    // that route Codex requests directly to a custom endpoint instead of `OPENAI_BASE_URL`.
+    let mut codex_candidates: Vec<(PathBuf, bool)> = Vec::new();
+    if let Ok(cwd) = env::current_dir() {
+        codex_candidates.push((cwd.join(".codex").join("config.toml"), true));
+    }
+    if let Some(home) = home_dir() {
+        codex_candidates.push((home.join(".codex").join("config.toml"), false));
+    }
+    for (cand, is_workspace) in codex_candidates {
+        let Ok(raw) = fs::read_to_string(&cand) else {
+            continue;
+        };
+        let Ok(doc) = toml::from_str::<toml::Value>(&raw) else {
+            continue;
+        };
+        let Some(tbl) = doc.as_table() else {
+            continue;
+        };
+        for top_key in ["chatgpt_base_url", "base_url"] {
+            if tbl
+                .get(top_key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                if is_workspace {
+                    has_workspace_tamper = true;
+                }
+                warnings.push(format!(
+                    "`{}` defines `{top_key}`, which can bypass `leaktap`'s local OpenAI API tap",
+                    cand.display()
+                ));
+            }
+        }
+        if let Some(providers) = tbl.get("model_providers").and_then(|v| v.as_table()) {
+            for (prov_id, prov_val) in providers {
+                if prov_val
+                    .as_table()
+                    .and_then(|pt| pt.get("base_url"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty())
+                {
+                    if is_workspace {
+                        has_workspace_tamper = true;
+                    }
+                    warnings.push(format!(
+                        "`{}` defines `model_providers.{prov_id}.base_url`, which routes custom provider traffic around `OPENAI_BASE_URL`",
+                        cand.display()
+                    ));
+                }
+            }
+        }
+        for env_tbl_opt in [
+            tbl.get("env").and_then(|v| v.as_table()),
+            tbl.get("shell_environment_policy")
+                .and_then(|v| v.as_table())
+                .and_then(|st| st.get("set"))
+                .and_then(|v| v.as_table()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for k in env_tbl_opt.keys() {
+                let ku = k.to_ascii_uppercase();
+                if matches!(
+                    ku.as_str(),
+                    "OPENAI_BASE_URL"
+                        | "ANTHROPIC_BASE_URL"
+                        | "GOOGLE_GEMINI_BASE_URL"
+                        | "GEMINI_API_BASE_URL"
+                        | "OPENROUTER_BASE_URL"
+                        | "DEEPSEEK_BASE_URL"
+                        | "XAI_BASE_URL"
+                        | "GROQ_BASE_URL"
+                ) {
+                    if is_workspace {
+                        has_workspace_tamper = true;
+                    }
+                    warnings.push(format!(
+                        "`{}` defines `{k}` in env settings, which can override `leaktap`'s local API tap URL",
+                        cand.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    for msg in warnings {
+        emit_cb(
+            "http",
+            "tap_bypass_warning",
+            "tap-bypass-warning",
+            "HIGH",
+            msg.clone(),
+        );
+        if !quiet {
+            let _ = writeln!(io::stderr(), "[leaktap:warn] {msg}");
+        }
+    }
+
+    has_workspace_tamper
 }
 
 fn build_loopback_no_proxy() -> String {
