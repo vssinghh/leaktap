@@ -1,0 +1,489 @@
+{
+  "audited_count": 50,
+  "unpinned_remote_exec_count": 35,
+  "unpinned_remote_exec_pct": 70.0,
+  "plaintext_secret_docs_count": 12,
+  "plaintext_secret_docs_pct": 24.0,
+  "telemetry_sdk_or_notice_count": 12,
+  "telemetry_sdk_or_notice_pct": 24.0,
+  "servers": [
+    {
+      "rank": 1,
+      "repo": "ChromeDevTools/chrome-devtools-mcp",
+      "stars": 57776,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 2,
+      "repo": "DeusData/codebase-memory-mcp",
+      "stars": 48742,
+      "language": "C",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 3,
+      "repo": "microsoft/playwright-mcp",
+      "stars": 39755,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 4,
+      "repo": "ahujasid/mcp-for-blender",
+      "stars": 34683,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 5,
+      "repo": "github/github-mcp-server",
+      "stars": 34535,
+      "language": "Go",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 6,
+      "repo": "czlonkowski/n8n-mcp",
+      "stars": 23266,
+      "language": "TypeScript",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 7,
+      "repo": "xpzouying/xiaohongshu-mcp",
+      "stars": 17159,
+      "language": "Go",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 8,
+      "repo": "googleapis/mcp-toolbox",
+      "stars": 16890,
+      "language": "Go",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 9,
+      "repo": "apify/apify-mcp-server",
+      "stars": 16577,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": [
+        "analytics-node",
+        "documented-telemetry",
+        "segment",
+        "sentry"
+      ]
+    },
+    {
+      "rank": 10,
+      "repo": "GLips/Figma-Context-MCP",
+      "stars": 16219,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "posthog"
+      ]
+    },
+    {
+      "rank": 11,
+      "repo": "hangwin/mcp-chrome",
+      "stars": 12548,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 12,
+      "repo": "LaurieWired/GhidraMCP",
+      "stars": 11955,
+      "language": "Java",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 13,
+      "repo": "BeehiveInnovations/pal-mcp-server",
+      "stars": 11841,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 14,
+      "repo": "CursorTouch/Windows-MCP",
+      "stars": 11773,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": [
+        "documented-telemetry",
+        "posthog"
+      ]
+    },
+    {
+      "rank": 15,
+      "repo": "mobile-next/mobile-mcp",
+      "stars": 10631,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 16,
+      "repo": "wonderwhy-er/DesktopCommanderMCP",
+      "stars": 10331,
+      "language": "JavaScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 17,
+      "repo": "Ryze-AI-Adgent/open-seo-mcp-skills",
+      "stars": 10260,
+      "language": "Shell",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 18,
+      "repo": "awslabs/mcp",
+      "stars": 9929,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 19,
+      "repo": "idosal/git-mcp",
+      "stars": 8524,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 20,
+      "repo": "irinabuht12-oss/google-ads-meta-ads-mcp",
+      "stars": 8067,
+      "language": "Other",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 21,
+      "repo": "homeassistant-ai/ha-mcp",
+      "stars": 7910,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 22,
+      "repo": "firecrawl/firecrawl-mcp-server",
+      "stars": 7842,
+      "language": "JavaScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 23,
+      "repo": "BrowserMCP/mcp",
+      "stars": 7370,
+      "language": "TypeScript",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 24,
+      "repo": "AgentDeskAI/browser-tools-mcp",
+      "stars": 7344,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    },
+    {
+      "rank": 25,
+      "repo": "tradesdontlie/tradingview-mcp",
+      "stars": 7213,
+      "language": "JavaScript",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 26,
+      "repo": "grab/cursor-talk-to-figma-mcp",
+      "stars": 7115,
+      "language": "JavaScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 27,
+      "repo": "lharries/whatsapp-mcp",
+      "stars": 6906,
+      "language": "Go",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 28,
+      "repo": "Coding-Solo/godot-mcp",
+      "stars": 6679,
+      "language": "JavaScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 29,
+      "repo": "21st-dev/magic-mcp",
+      "stars": 6573,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 30,
+      "repo": "jacob-bd/gemini-notebook-mcp-cli",
+      "stars": 6525,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 31,
+      "repo": "bethington/ghidra-mcp",
+      "stars": 6258,
+      "language": "Java",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 32,
+      "repo": "sooperset/mcp-atlassian",
+      "stars": 6128,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 33,
+      "repo": "54yyyu/zotero-mcp",
+      "stars": 5944,
+      "language": "Python",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 34,
+      "repo": "excalidraw/excalidraw-mcp",
+      "stars": 5687,
+      "language": "TypeScript",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 35,
+      "repo": "executeautomation/mcp-playwright",
+      "stars": 5683,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 36,
+      "repo": "atilaahmettaner/tradingview-mcp",
+      "stars": 5302,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 37,
+      "repo": "exa-labs/exa-mcp-server",
+      "stars": 5241,
+      "language": "TypeScript",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 38,
+      "repo": "openclaw/mcporter",
+      "stars": 5125,
+      "language": "TypeScript",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 39,
+      "repo": "makenotion/notion-mcp-server",
+      "stars": 4715,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 40,
+      "repo": "IvanMurzak/Unity-MCP",
+      "stars": 4649,
+      "language": "C#",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 41,
+      "repo": "MarkusPfundstein/mcp-obsidian",
+      "stars": 4543,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 42,
+      "repo": "open-webui/mcpo",
+      "stars": 4429,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 43,
+      "repo": "antvis/mcp-server-chart",
+      "stars": 4417,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 44,
+      "repo": "haris-musa/excel-mcp-server",
+      "stars": 4311,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 45,
+      "repo": "Pimzino/spec-workflow-mcp",
+      "stars": 4306,
+      "language": "TypeScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 46,
+      "repo": "stickerdaniel/linkedin-mcp-server",
+      "stars": 4230,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 47,
+      "repo": "samuelgursky/davinci-resolve-mcp",
+      "stars": 4134,
+      "language": "Python",
+      "unpinned_remote_exec": false,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 48,
+      "repo": "googleanalytics/google-analytics-mcp",
+      "stars": 3802,
+      "language": "Python",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 49,
+      "repo": "Minidoracat/mcp-feedback-enhanced",
+      "stars": 3750,
+      "language": "JavaScript",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": false,
+      "telemetry_signals": []
+    },
+    {
+      "rank": 50,
+      "repo": "grafana/mcp-grafana",
+      "stars": 3672,
+      "language": "Go",
+      "unpinned_remote_exec": true,
+      "plaintext_secret_in_config_docs": true,
+      "telemetry_signals": [
+        "documented-telemetry"
+      ]
+    }
+  ]
+}

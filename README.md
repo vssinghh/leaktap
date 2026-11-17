@@ -7,7 +7,9 @@
 
 Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`codex`), **Antigravity CLI** (`agy`), **Gemini CLI** (`gemini`), and local MCP servers (plus OpenRouter, DeepSeek, xAI, and Groq API endpoints). Offline `scan` also checks local state, MCP configs, and rule files left by Cursor, Windsurf, Cline, Roo Code, Zed, JetBrains Junie, Amazon Q, Kiro, Augment, Trae, Continue, and Aider.
 
-> **2026 MCP Audit ([full write-up](docs/mcp-top-50-audit.md)):** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry.
+> **2026 MCP Audit ([full write-up & 50-repo dataset](docs/mcp-top-50-audit.md)):** Out of the 50 most-starred MCP servers on GitHub, **70%** tell users to run unpinned `npx -y` or `uvx` installs, **24%** show plain-text API keys in JSON config examples, and **24%** ship built-in analytics or telemetry.
+
+![leaktap offline scan and live secret blocking](docs/assets/demo.svg)
 
 ## Install
 
@@ -28,47 +30,7 @@ LEAKTAP_VERSION=v0.3.0 sh install.sh
 gh attestation verify ~/.local/bin/leaktap --repo vssinghh/leaktap
 ```
 
-Or run via `npx`:
-
-```bash
-npx leaktap@0.3.0 scan
-```
-
 Prebuilt binaries, `.sha256` checksums, and build attestations for macOS, Linux, and Windows are on [GitHub Releases](https://github.com/vssinghh/leaktap/releases).
-
-## Example output
-
-```text
-$ leaktap
-
-leaktap v0.3.0 — local offline audit (0 network requests)
-Scanned 148 file(s) (49.1 MB) in 118ms across ~/.claude, ~/.codex, ~/.gemini
-
-CRITICAL  3 unique secret(s) found
-  ├─ Database URI          postgres://***@db.prod.acme.io  ~/.claude/projects/app/08fa.jsonl:184 [CRITICAL] [fp:4a1e9c02b7d38f11]
-  ├─ AWS Access Key        AKIA5F29Q...7Q2M                ~/.claude/projects/infra/91bc.jsonl:42 [CRITICAL] [fp:8c31d4029ab71e50]
-  └─ Stripe Live Key       sk_live_9f...4c21               ~/.claude/projects/app/08fa.jsonl:184 (3x across 2 files) [CRITICAL] [fp:9f86d081884c7d65]
-  ! Rotate any exposed live credentials immediately — scrubbing local logs does not revoke keys already sent to an API or repo.
-
-CRITICAL  4 MCP / plugin risk(s) detected
-  ├─ plugin:shady-linter (~/.claude/plugins/cache/community/shady-linter/0.1.0/hooks-handlers/sync.sh:2) [CRITICAL · plugin-credential-harvest] [fp:7d2a91e04c8b113f]
-  │    References sensitive host credential store (`~/.ssh/id_rsa`) outside workspace
-  ├─ plugin:shady-linter (~/.claude/plugins/cache/community/shady-linter/0.1.0/hooks/hooks.json:6) [HIGH · plugin-hook-network] [fp:1b4f82c90e73a512]
-  │    Lifecycle hook `PreToolUse` runs handler `hooks-handlers/sync.sh` with an outbound network call (`collect.shady-plugin.io`)
-  ├─ @community/db-mcp (.mcp.json:4) [MEDIUM · mcp-unpinned-package] [fp:6e90c31a5f28d407]
-  │    Runs unpinned `npx -y @community/db-mcp` — pulls mutable remote code on start with local file/env access
-  └─ @community/db-mcp (.mcp.json:8) [MEDIUM · mcp-telemetry-endpoint] [fp:3c08f71d9a42e619]
-       References outbound analytics/telemetry endpoint (`events.posthog.com`)
-
-MEDIUM    Identity & internal metadata in scanned files
-  └─ 1 email address(es) + 1 internal hostname(s) appeared across 2 hit(s)
-
-Next steps:
-  • Open interactive dashboard:    leaktap ui
-  • Preview & scrub local logs:    leaktap clean --apply
-  • Start a watched CLI session:   leaktap --block-secrets claude   (or `--redact-secrets`)
-  • Gate CI / pre-commit builds:   leaktap scan --ci                (exits 1 on HIGH/CRITICAL)
-```
 
 ## Why I built this
 
@@ -182,6 +144,8 @@ leaktap ui
 ```
 
 Opens a 4-tab view (`Transcript Leaks`, `MCP / Plugin Risks`, `Live Wiretap`, and `Context & PII`). Press `/` to filter, `c` then `y` to scrub just the selected secret across session logs and SQLite databases (pass `--include-code` to include repo files), or `q` / `Ctrl+C` to exit.
+
+![leaktap terminal UI](docs/assets/tui.svg)
 
 ### Policy files and allowlists (`.leaktap.toml`)
 

@@ -1,0 +1,234 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1237 792" width="1237" height="792" role="img" aria-label="leaktap — offline scan &amp; live secret blocking">
+  <style>
+    .t { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 13px; white-space: pre; }
+    .b { font-weight: 700; }
+    .d { opacity: 0.68; }
+    @media (prefers-reduced-motion: no-preference) {
+      .l1 { animation: s1 14.0s infinite; }
+      @keyframes s1 { 0%, 3.68% { opacity: 0; } 3.93%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l2 { animation: s2 14.0s infinite; }
+      @keyframes s2 { 0%, 4.11% { opacity: 0; } 4.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l3 { animation: s3 14.0s infinite; }
+      @keyframes s3 { 0%, 4.54% { opacity: 0; } 4.79%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l4 { animation: s4 14.0s infinite; }
+      @keyframes s4 { 0%, 4.96% { opacity: 0; } 5.21%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l5 { animation: s5 14.0s infinite; }
+      @keyframes s5 { 0%, 5.39% { opacity: 0; } 5.64%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l6 { animation: s6 14.0s infinite; }
+      @keyframes s6 { 0%, 5.82% { opacity: 0; } 6.07%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l7 { animation: s7 14.0s infinite; }
+      @keyframes s7 { 0%, 6.25% { opacity: 0; } 6.50%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l8 { animation: s8 14.0s infinite; }
+      @keyframes s8 { 0%, 6.68% { opacity: 0; } 6.93%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l9 { animation: s9 14.0s infinite; }
+      @keyframes s9 { 0%, 7.11% { opacity: 0; } 7.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l10 { animation: s10 14.0s infinite; }
+      @keyframes s10 { 0%, 7.54% { opacity: 0; } 7.79%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l11 { animation: s11 14.0s infinite; }
+      @keyframes s11 { 0%, 7.96% { opacity: 0; } 8.21%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l12 { animation: s12 14.0s infinite; }
+      @keyframes s12 { 0%, 8.39% { opacity: 0; } 8.64%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l13 { animation: s13 14.0s infinite; }
+      @keyframes s13 { 0%, 8.82% { opacity: 0; } 9.07%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l14 { animation: s14 14.0s infinite; }
+      @keyframes s14 { 0%, 9.25% { opacity: 0; } 9.50%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l15 { animation: s15 14.0s infinite; }
+      @keyframes s15 { 0%, 9.68% { opacity: 0; } 9.93%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l16 { animation: s16 14.0s infinite; }
+      @keyframes s16 { 0%, 10.11% { opacity: 0; } 10.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l17 { animation: s17 14.0s infinite; }
+      @keyframes s17 { 0%, 10.54% { opacity: 0; } 10.79%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l18 { animation: s18 14.0s infinite; }
+      @keyframes s18 { 0%, 10.96% { opacity: 0; } 11.21%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l19 { animation: s19 14.0s infinite; }
+      @keyframes s19 { 0%, 11.39% { opacity: 0; } 11.64%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l20 { animation: s20 14.0s infinite; }
+      @keyframes s20 { 0%, 11.82% { opacity: 0; } 12.07%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l21 { animation: s21 14.0s infinite; }
+      @keyframes s21 { 0%, 12.25% { opacity: 0; } 12.50%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l22 { animation: s22 14.0s infinite; }
+      @keyframes s22 { 0%, 12.68% { opacity: 0; } 12.93%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l23 { animation: s23 14.0s infinite; }
+      @keyframes s23 { 0%, 13.11% { opacity: 0; } 13.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l24 { animation: s24 14.0s infinite; }
+      @keyframes s24 { 0%, 13.54% { opacity: 0; } 13.79%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l25 { animation: s25 14.0s infinite; }
+      @keyframes s25 { 0%, 13.96% { opacity: 0; } 14.21%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l26 { animation: s26 14.0s infinite; }
+      @keyframes s26 { 0%, 14.39% { opacity: 0; } 14.64%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l27 { animation: s27 14.0s infinite; }
+      @keyframes s27 { 0%, 14.82% { opacity: 0; } 15.07%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l28 { animation: s28 14.0s infinite; }
+      @keyframes s28 { 0%, 15.25% { opacity: 0; } 15.50%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l29 { animation: s29 14.0s infinite; }
+      @keyframes s29 { 0%, 15.68% { opacity: 0; } 15.93%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l30 { animation: s30 14.0s infinite; }
+      @keyframes s30 { 0%, 16.11% { opacity: 0; } 16.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l31 { animation: s31 14.0s infinite; }
+      @keyframes s31 { 0%, 35.46% { opacity: 0; } 35.71%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l32 { animation: s32 14.0s infinite; }
+      @keyframes s32 { 0%, 40.11% { opacity: 0; } 40.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l33 { animation: s33 14.0s infinite; }
+      @keyframes s33 { 0%, 42.11% { opacity: 0; } 42.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l34 { animation: s34 14.0s infinite; }
+      @keyframes s34 { 0%, 44.11% { opacity: 0; } 44.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l35 { animation: s35 14.0s infinite; }
+      @keyframes s35 { 0%, 46.11% { opacity: 0; } 46.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+      .l36 { animation: s36 14.0s infinite; }
+      @keyframes s36 { 0%, 48.11% { opacity: 0; } 48.36%, 97% { opacity: 1; } 100% { opacity: 1; } }
+    }
+  </style>
+  <rect x="0.5" y="0.5" width="1236" height="791" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <path d="M 10.5 0.5 H 1226.5 A 10 10 0 0 1 1236.5 10.5 V 36 H 0.5 V 10.5 A 10 10 0 0 1 10.5 0.5 Z" fill="#161b22"/>
+  <line x1="0.5" y1="36" x2="1236.5" y2="36" stroke="#30363d" stroke-width="1"/>
+  <circle cx="18" cy="18" r="5.5" fill="#ff5f56"/>
+  <circle cx="36" cy="18" r="5.5" fill="#ffbd2e"/>
+  <circle cx="54" cy="18" r="5.5" fill="#27c93f"/>
+  <text x="618.5" y="22.5" text-anchor="middle" fill="#8b949e" class="t" style="font-size:12px">leaktap — offline scan &amp; live secret blocking</text>
+  <g>
+    <text x="18.0" y="52.0" fill="#3fb950" xml:space="preserve" class="t b">$</text>
+    <text x="33.6" y="52.0" fill="#e6edf3" xml:space="preserve" class="t b">leaktap</text>
+  </g>
+  <g class="l1">
+    <text x="18.0" y="71.5" fill="#e6edf3" xml:space="preserve" class="t">leaktap v0.3.0</text>
+    <text x="135.0" y="71.5" fill="#e6edf3" xml:space="preserve" class="t d">— local offline audit (0 network requests)</text>
+  </g>
+  <g class="l2">
+    <text x="18.0" y="91.0" fill="#e6edf3" xml:space="preserve" class="t">Scanned 5 file(s) (686 B) in 183ms across ~/.claude</text>
+  </g>
+  <g class="l3">
+  </g>
+  <g class="l4">
+    <text x="18.0" y="130.0" fill="#ff7b72" xml:space="preserve" class="t b">CRITICAL</text>
+    <text x="96.0" y="130.0" fill="#e6edf3" xml:space="preserve" class="t">3 unique secret(s) found</text>
+  </g>
+  <g class="l5">
+    <path d="M 37.5 135.3 V 154.8 M 37.5 145.1 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="145.1" x2="49.2" y2="145.1" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="149.5" fill="#e6edf3" xml:space="preserve" class="t">Database URI</text>
+    <text x="220.8" y="149.5" fill="#e3b341" xml:space="preserve" class="t b">postgres://***@db.prod.acme.io:5432</text>
+    <text x="501.6" y="149.5" fill="#e6edf3" xml:space="preserve" class="t">~/.claude/projects/app/08fa.jsonl:1</text>
+    <text x="782.4" y="149.5" fill="#e6edf3" xml:space="preserve" class="t d">[CRITICAL] [fp:5b6e58878d6fd9e7]</text>
+  </g>
+  <g class="l6">
+    <path d="M 37.5 154.8 V 174.3 M 37.5 164.6 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="164.6" x2="49.2" y2="164.6" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="169.0" fill="#e6edf3" xml:space="preserve" class="t">Stripe Live Key (STRIPE_KEY)</text>
+    <text x="283.2" y="169.0" fill="#e3b341" xml:space="preserve" class="t b">sk_live_9f...4c21</text>
+    <text x="423.6" y="169.0" fill="#e6edf3" xml:space="preserve" class="t">~/.claude/projects/app/08fa.jsonl:1</text>
+    <text x="704.4" y="169.0" fill="#e6edf3" xml:space="preserve" class="t d">[CRITICAL] [fp:1c4f19ea380da30d]</text>
+  </g>
+  <g class="l7">
+    <path d="M 37.5 174.3 V 184.1 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="184.1" x2="49.2" y2="184.1" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="188.5" fill="#e6edf3" xml:space="preserve" class="t">AWS Access Key (AWS_ACCESS_KEY_ID)</text>
+    <text x="330.0" y="188.5" fill="#e3b341" xml:space="preserve" class="t b">AKIA5F29Q...7Q2M</text>
+    <text x="462.6" y="188.5" fill="#e6edf3" xml:space="preserve" class="t">~/.claude/projects/app/08fa.jsonl:1</text>
+    <text x="743.4" y="188.5" fill="#e6edf3" xml:space="preserve" class="t d">[CRITICAL] [fp:3c65448a3754f9ca]</text>
+  </g>
+  <g class="l8">
+  </g>
+  <g class="l9">
+    <text x="18.0" y="227.5" fill="#ff7b72" xml:space="preserve" class="t b">CRITICAL</text>
+    <text x="96.0" y="227.5" fill="#e6edf3" xml:space="preserve" class="t">4 MCP / plugin risk(s) detected</text>
+  </g>
+  <g class="l10">
+    <path d="M 37.5 232.8 V 252.3 M 37.5 242.6 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="242.6" x2="49.2" y2="242.6" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="247.0" fill="#e6edf3" xml:space="preserve" class="t b">plugin:shady-linter</text>
+    <text x="213.0" y="247.0" fill="#e6edf3" xml:space="preserve" class="t d">(~/.claude/plugins/cache/community/shady-linter/0.1.0/hooks-handlers/sync.sh:2) [CRITICAL · plugin-credential-harvest] [fp:b61278</text>
+  </g>
+  <g class="l11">
+    <text x="18.0" y="266.5" fill="#e6edf3" xml:space="preserve" class="t">27d5d0db66]</text>
+  </g>
+  <g class="l12">
+    <line x1="37.5" y1="271.8" x2="37.5" y2="291.3" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="72.6" y="286.0" fill="#e6edf3" xml:space="preserve" class="t">References sensitive host credential store (`~/.ssh/id_rsa`) outside workspace</text>
+  </g>
+  <g class="l13">
+    <path d="M 37.5 291.3 V 310.8 M 37.5 301.1 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="301.1" x2="49.2" y2="301.1" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="305.5" fill="#e6edf3" xml:space="preserve" class="t b">plugin:shady-linter</text>
+    <text x="213.0" y="305.5" fill="#e6edf3" xml:space="preserve" class="t d">(~/.claude/plugins/cache/community/shady-linter/0.1.0/hooks/hooks.json:1) [HIGH · plugin-hook-network] [fp:280691406b4bacaa]</text>
+  </g>
+  <g class="l14">
+    <line x1="37.5" y1="310.8" x2="37.5" y2="330.3" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="72.6" y="325.0" fill="#e6edf3" xml:space="preserve" class="t">Lifecycle hook `PreToolUse` runs handler `hooks-handlers/sync.sh` with an outbound network call (`collect.shady-plugin.io`)</text>
+  </g>
+  <g class="l15">
+    <path d="M 37.5 330.3 V 349.8 M 37.5 340.1 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="340.1" x2="49.2" y2="340.1" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="344.5" fill="#e6edf3" xml:space="preserve" class="t b">db-mcp</text>
+    <text x="111.6" y="344.5" fill="#e6edf3" xml:space="preserve" class="t d">(~/app/.mcp.json:7) [MEDIUM · mcp-unpinned-package] [fp:fc900aed3b072a84]</text>
+  </g>
+  <g class="l16">
+    <line x1="37.5" y1="349.8" x2="37.5" y2="369.3" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="72.6" y="364.0" fill="#e6edf3" xml:space="preserve" class="t">Runs unpinned `npx @community/db-mcp` — pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin</text>
+  </g>
+  <g class="l17">
+    <text x="18.0" y="383.5" fill="#e6edf3" xml:space="preserve" class="t">transitive `^`/`~` dependencies)</text>
+  </g>
+  <g class="l18">
+    <path d="M 37.5 388.8 V 398.6 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="398.6" x2="49.2" y2="398.6" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="403.0" fill="#e6edf3" xml:space="preserve" class="t b">db-mcp</text>
+    <text x="111.6" y="403.0" fill="#e6edf3" xml:space="preserve" class="t d">(~/app/.mcp.json:10) [MEDIUM · mcp-telemetry-endpoint] [fp:77ce217f870520de]</text>
+  </g>
+  <g class="l19">
+    <text x="72.6" y="422.5" fill="#e6edf3" xml:space="preserve" class="t">References outbound analytics/telemetry endpoint (`events.posthog.com`)</text>
+  </g>
+  <g class="l20">
+  </g>
+  <g class="l21">
+    <text x="18.0" y="461.5" fill="#39c5cf" xml:space="preserve" class="t b">MEDIUM</text>
+    <text x="96.0" y="461.5" fill="#e6edf3" xml:space="preserve" class="t">Identity &amp; internal metadata in scanned files</text>
+  </g>
+  <g class="l22">
+    <path d="M 37.5 466.8 V 476.6 H 41.4" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
+    <line x1="41.4" y1="476.6" x2="49.2" y2="476.6" stroke="#e6edf3" stroke-width="1.2"/>
+    <text x="57.0" y="481.0" fill="#e6edf3" xml:space="preserve" class="t">1 email address(es) appeared across 1 hit(s)</text>
+  </g>
+  <g class="l23">
+  </g>
+  <g class="l24">
+    <text x="18.0" y="520.0" fill="#e6edf3" xml:space="preserve" class="t b">Next steps:</text>
+  </g>
+  <g class="l25">
+    <text x="33.6" y="539.5" fill="#e6edf3" xml:space="preserve" class="t">• Open interactive dashboard:    leaktap ui</text>
+  </g>
+  <g class="l26">
+    <text x="33.6" y="559.0" fill="#e6edf3" xml:space="preserve" class="t">• Preview &amp; scrub local logs/DBs: leaktap clean --apply</text>
+  </g>
+  <g class="l27">
+    <text x="33.6" y="578.5" fill="#e6edf3" xml:space="preserve" class="t">•</text>
+    <text x="49.2" y="578.5" fill="#e3b341" xml:space="preserve" class="t b">Rotate exposed credentials:</text>
+    <text x="267.6" y="578.5" fill="#e6edf3" xml:space="preserve" class="t">scrubbing local files does NOT revoke exposed keys — rotate leaked credentials at the provider immediately</text>
+  </g>
+  <g class="l28">
+    <text x="33.6" y="598.0" fill="#e6edf3" xml:space="preserve" class="t">• Start a watched CLI session:   leaktap --block-secrets claude   (or `--redact-secrets`)</text>
+  </g>
+  <g class="l29">
+    <text x="33.6" y="617.5" fill="#e6edf3" xml:space="preserve" class="t">• Gate CI / pre-commit builds:   leaktap scan --ci                (exits 1 on HIGH/CRITICAL)</text>
+  </g>
+  <g class="l30">
+  </g>
+  <g class="l31">
+    <text x="18.0" y="656.5" fill="#3fb950" xml:space="preserve" class="t b">$</text>
+    <text x="33.6" y="656.5" fill="#e6edf3" xml:space="preserve" class="t b">leaktap --block-secrets claude</text>
+  </g>
+  <g class="l32">
+    <text x="18.0" y="676.0" fill="#e6edf3" xml:space="preserve" class="t">[leaktap:HIGH] Scrubbed 2 sensitive env var(s) before launch: AWS_SECRET_ACCESS_KEY, STRIPE_SECRET_KEY</text>
+  </g>
+  <g class="l33">
+    <text x="18.0" y="695.5" fill="#e6edf3" xml:space="preserve" class="t">[leaktap:MEDIUM] API POST -&gt; anthropic (https://api.anthropic.com/v1/messages) [119 bytes]</text>
+  </g>
+  <g class="l34">
+    <text x="18.0" y="715.0" fill="#e6edf3" xml:space="preserve" class="t">[leaktap:CRITICAL] Stripe Live Key (sk_live_9f...4c21) sent in outgoing anthropic API body</text>
+  </g>
+  <g class="l35">
+    <text x="18.0" y="734.5" fill="#e6edf3" xml:space="preserve" class="t">[leaktap:CRITICAL] Blocked outgoing anthropic API request: Stripe Live Key (sk_live_9f...4c21)</text>
+  </g>
+  <g class="l36">
+    <text x="33.6" y="754.0" fill="#e6edf3" xml:space="preserve" class="t">HTTP 400: Blocked outgoing anthropic API request (Stripe Live Key sk_live_9f...4c21 never left localhost)</text>
+  </g>
+</svg>
