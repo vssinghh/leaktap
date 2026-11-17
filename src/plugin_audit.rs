@@ -1622,8 +1622,25 @@ pub(crate) fn is_user_home_global_agent_path(path: &Path) -> bool {
     for base in [&home, &canon_home] {
         for cand in [path, canon_path.as_path()] {
             if let Ok(rel) = cand.strip_prefix(base) {
-                if let Some(Component::Normal(first)) = rel.components().next() {
+                let mut comps = rel.components();
+                if let Some(Component::Normal(first)) = comps.next() {
                     let s = first.to_string_lossy();
+                    let second = comps
+                        .next()
+                        .and_then(|c| c.as_os_str().to_str())
+                        .unwrap_or("");
+                    if s.eq_ignore_ascii_case("AppData") {
+                        if second.eq_ignore_ascii_case("Roaming") {
+                            return true;
+                        }
+                        continue;
+                    }
+                    if s.eq_ignore_ascii_case("Library") {
+                        if second.eq_ignore_ascii_case("Application Support") {
+                            return true;
+                        }
+                        continue;
+                    }
                     if matches!(
                         s.as_ref(),
                         ".claude"
@@ -1638,8 +1655,12 @@ pub(crate) fn is_user_home_global_agent_path(path: &Path) -> bool {
                             | ".windsurf"
                             | ".clinerules"
                             | ".continue"
-                            | "Library"
-                            | "AppData"
+                            | ".zed"
+                            | ".junie"
+                            | ".kiro"
+                            | ".trae"
+                            | ".augment"
+                            | ".amazonq"
                     ) {
                         return true;
                     }

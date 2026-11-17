@@ -392,8 +392,14 @@ fn is_user_global_mcp_config(path: &Path) -> bool {
     let Some(first) = comps.next().and_then(|c| c.as_os_str().to_str()) else {
         return false;
     };
-    if comps.next().is_none() {
+    let Some(second) = comps.next().and_then(|c| c.as_os_str().to_str()) else {
         return matches!(first, ".claude.json" | ".mcp.json");
+    };
+    if first.eq_ignore_ascii_case("AppData") {
+        return second.eq_ignore_ascii_case("Roaming");
+    }
+    if first.eq_ignore_ascii_case("Library") {
+        return second.eq_ignore_ascii_case("Application Support");
     }
     matches!(
         first,
@@ -410,8 +416,6 @@ fn is_user_global_mcp_config(path: &Path) -> bool {
             | ".augment"
             | ".amazonq"
             | ".config"
-            | "Library"
-            | "AppData"
     )
 }
 
