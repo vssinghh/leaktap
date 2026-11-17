@@ -24,7 +24,7 @@
       "language": "TypeScript",
       "commit": "e1dc4b18dbb9",
       "static_scan": {
-        "scan_elapsed_ms": 426,
+        "scan_elapsed_ms": 443,
         "mcp_configs_scanned": 154,
         "findings": [
           {
@@ -41,7 +41,7 @@
             "file": "README.md",
             "line": 87,
             "server_name": "memory",
-            "message": "Runs unpinned `npx @modelcontextprotocol/server-memory` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx @modelcontextprotocol/server-memory` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -49,7 +49,7 @@
             "file": "README.md",
             "line": 113,
             "server_name": "filesystem",
-            "message": "Runs unpinned `npx @modelcontextprotocol/server-filesystem` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx @modelcontextprotocol/server-filesystem` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -57,7 +57,7 @@
             "file": "README.md",
             "line": 117,
             "server_name": "git",
-            "message": "Runs unpinned `uvx mcp-server-git` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx mcp-server-git` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -65,7 +65,7 @@
             "file": "README.md",
             "line": 121,
             "server_name": "fetch",
-            "message": "Runs unpinned `uvx mcp-server-fetch` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx mcp-server-fetch` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           }
         ]
       },
@@ -100,7 +100,7 @@
       "language": "TypeScript",
       "commit": "a8de90a340f4",
       "static_scan": {
-        "scan_elapsed_ms": 266,
+        "scan_elapsed_ms": 256,
         "mcp_configs_scanned": 169,
         "findings": [
           {
@@ -125,7 +125,7 @@
             "file": "packages/mcp/README.md",
             "line": 126,
             "server_name": "context7",
-            "message": "Runs unpinned `npx @upstash/context7-mcp` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx @upstash/context7-mcp` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -212,7 +212,7 @@
       "language": "TypeScript",
       "commit": "045fb8c37d38",
       "static_scan": {
-        "scan_elapsed_ms": 237,
+        "scan_elapsed_ms": 238,
         "mcp_configs_scanned": 208,
         "findings": [
           {
@@ -221,7 +221,7 @@
             "file": "README.md",
             "line": 77,
             "server_name": "chrome-devtools",
-            "message": "Runs unpinned `npx chrome-devtools-mcp@latest` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx chrome-devtools-mcp@latest` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-server-telemetry",
@@ -264,7 +264,7 @@
       "language": "C",
       "commit": "cdfdf26483fa",
       "static_scan": {
-        "scan_elapsed_ms": 4198,
+        "scan_elapsed_ms": 4200,
         "mcp_configs_scanned": 494,
         "findings": [
           {
@@ -340,7 +340,7 @@
       "language": "TypeScript",
       "commit": "a62ea28698af",
       "static_scan": {
-        "scan_elapsed_ms": 136,
+        "scan_elapsed_ms": 123,
         "mcp_configs_scanned": 12,
         "findings": [
           {
@@ -392,7 +392,7 @@
       "language": "Python",
       "commit": "b6a2ce30c146",
       "static_scan": {
-        "scan_elapsed_ms": 195,
+        "scan_elapsed_ms": 190,
         "mcp_configs_scanned": 28,
         "findings": [
           {
@@ -433,7 +433,7 @@
             "file": "README.md",
             "line": 103,
             "server_name": "blender",
-            "message": "Runs unpinned `uvx mcp-for-blender` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx mcp-for-blender` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -441,7 +441,7 @@
             "file": "integrations/codex/plugins/mcp-for-blender/.mcp.json",
             "line": 3,
             "server_name": "mcp-for-blender",
-            "message": "Runs unpinned `uvx mcp-for-blender` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx mcp-for-blender` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-server-telemetry",
@@ -484,7 +484,7 @@
       "language": "Go",
       "commit": "67d4dc489700",
       "static_scan": {
-        "scan_elapsed_ms": 420,
+        "scan_elapsed_ms": 384,
         "mcp_configs_scanned": 220,
         "findings": [
           {
@@ -554,7 +554,7 @@
       "language": "TypeScript",
       "commit": "3cbdaeeb2ce6",
       "static_scan": {
-        "scan_elapsed_ms": 3573,
+        "scan_elapsed_ms": 3560,
         "mcp_configs_scanned": 285,
         "findings": [
           {
@@ -598,7 +598,7 @@
       "language": "Python",
       "commit": "bbdda4b9e4b4",
       "static_scan": {
-        "scan_elapsed_ms": 473,
+        "scan_elapsed_ms": 474,
         "mcp_configs_scanned": 130,
         "findings": [
           {
@@ -607,7 +607,7 @@
             "file": ".mcp.json",
             "line": 3,
             "server_name": "code-review-graph",
-            "message": "Runs unpinned `uvx code-review-graph` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx code-review-graph` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "plugin-workspace-hook-exec",
@@ -666,7 +666,7 @@
       "language": "Python",
       "commit": "0cef825f802d",
       "static_scan": {
-        "scan_elapsed_ms": 394,
+        "scan_elapsed_ms": 337,
         "mcp_configs_scanned": 233,
         "findings": [
           {
@@ -710,7 +710,7 @@
       "language": "TypeScript",
       "commit": "ccede0be774f",
       "static_scan": {
-        "scan_elapsed_ms": 6785,
+        "scan_elapsed_ms": 6545,
         "mcp_configs_scanned": 463,
         "findings": [
           {
@@ -743,7 +743,7 @@
             "file": "docs/HTTP_DEPLOYMENT.md",
             "line": 359,
             "server_name": "n8n-remote",
-            "message": "Runs unpinned `npx mcp-remote` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx mcp-remote` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -810,7 +810,7 @@
       "language": "Go",
       "commit": "bb6fa2e20871",
       "static_scan": {
-        "scan_elapsed_ms": 304,
+        "scan_elapsed_ms": 295,
         "mcp_configs_scanned": 59,
         "findings": [
           {
@@ -873,7 +873,7 @@
       "language": "Go",
       "commit": "2253fe76f09d",
       "static_scan": {
-        "scan_elapsed_ms": 791,
+        "scan_elapsed_ms": 806,
         "mcp_configs_scanned": 564,
         "findings": [
           {
@@ -882,7 +882,7 @@
             "file": "README.md",
             "line": 86,
             "server_name": "toolbox-postgres",
-            "message": "Runs unpinned `npx @toolbox-sdk/server` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx @toolbox-sdk/server` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           }
         ]
       },
@@ -914,7 +914,7 @@
       "language": "TypeScript",
       "commit": "97365c13fb88",
       "static_scan": {
-        "scan_elapsed_ms": 337,
+        "scan_elapsed_ms": 351,
         "mcp_configs_scanned": 212,
         "findings": [
           {
@@ -923,7 +923,7 @@
             "file": "README.md",
             "line": 160,
             "server_name": "actors-mcp-server",
-            "message": "Runs unpinned `npx @apify/actors-mcp-server` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx @apify/actors-mcp-server` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -978,7 +978,7 @@
       "language": "TypeScript",
       "commit": "c083d65c7e00",
       "static_scan": {
-        "scan_elapsed_ms": 151,
+        "scan_elapsed_ms": 160,
         "mcp_configs_scanned": 65,
         "findings": [
           {
@@ -1003,7 +1003,7 @@
             "file": "README.md",
             "line": 66,
             "server_name": "Framelink MCP for Figma",
-            "message": "Runs unpinned `npx figma-developer-mcp` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `npx figma-developer-mcp` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           }
         ]
       },
@@ -1034,7 +1034,7 @@
       "language": "Python",
       "commit": "5914ce5bd9d1",
       "static_scan": {
-        "scan_elapsed_ms": 688,
+        "scan_elapsed_ms": 739,
         "mcp_configs_scanned": 570,
         "findings": [
           {
@@ -1067,7 +1067,7 @@
             "file": "Server/README.md",
             "line": 53,
             "server_name": "UnityMCP",
-            "message": "Runs unpinned `uvx mcpforunityserver` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx mcpforunityserver` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -1113,7 +1113,7 @@
       "language": "Python",
       "commit": "d689933ff579",
       "static_scan": {
-        "scan_elapsed_ms": 147,
+        "scan_elapsed_ms": 150,
         "mcp_configs_scanned": 2,
         "findings": []
       },
@@ -1148,7 +1148,7 @@
       "language": "Python",
       "commit": "13e480cb1198",
       "static_scan": {
-        "scan_elapsed_ms": 221,
+        "scan_elapsed_ms": 232,
         "mcp_configs_scanned": 100,
         "findings": [
           {
@@ -1193,16 +1193,16 @@
       "language": "TypeScript",
       "commit": "f48e71751e00",
       "static_scan": {
-        "scan_elapsed_ms": 396,
+        "scan_elapsed_ms": 408,
         "mcp_configs_scanned": 445,
         "findings": [
           {
             "rule_id": "mcp-unpinned-package",
             "severity": "medium",
             "file": "README.md",
-            "line": 133,
-            "server_name": "chrome-mcp-stdio",
-            "message": "Runs unpinned `npx node` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+            "line": 66,
+            "server_name": "hangwin__mcp-chrome",
+            "message": "Setup command installs unpinned global package `npm install -g mcp-chrome-bridge` without an exact `x.y.z` version pin"
           }
         ]
       },
@@ -1237,7 +1237,7 @@
       "language": "Java",
       "commit": "1e980252087b",
       "static_scan": {
-        "scan_elapsed_ms": 120,
+        "scan_elapsed_ms": 121,
         "mcp_configs_scanned": 9,
         "findings": [
           {
@@ -1246,7 +1246,7 @@
             "file": "README.md",
             "line": 59,
             "server_name": "ghidra",
-            "message": "Runs unpinned `uvx git+https://github.com/LaurieWired/GhidraMCP` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+            "message": "Runs unpinned `uvx git+https://github.com/LaurieWired/GhidraMCP` \u2014 pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
           }
         ]
       },

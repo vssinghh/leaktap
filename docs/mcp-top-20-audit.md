@@ -17,7 +17,7 @@ In Layer 2, **18 of the 20 servers (`90%`)** completed a live `stdio` `initializ
 
 | Layer | Check (`leaktap` Rule IDs) | Count (of 20) | Share | Why It Matters on a Developer Machine |
 | :--- | :--- | :---: | :---: | :--- |
-| **Layer 1 (`scan`)** | **Unpinned packages, `:latest` tags, or branch installs** (`mcp-unpinned-package`) | **18 / 20** | **90%** | Downloads and runs the newest code from npm, PyPI, Docker Hub, or GitHub `main` on start instead of locking a fixed version. |
+| **Layer 1 (`scan`)** | **Unpinned packages, `:latest` tags, or branch installs** (`mcp-unpinned-package`) | **18 / 20** | **90%** | Pulls whatever code is newest on npm, PyPI, Docker Hub, or GitHub `main` on first install, cache refresh, or `@latest` startup instead of locking a fixed version. |
 | **Layer 1 (`scan`)** | **Secrets in JSON configs or CLI flags** (`mcp-cli-arg-secret`, `mcp-plaintext-secret-template`) | **7 / 20** | **35%** | Guides users to paste raw tokens into `.mcp.json` or pass `--api-key` on the command line (visible to any local process via `ps aux`). |
 | **Layer 1 (`scan`)** | **Default-on usage telemetry in source code** (`mcp-server-telemetry`, `mcp-undisclosed-telemetry`) | **6 / 20** | **30%** | Sends usage or crash events to external servers unless you set an opt-out environment variable. **2 / 20** do not mention telemetry in their root `README.md`. |
 | **Layer 1 (`scan`)** | **Pipe-to-shell remote installers** (`mcp-remote-code-exec`) | **2 / 20** | **10%** | Setup docs pipe a mutable `https://.../install.sh` URL straight into `sh`, `bash`, or PowerShell `iex`. |
@@ -61,7 +61,7 @@ Seven repositories (`35%`) instruct users to put raw credentials directly into M
 
 ### 4. Unpinned installs (`90%`), workspace hooks, and container privileges
 
-- **`18 / 20` (`90%`)** trigger `mcp-unpinned-package` via unpinned `npx` / `uvx` commands, `:latest` container tags (`ghcr.io/github/github-mcp-server`, `ghcr.io/oraios/serena:latest`, `ghcr.io/czlonkowski/n8n-mcp:latest`, `mcp/context7`), or mutable GitHub branch URLs (`DeusData/codebase-memory-mcp`, `mksglu/context-mode`, `CoplayDev/unity-mcp`, `mrexodia/ida-pro-mcp`, `LaurieWired/GhidraMCP`). Note that pinning a top-level package (`npx pkg@1.2.3`) pins the entry package, whereas full transitive dependency locking requires a local install with a lockfile.
+- **`18 / 20` (`90%`)** trigger `mcp-unpinned-package` via unpinned `npx` / `uvx` / global npm commands, `:latest` container tags (`ghcr.io/github/github-mcp-server`, `ghcr.io/oraios/serena:latest`, `ghcr.io/czlonkowski/n8n-mcp:latest`, `mcp/context7`), or mutable GitHub branch URLs (`DeusData/codebase-memory-mcp`, `mksglu/context-mode`, `CoplayDev/unity-mcp`, `mrexodia/ida-pro-mcp`, `LaurieWired/GhidraMCP`). Note that pinning a top-level package (`npx pkg@1.2.3`) locks the entry package version, whereas locking every sub-dependency requires a local install with a lockfile (`package-lock.json` / `uv.lock`) or a Docker `@sha256:...` digest.
 - **Workspace hooks and lifecycle configs:** `leaktap scan` also flagged automatic `SessionStart` / `PostToolUse` shell hooks in `modelcontextprotocol/servers` (`.claude/settings.json:3`) and `tirth8205/code-review-graph` (`hooks/hooks.json:3,15`), `"privileged": true` in `microsoft/playwright-mcp` (`.devcontainer/devcontainer.json:5`), `--network=host` Docker usage in `ahujasid/mcp-for-blender` (`README.md:356`), an auto-run `postinstall` network downloader in `DeusData/codebase-memory-mcp` (`pkg/npm/package.json:30`), and an unencrypted remote HTTP example (`http://remote-server:8080/mcp`) in `CoplayDev/unity-mcp` (`Server/README.md:227`).
 
 ### 5. All `470` live tool schemas were clean (`0` tool-poisoning findings)
@@ -96,7 +96,7 @@ The two servers that did not complete `tools/list` had straightforward runtime r
 | 16 | [`CoplayDev/unity-mcp`](https://github.com/CoplayDev/unity-mcp) | 13,049 | Python | `mcp-plaintext-http` (`Server/README.md:227`), `mcp-undisclosed-telemetry` (`Server/src/core/telemetry.py:152`), `mcp-unpinned-package` (`README.md:55`), `mcp-plaintext-secret-template` (`Server/README.md:229`) | **49** | `api-prod.coplay.dev:443` *(telemetry)*, `pypi.org:443` |
 | 17 | [`0x4m4/hexstrike-ai`](https://github.com/0x4m4/hexstrike-ai) | 12,546 | Python | Clean (`0` static MCP/plugin findings) | **150** | None |
 | 18 | [`mrexodia/ida-pro-mcp`](https://github.com/mrexodia/ida-pro-mcp) | 12,358 | Python | `mcp-unpinned-package` (`README.md:62,98`) | *Needs IDA GUI* | None |
-| 19 | [`hangwin/mcp-chrome`](https://github.com/hangwin/mcp-chrome) | 12,186 | TS | `mcp-unpinned-package` (`README.md:133`) | **27** | None |
+| 19 | [`hangwin/mcp-chrome`](https://github.com/hangwin/mcp-chrome) | 12,186 | TS | `mcp-unpinned-package` (`README.md:66`) | **27** | None |
 | 20 | [`LaurieWired/GhidraMCP`](https://github.com/LaurieWired/GhidraMCP) | 11,969 | Java | `mcp-unpinned-package` (`README.md:59`) | **30** | None |
 
 ---

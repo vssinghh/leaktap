@@ -1031,6 +1031,13 @@ fn audit_setup_shell_block(
         Regex::new(r#"\bdocker\s+run\b[^\n]*\s([a-z0-9._-]+/[a-z0-9._/-]+:latest)\b"#)
             .expect("valid docker latest regex")
     });
+    static GLOBAL_MCP_INSTALL_RE: OnceLock<Regex> = OnceLock::new();
+    let global_install_re = GLOBAL_MCP_INSTALL_RE.get_or_init(|| {
+        Regex::new(
+            r#"\b((?:npm|pnpm|bun)\s+(?:install|i|add)\s+(?:-g|--global)\s+|uv\s+tool\s+install\s+|pipx\s+install\s+)(@?[a-z0-9][a-z0-9._/-]*[a-z0-9](?:@latest)?)(?:\s|$)"#,
+        )
+        .expect("valid global mcp install regex")
+    });
     static EXT_GIT_HEAD_RE: OnceLock<Regex> = OnceLock::new();
     let ext_git_re = EXT_GIT_HEAD_RE.get_or_init(|| {
         Regex::new(r#"\b(?:(?:gemini|qwen)\s+extensions\s+install\s+(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:claude|codex|zcode)\s+plugins?\s+marketplace\s+add\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))(?:\s|$)"#)
@@ -1124,7 +1131,7 @@ fn audit_setup_shell_block(
             continue;
         }
 
-        // Only emit shell-level `npx` / `uvx` / `docker :latest` / extension git-HEAD if not already recorded from a structured JSON/TOML block
+        // Only emit shell-level `npx` / `uvx` / global install / `docker :latest` / extension git-HEAD if not already recorded from a structured JSON/TOML block
         let already_has_unpinned = seen_dedup_keys
             .iter()
             .any(|k| k.starts_with("mcp-unpinned-package:"));
@@ -1186,6 +1193,37 @@ fn audit_setup_shell_block(
                             ),
                             message: format!(
                                 "Setup command runs unpinned `{launcher} {pkg}` — pulls mutable remote package code without an exact `x.y.z` pin"
+                            ),
+                        });
+                    }
+                }
+            } else if let Some(caps) = global_install_re.captures(trimmed) {
+                let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+                let pkg = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                let is_helper_cli = matches!(pkg, "mcporter" | "@smithery/cli" | "mcp-Get");
+                if !is_helper_cli
+                    && pkg.contains("mcp")
+                    && !pkg.contains("@modelcontextprotocol/inspector")
+                    && (!pkg.contains('@')
+                        || pkg.starts_with('@') && !pkg[1..].contains('@')
+                        || pkg.ends_with("@latest"))
+                {
+                    let clean_pkg = pkg.strip_suffix("@latest").unwrap_or(pkg);
+                    let dedup = format!("mcp-unpinned-package:{prefix} {clean_pkg}");
+                    if seen_dedup_keys.insert(dedup) {
+                        out.push(McpFinding {
+                            rule_id: "mcp-unpinned-package",
+                            server_name: repo_name.to_string(),
+                            config_file: display.to_string(),
+                            config_path: doc_path.to_path_buf(),
+                            line: line_no,
+                            severity: Severity::Medium,
+                            fingerprint: fingerprint_match(
+                                "mcp-unpinned-package",
+                                &format!("{display}:{line_no}:{prefix}:{pkg}"),
+                            ),
+                            message: format!(
+                                "Setup command installs unpinned global package `{prefix} {pkg}` without an exact `x.y.z` version pin"
                             ),
                         });
                     }

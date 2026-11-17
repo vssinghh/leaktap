@@ -908,7 +908,7 @@ fn emit_unpinned_pkg_finding(
         };
         let msg = if has_auto_install {
             format!(
-                "Runs unpinned `{launcher_label} {pkg}` — pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+                "Runs unpinned `{launcher_label} {pkg}` — pulls mutable remote package code on install, cache refresh, or `@latest` startup (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
             )
         } else {
             format!(
@@ -1030,17 +1030,29 @@ fn check_unpinned_execution(
     }
 
     if let Some(pkg) = find_target_package_arg(&cmd_base, pkg_slice) {
-        emit_unpinned_pkg_finding(
-            server_name,
-            &launcher_label,
-            pkg,
-            has_auto_install,
-            raw_file,
-            server_line,
-            path,
-            display,
-            out,
-        );
+        let is_npx_node_local_script = cmd_base == "npx"
+            && matches!(pkg, "node" | "nodejs")
+            && pkg_slice.iter().any(|&arg| {
+                arg.ends_with(".js")
+                    || arg.ends_with(".mjs")
+                    || arg.ends_with(".cjs")
+                    || arg.starts_with('/')
+                    || arg.starts_with("./")
+                    || arg.starts_with("../")
+            });
+        if !is_npx_node_local_script {
+            emit_unpinned_pkg_finding(
+                server_name,
+                &launcher_label,
+                pkg,
+                has_auto_install,
+                raw_file,
+                server_line,
+                path,
+                display,
+                out,
+            );
+        }
     }
 }
 

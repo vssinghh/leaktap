@@ -551,3 +551,59 @@ fn live_tool_schema_meta_uris_and_browser_tab_docs_do_not_false_positive() {
         findings[0]
     );
 }
+
+#[test]
+fn global_npm_mcp_install_caught_and_npx_node_local_script_skipped() {
+    let repo = TempDir::new().expect("repo");
+    fs::write(
+        repo.path().join("package.json"),
+        r#"{"name":"chrome-mcp","dependencies":{"@modelcontextprotocol/sdk":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("README.md"),
+        r#"# Chrome MCP
+
+```bash
+npm install -g mcp-chrome-bridge
+```
+
+```json
+{
+  "mcpServers": {
+    "chrome-mcp-stdio": {
+      "command": "npx",
+      "args": [
+        "node",
+        "/Users/alice/Library/pnpm/global/5/node_modules/mcp-chrome-bridge/dist/mcp-server-stdio.js"
+      ]
+    }
+  }
+}
+```
+"#,
+    )
+    .unwrap();
+
+    let rep = run_scan_report(&ScanArgs {
+        paths: vec![repo.path().to_path_buf()],
+        no_pii: true,
+        ..Default::default()
+    });
+    let unpinned: Vec<_> = rep
+        .mcp_findings
+        .iter()
+        .filter(|f| f.rule_id == "mcp-unpinned-package")
+        .collect();
+    assert_eq!(
+        unpinned.len(),
+        1,
+        "expected exactly 1 unpinned finding for global npm install, got: {unpinned:?}"
+    );
+    assert!(
+        unpinned[0].message.contains("mcp-chrome-bridge")
+            && !unpinned[0].message.contains("npx node"),
+        "expected finding to point to mcp-chrome-bridge instead of npx node: {:?}",
+        unpinned[0]
+    );
+}
