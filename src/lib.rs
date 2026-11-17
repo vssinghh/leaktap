@@ -9,6 +9,8 @@ pub mod mcp_audit;
 pub mod mcp_inspect;
 pub mod netwatch;
 pub mod plugin_audit;
+pub mod proxy_tap;
+pub mod repo_audit;
 pub mod report;
 pub mod rules;
 pub mod scanner;
@@ -26,6 +28,7 @@ use crate::git_scan::run_git_scan;
 use crate::mcp_audit::audit_mcp_configs_with_policy;
 use crate::mcp_inspect::inspect_live_mcp_configs_with_options;
 use crate::plugin_audit::audit_plugin_files_with_policy;
+use crate::repo_audit::audit_mcp_server_repos;
 use crate::report::json::render_scan_json;
 use crate::report::sarif::{render_rules_json, render_scan_sarif_with_rules};
 use crate::report::terminal::{render_clean_terminal, render_rules_terminal, render_scan_terminal};
@@ -366,7 +369,12 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
     let (mut mcp_findings, mcp_files_scanned, mcp_bytes_scanned) = if args.no_mcp {
         (Vec::new(), 0, 0)
     } else {
-        audit_discovered_mcp_and_plugins(&targets.mcp_config_files, &targets.plugin_files, policy)
+        audit_discovered_mcp_and_plugins(
+            &eff_paths,
+            &targets.mcp_config_files,
+            &targets.plugin_files,
+            policy,
+        )
     };
 
     if args.inspect_mcp && !args.no_mcp {
@@ -404,6 +412,7 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
 }
 
 fn audit_discovered_mcp_and_plugins(
+    explicit_paths: &[PathBuf],
     mcp_config_files: &[PathBuf],
     plugin_files: &[PathBuf],
     policy: &PolicyConfig,
@@ -418,6 +427,18 @@ fn audit_discovered_mcp_and_plugins(
             combined.push(pf);
         }
     }
+
+    let repo_outcome = if explicit_paths.is_empty() {
+        crate::repo_audit::RepoAuditOutcome::default()
+    } else {
+        audit_mcp_server_repos(explicit_paths, &mcp_engine, Some(policy))
+    };
+    for rf in repo_outcome.findings {
+        if seen_fp.insert(rf.fingerprint.clone()) {
+            combined.push(rf);
+        }
+    }
+
     combined.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
@@ -432,7 +453,11 @@ fn audit_discovered_mcp_and_plugins(
         .filter_map(|p| std::fs::metadata(p).ok())
         .map(|m| m.len().min(64 * 1024 * 1024))
         .sum();
-    (combined, unique_audited.len(), audited_bytes)
+    (
+        combined,
+        unique_audited.len() + repo_outcome.files_scanned,
+        audited_bytes + repo_outcome.bytes_scanned,
+    )
 }
 
 pub fn execute_scan(args: &ScanArgs) -> i32 {

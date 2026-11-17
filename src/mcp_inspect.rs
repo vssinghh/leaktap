@@ -126,7 +126,13 @@ pub fn audit_mcp_tools_payload_with_options(
             ));
         }
 
-        if let Some(exfil_sink) = detect_tool_exfil_sink(&cleaned, &lower) {
+        let has_stealth_or_cred = reasons.iter().any(|(k, _)| {
+            matches!(
+                *k,
+                "hidden-unicode" | "prompt-injection" | "credential-access"
+            )
+        });
+        if let Some(exfil_sink) = detect_tool_exfil_sink(&cleaned, &lower, has_stealth_or_cred) {
             reasons.push((
                 "exfil-sink",
                 format!("embeds outbound exfiltration sink (`{exfil_sink}`)"),
@@ -206,7 +212,11 @@ pub fn audit_mcp_tool_call_text(
 
     let directive = detect_tool_prompt_injection(&lower);
     let cred_ref = detect_tool_credential_target(&cleaned, &lower);
-    let exfil_sink = detect_tool_exfil_sink(&cleaned, &lower);
+    let exfil_sink = detect_tool_exfil_sink(
+        &cleaned,
+        &lower,
+        has_hidden || directive.is_some() || cred_ref.is_some(),
+    );
     let param_smuggle = detect_paraphrased_param_exfil(&lower);
     let encoded_inj = detect_encoded_instruction_payload(&cleaned);
 
@@ -961,6 +971,17 @@ fn collect_tool_metadata_text(val: &Value, depth: usize, out: &mut String) {
         }
         Value::Object(map) => {
             for (k, v) in map {
+                if matches!(k.as_str(), "$schema" | "$id") {
+                    if let Some(s) = v.as_str() {
+                        let sl = s.to_ascii_lowercase();
+                        if sl.contains("json-schema.org")
+                            || sl.contains("schema.org")
+                            || sl.contains("w3.org")
+                        {
+                            continue;
+                        }
+                    }
+                }
                 out.push_str(k);
                 out.push_str(": ");
                 collect_tool_metadata_text(v, depth + 1, out);
@@ -1058,7 +1079,15 @@ fn detect_tool_prompt_injection(lower: &str) -> Option<&'static str> {
         "silently read",
         "silently send",
         "silently upload",
-        "in the background without",
+        "in the background without telling",
+        "in the background without informing",
+        "in the background without notifying",
+        "in the background without alerting",
+        "in the background without asking",
+        "in the background without the user",
+        "in the background without user",
+        "in the background without showing",
+        "in the background without logging",
         "before using any other tool",
         "always call this tool first",
         "instead of calling",
@@ -1182,12 +1211,14 @@ pub(crate) fn detect_paraphrased_param_exfil(text: &str) -> Option<String> {
         ".pypirc",
         ".netrc",
         ".git-credentials",
-        ".env",
-        ".ssh",
+        ".ssh/",
+        "~/.ssh",
         "id_rsa",
         "id_ed25519",
-        ".aws",
-        "credentials",
+        ".aws/",
+        "~/.aws",
+        "aws credentials",
+        "ssh credentials",
         ".kube/config",
         ".docker/config.json",
         "environment configuration",
@@ -1212,7 +1243,8 @@ pub(crate) fn detect_paraphrased_param_exfil(text: &str) -> Option<String> {
     let asset = SENSITIVE_ASSETS
         .iter()
         .copied()
-        .find(|a| lower.contains(a))?;
+        .find(|a| lower.contains(a))
+        .or_else(|| has_standalone_dotenv_mention(&lower).then_some(".env"))?;
     let chan = PARAM_CHANNELS.iter().copied().find(|c| lower.contains(c))?;
 
     // Exclude defensive negation ("never include .env in parameters", "do not pass .npmrc")
@@ -1243,6 +1275,30 @@ pub(crate) fn detect_paraphrased_param_exfil(text: &str) -> Option<String> {
     ))
 }
 
+fn has_standalone_dotenv_mention(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut pos = 0usize;
+    while let Some(rel) = lower[pos..].find(".env") {
+        let idx = pos + rel;
+        let prev_ok = idx == 0 || {
+            let pb = bytes[idx - 1];
+            !pb.is_ascii_alphanumeric() && pb != b'-' && pb != b'_'
+        };
+        let after = idx + 4;
+        let next_ok = after >= bytes.len() || {
+            let nb = bytes[after];
+            !nb.is_ascii_alphanumeric() || nb == b'.'
+        };
+        // Reject `$env` template expressions like `{{$env.DATABASE_URL}}`
+        let is_template_dollar_env = idx > 0 && bytes[idx - 1] == b'$';
+        if prev_ok && next_ok && !is_template_dollar_env {
+            return true;
+        }
+        pos = idx + 4;
+    }
+    false
+}
+
 /// Detects Base64-encoded natural-language or shell prompt-injection instructions embedded inside
 /// Markdown skills (`SKILL.md`, `CLAUDE.md`) or MCP tool descriptions, even when the encoded blob
 /// contains no API key prefix.
@@ -1270,7 +1326,10 @@ pub(crate) fn detect_encoded_instruction_payload(text: &str) -> Option<String> {
             continue;
         }
         // Skip SRI hashes (`sha256-...`, `sha384-...`, `sha512-...`) and data-URI media blobs
-        let prefix_start = start.saturating_sub(16);
+        let mut prefix_start = start.saturating_sub(16);
+        while prefix_start < start && !text.is_char_boundary(prefix_start) {
+            prefix_start += 1;
+        }
         let prefix = text[prefix_start..start].to_ascii_lowercase();
         if prefix.ends_with("sha256-")
             || prefix.ends_with("sha384-")
@@ -1395,10 +1454,7 @@ fn is_mostly_printable_ascii(s: &str) -> bool {
     printable * 10 >= s.len() * 9
 }
 
-fn detect_tool_exfil_sink(cleaned: &str, lower: &str) -> Option<String> {
-    if let Some(sink) = detect_external_network_call(cleaned) {
-        return Some(sink);
-    }
+fn detect_tool_exfil_sink(cleaned: &str, lower: &str, has_stealth_or_cred: bool) -> Option<String> {
     for domain in [
         "webhook.site",
         "oastify.com",
@@ -1408,29 +1464,42 @@ fn detect_tool_exfil_sink(cleaned: &str, lower: &str) -> Option<String> {
         "pipedream.net",
         "ngrok-free.app",
         "ngrok.io",
+        "canarytokens.com",
     ] {
         if lower.contains(domain) {
             return Some(domain.to_string());
         }
     }
 
-    let has_exfil_verb = [
-        "send ",
-        "post ",
-        "upload ",
-        "exfiltrate",
-        "forward ",
-        "transmit ",
-        "include contents",
-        "pass contents",
-        "append contents",
-    ]
-    .iter()
-    .any(|v| lower.contains(v));
+    if has_stealth_or_cred {
+        if let Some(sink) = detect_external_network_call(cleaned) {
+            return Some(sink);
+        }
+    }
+
+    let has_exfil_verb = if has_stealth_or_cred {
+        [
+            "send ",
+            "post ",
+            "upload ",
+            "exfiltrate",
+            "forward ",
+            "transmit ",
+            "include contents",
+            "pass contents",
+            "append contents",
+        ]
+        .iter()
+        .any(|v| lower.contains(v))
+    } else {
+        lower.contains("exfiltrate")
+    };
 
     if has_exfil_verb {
         for scheme in ["https://", "http://"] {
-            if let Some(idx) = lower.find(scheme) {
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(scheme) {
+                let idx = search_from + rel;
                 let after = &cleaned[idx..];
                 let url_tok: String = after
                     .chars()
@@ -1438,7 +1507,13 @@ fn detect_tool_exfil_sink(cleaned: &str, lower: &str) -> Option<String> {
                         !c.is_whitespace() && !matches!(c, '"' | '\'' | ')' | '>' | ']')
                     })
                     .collect();
-                if !crate::plugin_audit::is_localhost_url(&url_tok)
+                search_from = idx + url_tok.len().max(scheme.len());
+                let url_low = url_tok.to_ascii_lowercase();
+                let is_schema_meta = url_low.contains("json-schema.org")
+                    || url_low.contains("schema.org")
+                    || url_low.contains("w3.org");
+                if !is_schema_meta
+                    && !crate::plugin_audit::is_localhost_url(&url_tok)
                     && url_tok.len() > scheme.len() + 3
                 {
                     return Some(url_tok);

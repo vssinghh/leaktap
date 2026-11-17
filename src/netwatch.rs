@@ -99,7 +99,7 @@ pub fn reap_reparented_zombies_except(exclude_pid: u32) {
 /// telemetry and may miss sub-`15ms` socket bursts or unconnected `sendto()` UDP datagrams.
 pub fn spawn_socket_watcher<F>(
     root_pid: u32,
-    ignore_loopback_port: Option<u16>,
+    ignore_loopback_ports: Vec<u16>,
     stop: Arc<AtomicBool>,
     mut on_socket: F,
 ) -> JoinHandle<()>
@@ -131,7 +131,7 @@ where
             for mut obs in list_tree_sockets(
                 supervisor_pid,
                 root_pid,
-                ignore_loopback_port,
+                &ignore_loopback_ports,
                 &proxy_ports,
                 resolved_tcp_inodes,
             ) {
@@ -219,7 +219,7 @@ struct ProcOwner {
 fn list_tree_sockets(
     supervisor_pid: u32,
     root_pid: u32,
-    ignore_loopback_port: Option<u16>,
+    ignore_loopback_ports: &[u16],
     proxy_ports: &HashSet<u16>,
     resolved_tcp_inodes: &mut HashSet<u64>,
 ) -> Vec<SocketObservation> {
@@ -325,7 +325,7 @@ fn list_tree_sockets(
                 resolved_tcp_inodes.insert(inode);
             }
             let is_loopback = ip.is_loopback();
-            if is_loopback && (ignore_loopback_port == Some(port) || port == 53) {
+            if is_loopback && (ignore_loopback_ports.contains(&port) || port == 53) {
                 continue;
             }
             out.push(SocketObservation {
@@ -413,7 +413,7 @@ fn list_tree_sockets(
                 Some(v4) => (format!("{v4}:{port}"), v4.is_loopback()),
                 None => (format!("[{ip6}]:{port}"), ip6.is_loopback()),
             };
-            if is_loopback && (ignore_loopback_port == Some(port) || port == 53) {
+            if is_loopback && (ignore_loopback_ports.contains(&port) || port == 53) {
                 continue;
             }
             out.push(SocketObservation {
@@ -605,7 +605,7 @@ fn collect_macos_descendants(root_pid: u32) -> Vec<u32> {
 fn list_tree_sockets(
     _supervisor_pid: u32,
     root_pid: u32,
-    ignore_loopback_port: Option<u16>,
+    ignore_loopback_ports: &[u16],
     proxy_ports: &HashSet<u16>,
     _resolved_tcp_inodes: &mut HashSet<u64>,
 ) -> Vec<SocketObservation> {
@@ -648,7 +648,10 @@ fn list_tree_sockets(
                 let port = remote
                     .rsplit_once(':')
                     .and_then(|(_, p)| p.parse::<u16>().ok());
-                if is_loopback && (port == ignore_loopback_port || port == Some(53)) {
+                if is_loopback
+                    && (port.is_some_and(|p| ignore_loopback_ports.contains(&p))
+                        || port == Some(53))
+                {
                     continue;
                 }
                 observations.push(SocketObservation {
@@ -670,7 +673,7 @@ fn list_tree_sockets(
 fn list_tree_sockets(
     _supervisor_pid: u32,
     _root_pid: u32,
-    _ignore_loopback_port: Option<u16>,
+    _ignore_loopback_ports: &[u16],
     _proxy_ports: &HashSet<u16>,
     _resolved_tcp_inodes: &mut HashSet<u64>,
 ) -> Vec<SocketObservation> {

@@ -28,6 +28,8 @@ pub struct McpFinding {
 
 const TELEMETRY_DOMAINS: &[&str] = &[
     "i.posthog.com",
+    "us.i.posthog.com",
+    "eu.i.posthog.com",
     "events.posthog.com",
     "app.posthog.com",
     "api.segment.io",
@@ -43,6 +45,9 @@ const TELEMETRY_DOMAINS: &[&str] = &[
     "trace.agent.datadoghq.com",
     "www.google-analytics.com",
     "analytics.google.com",
+    "play.googleapis.com/log",
+    "static.scarf.sh",
+    "/mp/collect",
     "telemetry.",
 ];
 
@@ -262,23 +267,42 @@ fn audit_single_mcp_file(
     }
 
     // 1b. VS Code / Cursor / Windsurf `settings.json` nested `mcp.servers` (`{"mcp": {"servers": {...}}}`)
-    if let Some(servers) = json
-        .get("mcp")
-        .and_then(|m| m.get("servers"))
-        .and_then(|v| v.as_object())
-    {
-        for (name, spec) in servers {
-            inspect_server(
-                name,
-                spec,
-                &raw,
-                disk_path,
-                logical_path,
-                sandbox_remap,
-                &display,
-                engine,
-                out,
-            );
+    // or OpenCode direct `{"mcp": {"server-name": {"type": "local", "command": [...]}}}`
+    if let Some(mcp_obj) = json.get("mcp").and_then(|v| v.as_object()) {
+        if let Some(servers) = mcp_obj.get("servers").and_then(|v| v.as_object()) {
+            for (name, spec) in servers {
+                inspect_server(
+                    name,
+                    spec,
+                    &raw,
+                    disk_path,
+                    logical_path,
+                    sandbox_remap,
+                    &display,
+                    engine,
+                    out,
+                );
+            }
+        } else {
+            for (name, spec) in mcp_obj {
+                if spec.as_object().is_some_and(|o| {
+                    o.contains_key("command")
+                        || o.contains_key("url")
+                        || o.contains_key("serverUrl")
+                }) {
+                    inspect_server(
+                        name,
+                        spec,
+                        &raw,
+                        disk_path,
+                        logical_path,
+                        sandbox_remap,
+                        &display,
+                        engine,
+                        out,
+                    );
+                }
+            }
         }
     }
 
@@ -721,7 +745,7 @@ fn audit_toml_value_for_secrets(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn inspect_server(
+pub(crate) fn inspect_server(
     server_name: &str,
     spec: &Value,
     raw_file: &str,
@@ -734,10 +758,12 @@ fn inspect_server(
 ) {
     let server_line = find_line_number(raw_file, server_name);
     let cmd_obj = spec.get("command").and_then(|v| v.as_object());
+    let cmd_arr = spec.get("command").and_then(|v| v.as_array());
     let command = spec
         .get("command")
         .and_then(|v| v.as_str())
         .or_else(|| cmd_obj.and_then(|o| o.get("path")).and_then(|v| v.as_str()))
+        .or_else(|| cmd_arr.and_then(|a| a.first()).and_then(|v| v.as_str()))
         .unwrap_or("");
     let args: Vec<&str> = spec
         .get("args")
@@ -748,6 +774,7 @@ fn inspect_server(
                 .and_then(|v| v.as_array())
         })
         .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
+        .or_else(|| cmd_arr.map(|arr| arr.iter().skip(1).filter_map(|x| x.as_str()).collect()))
         .unwrap_or_default();
 
     // Check 1: Unpinned remote package execution (`npx -y @foo/bar`, `uvx foo`, `uv run --with foo`)
@@ -1265,7 +1292,7 @@ fn extract_npm_call_command<'a>(cmd_base: &str, eff_args: &'a [&'a str]) -> Opti
 }
 
 fn split_wrapper_tokens_lossy(script: &str) -> Vec<String> {
-    split_simple_wrapper_tokens(script)
+    split_simple_wrapper_tokens(script, false)
         .unwrap_or_else(|| script.split_whitespace().map(str::to_string).collect())
 }
 
@@ -1938,6 +1965,15 @@ fn is_pinned_package_spec(pkg: &str) -> bool {
     {
         return has_explicit_version_pin(rest);
     }
+    if pkg.starts_with('/')
+        || pkg.starts_with("./")
+        || pkg.starts_with("../")
+        || pkg.starts_with("~/")
+        || pkg.starts_with("${")
+        || (pkg.ends_with(".whl") && !pkg.contains("://"))
+    {
+        return true;
+    }
     if pkg.starts_with("https://")
         || pkg.starts_with("http://")
         || pkg.starts_with("git+")
@@ -1945,12 +1981,12 @@ fn is_pinned_package_spec(pkg: &str) -> bool {
         || pkg.starts_with("gitlab:")
         || pkg.starts_with("sourcehut:")
     {
-        return pkg
-            .rsplit_once('@')
-            .is_some_and(|(_, ver)| is_exact_semver_or_digest(ver))
-            || pkg
-                .rsplit_once('#')
-                .is_some_and(|(_, ver)| is_exact_semver_or_digest(ver));
+        return pkg.rsplit_once('@').is_some_and(|(_, ver)| {
+            let clean_ver = ver.split(['#', '?']).next().unwrap_or(ver);
+            is_exact_semver_or_digest(clean_ver)
+        }) || pkg
+            .rsplit_once('#')
+            .is_some_and(|(_, ver)| is_exact_semver_or_digest(ver));
     }
     has_explicit_version_pin(pkg)
 }
@@ -2159,33 +2195,64 @@ fn is_auditable_local_script_arg(arg: &str) -> bool {
 /// is a simple single-command local launcher wrapper with no shell chaining, pipes, command
 /// substitution, redirection, inline RCE, credential-store access, or external network call.
 fn parse_benign_single_command_shell_wrapper(
+    cmd_base: &str,
     is_posix_shell: bool,
     eff_args: &[&str],
 ) -> Option<(String, Vec<String>, Option<String>)> {
-    if !is_posix_shell || eff_args.len() != 2 || !is_posix_shell_inline_flag(eff_args[0]) {
+    let is_win_cmd = cmd_base == "cmd";
+    let mut tokens = if is_posix_shell {
+        if eff_args.len() != 2 || !is_posix_shell_inline_flag(eff_args[0]) {
+            return None;
+        }
+        let script = eff_args[1].trim();
+        if script.is_empty()
+            || script.chars().any(|c| {
+                matches!(
+                    c,
+                    '|' | ';' | '&' | '`' | '>' | '<' | '\n' | '\r' | '(' | ')'
+                )
+            })
+            || detect_inline_rce(script).is_some()
+            || detect_external_network_call(script).is_some()
+            || detect_credential_store_ref(script).is_some()
+        {
+            return None;
+        }
+        split_simple_wrapper_tokens(script, false)?
+    } else if is_win_cmd {
+        if eff_args.len() < 2 || !eff_args[0].eq_ignore_ascii_case("/c") {
+            return None;
+        }
+        if eff_args.len() >= 3 {
+            let joined = eff_args[1..].join(" ");
+            if eff_args[1..].iter().any(|t| {
+                t.chars()
+                    .any(|c| matches!(c, '|' | ';' | '&' | '`' | '>' | '<' | '\n' | '\r'))
+            }) || detect_inline_rce(&joined).is_some()
+                || detect_external_network_call(&joined).is_some()
+                || detect_credential_store_ref(&joined).is_some()
+            {
+                return None;
+            }
+            eff_args[1..].iter().map(|s| (*s).to_string()).collect()
+        } else {
+            let script = eff_args[1].trim();
+            if script.is_empty()
+                || script
+                    .chars()
+                    .any(|c| matches!(c, '|' | ';' | '&' | '`' | '>' | '<' | '\n' | '\r'))
+                || detect_inline_rce(script).is_some()
+                || detect_external_network_call(script).is_some()
+                || detect_credential_store_ref(script).is_some()
+            {
+                return None;
+            }
+            split_simple_wrapper_tokens(script, true)?
+        }
+    } else {
         return None;
-    }
-    let script = eff_args[1].trim();
-    if script.is_empty() {
-        return None;
-    }
-    if script.chars().any(|c| {
-        matches!(
-            c,
-            '|' | ';' | '&' | '`' | '>' | '<' | '\n' | '\r' | '(' | ')'
-        )
-    }) {
-        return None;
-    }
-    // Reject `$` except leading `$HOME/` or `${HOME}/` path prefixes on individual tokens
-    if detect_inline_rce(script).is_some()
-        || detect_external_network_call(script).is_some()
-        || detect_credential_store_ref(script).is_some()
-    {
-        return None;
-    }
+    };
 
-    let mut tokens = split_simple_wrapper_tokens(script)?;
     if tokens.first().map(String::as_str) == Some("exec") {
         tokens.remove(0);
     }
@@ -2194,8 +2261,10 @@ fn parse_benign_single_command_shell_wrapper(
     }
     for tok in &tokens {
         if tok.contains('$') {
-            let allowed_home = tok.starts_with("$HOME/") || tok.starts_with("${HOME}/");
-            if !allowed_home || tok[1..].contains('$') {
+            let allowed_home = tok.starts_with("$HOME/")
+                || tok.starts_with("${HOME}/")
+                || (tok.starts_with("${") && tok.ends_with('}'));
+            if !allowed_home || tok[2..].contains('$') {
                 return None;
             }
         }
@@ -2223,16 +2292,24 @@ fn parse_benign_single_command_shell_wrapper(
     Some((wrapped_cmd, unwrapped_tokens, inner_priv))
 }
 
-fn split_simple_wrapper_tokens(script: &str) -> Option<Vec<String>> {
+fn split_simple_wrapper_tokens(script: &str, windows_quotes: bool) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
-    let mut chars = script.chars();
+    let mut chars = script.chars().peekable();
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
             if c == '\\' {
-                let next_c = chars.next()?;
-                cur.push(next_c);
+                if windows_quotes {
+                    if chars.peek() == Some(&q) {
+                        cur.push(chars.next()?);
+                    } else {
+                        cur.push('\\');
+                    }
+                } else {
+                    let next_c = chars.next()?;
+                    cur.push(next_c);
+                }
             } else if c == q {
                 quote = None;
             } else {
@@ -2413,7 +2490,7 @@ fn check_command_and_host_access(
 
     if !is_named_shell_mcp {
         if let Some((wrapped_cmd, wrapped_args, inner_priv)) =
-            parse_benign_single_command_shell_wrapper(is_posix_shell, eff_args)
+            parse_benign_single_command_shell_wrapper(&cmd_base, is_posix_shell, eff_args)
         {
             let wrapped_refs: Vec<&str> = wrapped_args.iter().map(String::as_str).collect();
             let wrapped_base = normalized_cmd_base(&wrapped_cmd);
@@ -3097,6 +3174,10 @@ fn check_hardcoded_credentials(
         .and_then(|v| v.as_object());
     let candidate_maps = [
         ("env", spec.get("env").and_then(|v| v.as_object())),
+        (
+            "environment",
+            spec.get("environment").and_then(|v| v.as_object()),
+        ),
         ("command.env", cmd_env),
         ("settings", spec.get("settings").and_then(|v| v.as_object())),
         ("headers", spec.get("headers").and_then(|v| v.as_object())),
@@ -3146,10 +3227,13 @@ fn check_hardcoded_credentials(
         }
     }
 
-    // Also inspect command-line `args` for inline hardcoded tokens (`--api-key sk_live_...`)
-    for &arg in args {
+    // Inspect command-line `args` for inline hardcoded tokens (`--figma-api-key=figd_...`)
+    // AND split CLI flag pairs (`["--api-key", "ctx7sk-..."]`) which also leak in `ps aux`.
+    let mut matched_arg_indices = std::collections::HashSet::new();
+    for (idx, &arg) in args.iter().enumerate() {
         for m in engine.scan_text_for_path(arg, Some(path)) {
             if m.category == RuleCategory::Secret {
+                matched_arg_indices.insert(idx);
                 let line = find_line_number(raw_file, arg).max(server_line);
                 out.push(McpFinding {
                     rule_id: "mcp-hardcoded-secret",
@@ -3163,13 +3247,126 @@ fn check_hardcoded_credentials(
                         &format!("{display}:{server_name}:args:{}", m.fingerprint),
                     ),
                     message: format!(
-                        "Hardcoded {} (`{}`) passed directly in MCP `args`",
+                        "Hardcoded {} (`{}`) passed directly in MCP `args` (also exposed in OS process lists like `ps aux`)",
                         m.rule_name, m.masked
                     ),
                 });
             }
         }
     }
+
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx];
+        if let Some((flag_part, val_part)) = arg.split_once('=') {
+            if !matched_arg_indices.contains(&idx)
+                && is_sensitive_cli_secret_flag(flag_part)
+                && is_live_cli_flag_secret_value(val_part)
+            {
+                let masked = mask_value("dotenv-generic-secret", val_part.trim());
+                let line = find_line_number(raw_file, arg).max(server_line);
+                out.push(McpFinding {
+                    rule_id: "mcp-hardcoded-secret",
+                    server_name: server_name.to_string(),
+                    config_file: display.to_string(),
+                    config_path: path.to_path_buf(),
+                    line,
+                    severity: Severity::Critical,
+                    fingerprint: fingerprint_match(
+                        "mcp-hardcoded-secret",
+                        &format!("{display}:{server_name}:args:{flag_part}:{}", val_part.trim()),
+                    ),
+                    message: format!(
+                        "Hardcoded secret (`{masked}`) passed via CLI flag `{flag_part}` in MCP `args` (exposed in plain-text config and `ps aux`)"
+                    ),
+                });
+            }
+            idx += 1;
+            continue;
+        }
+
+        if is_sensitive_cli_secret_flag(arg) {
+            if let Some(&next_val) = args.get(idx + 1) {
+                if !next_val.starts_with('-')
+                    && !matched_arg_indices.contains(&(idx + 1))
+                    && is_live_cli_flag_secret_value(next_val)
+                {
+                    let masked = mask_value("dotenv-generic-secret", next_val.trim());
+                    let line = find_line_number(raw_file, arg).max(server_line);
+                    out.push(McpFinding {
+                        rule_id: "mcp-hardcoded-secret",
+                        server_name: server_name.to_string(),
+                        config_file: display.to_string(),
+                        config_path: path.to_path_buf(),
+                        line,
+                        severity: Severity::Critical,
+                        fingerprint: fingerprint_match(
+                            "mcp-hardcoded-secret",
+                            &format!("{display}:{server_name}:args:{arg}:{}", next_val.trim()),
+                        ),
+                        message: format!(
+                            "Hardcoded secret (`{masked}`) passed via CLI flag `{arg}` in MCP `args` (exposed in plain-text config and `ps aux`)"
+                        ),
+                    });
+                }
+                idx += 2;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+}
+
+pub(crate) fn is_sensitive_cli_secret_flag(flag: &str) -> bool {
+    let trimmed = flag.trim();
+    if !trimmed.starts_with('-') {
+        return false;
+    }
+    let norm = trimmed.trim_start_matches('-').to_ascii_lowercase();
+    if norm.is_empty()
+        || norm.contains("public")
+        || norm.contains("pubkey")
+        || norm.contains("cache")
+        || norm.contains("max-token")
+        || norm.contains("token-limit")
+        || norm.contains("token-budget")
+        || norm.contains("login-url")
+        || norm.contains("validation-url")
+        || norm.contains("header")
+        || norm.contains("ttl")
+        || norm.contains("file")
+        || norm.contains("path")
+    {
+        return false;
+    }
+    norm == "api-key"
+        || norm == "apikey"
+        || norm.ends_with("-api-key")
+        || norm.ends_with("_api_key")
+        || norm == "token"
+        || norm.ends_with("-token")
+        || norm.ends_with("_token")
+        || norm == "secret"
+        || norm.ends_with("-secret")
+        || norm.ends_with("_secret")
+        || norm == "password"
+        || norm == "passwd"
+        || norm.ends_with("-password")
+        || norm == "auth-key"
+        || norm.ends_with("-auth-key")
+}
+
+fn is_live_cli_flag_secret_value(val: &str) -> bool {
+    let trimmed = val.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.len() < 12
+        || trimmed.starts_with("${")
+        || (trimmed.starts_with('$') && !trimmed.contains(' '))
+        || trimmed.starts_with("env:")
+        || is_likely_placeholder(trimmed)
+    {
+        return false;
+    }
+    shannon_entropy(trimmed) >= 3.3
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3185,10 +3382,22 @@ fn inspect_credential_value(
     out: &mut Vec<McpFinding>,
 ) {
     let trimmed = val.trim();
+    let scheme_stripped = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .or_else(|| trimmed.strip_prefix("Token "))
+        .or_else(|| trimmed.strip_prefix("Basic "))
+        .map(str::trim)
+        .unwrap_or(trimmed);
     if trimmed.is_empty()
-        || trimmed.starts_with("${")
-        || (trimmed.starts_with('$') && !trimmed.contains(' '))
-        || trimmed.starts_with("env:")
+        || scheme_stripped.is_empty()
+        || scheme_stripped.starts_with("${")
+        || (scheme_stripped.starts_with('$') && !scheme_stripped.contains(' '))
+        || scheme_stripped.starts_with("env:")
+        || scheme_stripped.starts_with("{env:")
+        || scheme_stripped.starts_with("op://")
+        || is_likely_placeholder(trimmed)
+        || is_likely_placeholder(scheme_stripped)
     {
         return;
     }

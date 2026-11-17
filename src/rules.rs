@@ -3736,7 +3736,10 @@ fn extract_matched_key_name(rule_id: &str, full_match: &str) -> Option<String> {
 }
 
 fn infer_preceding_key_name(text: &str, match_start: usize) -> Option<String> {
-    let window_start = match_start.saturating_sub(140);
+    let mut window_start = match_start.saturating_sub(140);
+    while window_start < match_start && !text.is_char_boundary(window_start) {
+        window_start += 1;
+    }
     let mut prefix = &text[window_start..match_start];
     while let Some(stripped) = prefix
         .strip_suffix("u0022")
@@ -4486,8 +4489,16 @@ pub fn is_likely_placeholder(val: &str) -> bool {
         "your-secret",
         "your_token",
         "your-token",
+        "your_github",
+        "your-github",
+        "your_pat",
+        "your-pat",
+        "your_key",
+        "your-key",
         "replace_me",
         "replace-me",
+        "replace_with_",
+        "replace-with-",
         "insert_your",
         "redacted_by_leaktap",
         "[redacted]",

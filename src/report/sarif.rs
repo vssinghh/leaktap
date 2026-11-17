@@ -67,6 +67,30 @@ pub const BUILTIN_STATIC_RULES: &[(&str, &str, &str, Severity)] = &[
         Severity::Medium,
     ),
     (
+        "mcp-cli-arg-secret",
+        "MCP Credential in CLI Arguments",
+        "MCP setup configuration passes an API key or token in command-line args, exposing secrets in plain-text config and OS process lists (ps aux).",
+        Severity::High,
+    ),
+    (
+        "mcp-plaintext-secret-template",
+        "MCP Plain-Text Secret Config Template",
+        "MCP setup documentation instructs users to paste plain-text API keys or tokens into JSON env or headers instead of ${ENV_VAR} or secret prompt interpolation.",
+        Severity::Medium,
+    ),
+    (
+        "mcp-server-telemetry",
+        "MCP Default-On Server Telemetry",
+        "MCP server source code enables outbound usage telemetry by default (disclosed in root README).",
+        Severity::Medium,
+    ),
+    (
+        "mcp-undisclosed-telemetry",
+        "MCP Undisclosed Default-On Telemetry",
+        "MCP server source code enables outbound usage telemetry by default with no disclosure in root README.",
+        Severity::High,
+    ),
+    (
         "mcp-tool-poisoning",
         "MCP Live Tool Poisoning",
         "MCP tools/list schema or description contains prompt injection, stealth instructions, credential reads, or external exfiltration URLs.",
@@ -217,6 +241,24 @@ pub const BUILTIN_LIVE_RULES: &[(&str, &str, &str, Severity)] = &[
         "udp-connection",
         "Outbound Connected UDP Socket",
         "Connected outbound UDP socket opened by the wrapped CLI or child MCP/hook process (with PID & scrubbed cmdline).",
+        Severity::Medium,
+    ),
+    (
+        "mcp-live-telemetry",
+        "Live Outbound MCP Telemetry Connection",
+        "Wrapped MCP server or child tool opened a live network connection to a third-party analytics or usage telemetry collector.",
+        Severity::Medium,
+    ),
+    (
+        "http-connect",
+        "Live Outbound HTTP/CONNECT Destination",
+        "Wrapped MCP server or child tool opened an outbound HTTP or HTTPS `CONNECT` tunnel to an external host.",
+        Severity::Medium,
+    ),
+    (
+        "mcp-tools-inventory",
+        "Live MCP `tools/list` Inventory",
+        "Observed a live MCP `tools/list` JSON-RPC response on stdio and hashed exposed tool schemas.",
         Severity::Medium,
     ),
 ];

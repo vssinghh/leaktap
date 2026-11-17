@@ -1,0 +1,1277 @@
+{
+  "snapshot_date": "2026-11-17",
+  "leaktap_version": "0.3.0",
+  "summary": {
+    "audited_count": 20,
+    "combined_stars": 464529,
+    "unpinned_package_or_tag_count": 18,
+    "secret_in_config_or_cli_arg_count": 7,
+    "cli_arg_secret_count": 2,
+    "default_on_telemetry_count": 6,
+    "undisclosed_telemetry_count": 2,
+    "pipe_to_shell_installer_count": 2,
+    "live_tap_handshake_completed_count": 18,
+    "live_tap_startup_network_count": 6,
+    "live_tap_total_tools_pinned": 470,
+    "live_tap_tool_poisoning_count": 0
+  },
+  "repositories": [
+    {
+      "rank": 1,
+      "repo": "modelcontextprotocol/servers",
+      "stars": 84118,
+      "language": "TypeScript",
+      "commit": "e1dc4b18dbb9",
+      "static_scan": {
+        "scan_elapsed_ms": 426,
+        "mcp_configs_scanned": 154,
+        "findings": [
+          {
+            "rule_id": "plugin-workspace-hook-exec",
+            "severity": "medium",
+            "file": ".claude/settings.json",
+            "line": 3,
+            "server_name": "hook:SessionStart",
+            "message": "Workspace config registers automatic shell command for `SessionStart` (`node \"$CLAUDE_PROJECT_DIR/scripts/session-instructions-check.mjs...`) \u2014 opening this project can execute repo-controlled code"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 87,
+            "server_name": "memory",
+            "message": "Runs unpinned `npx @modelcontextprotocol/server-memory` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 113,
+            "server_name": "filesystem",
+            "message": "Runs unpinned `npx @modelcontextprotocol/server-filesystem` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 117,
+            "server_name": "git",
+            "message": "Runs unpinned `uvx mcp-server-git` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 121,
+            "server_name": "fetch",
+            "message": "Runs unpinned `uvx mcp-server-fetch` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 16,
+        "schema_pin_sha256": "3fa901bc7d66e2679d1a7fd0cc76eee980040d3e30b4572de37719468384201e",
+        "sample_tools": [
+          "echo",
+          "get-annotated-message",
+          "get-env",
+          "get-header-params",
+          "get-resource-links",
+          "get-resource-reference"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 16 tool(s): echo, get-annotated-message, get-env, get-header-params, get-resource-links, get-resource-reference (+10 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 2909,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 2,
+      "repo": "upstash/context7",
+      "stars": 52897,
+      "language": "TypeScript",
+      "commit": "a8de90a340f4",
+      "static_scan": {
+        "scan_elapsed_ms": 266,
+        "mcp_configs_scanned": 169,
+        "findings": [
+          {
+            "rule_id": "mcp-cli-arg-secret",
+            "severity": "high",
+            "file": "packages/mcp/README.md",
+            "line": 126,
+            "server_name": "context7",
+            "message": "Setup config passes credential via CLI flag `--api-key` in MCP `args` \u2014 exposes live secrets in both plain-text config and OS process lists (`ps aux`)"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "packages/admin-mcp/README.md",
+            "line": 36,
+            "server_name": "context7-admin",
+            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 126,
+            "server_name": "context7",
+            "message": "Runs unpinned `npx @upstash/context7-mcp` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 694,
+            "server_name": "context7",
+            "message": "Setup config stores plain-text credential in `http_headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 875,
+            "server_name": "context7",
+            "message": "Runs unpinned `deno run npm:@upstash/context7-mcp` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 933,
+            "server_name": "\u0421ontext7",
+            "message": "Runs unpinned container image `docker run context7-mcp` \u2014 pin to an immutable `@sha256:...` digest or `x.y.z` tag"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 951,
+            "server_name": "context7",
+            "message": "Runs unpinned container image `docker run mcp/context7` \u2014 pin to an immutable `@sha256:...` digest or `x.y.z` tag"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 1535,
+            "server_name": "context7",
+            "message": "Setup config stores plain-text credential in `env.CONTEXT7_API_KEY` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "packages/mcp/README.md",
+            "line": 1687,
+            "server_name": "context7",
+            "message": "Runs unpinned `npx tsx` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+          },
+          {
+            "rule_id": "plugin-skill-network",
+            "severity": "medium",
+            "file": "packages/pi/lib/api.ts",
+            "line": 35,
+            "server_name": "plugin:upstash__context7",
+            "message": "Imported helper module makes an outbound network call (via `fetch`) \u2014 inspect script inputs for data exfiltration"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 2,
+        "schema_pin_sha256": "25eec05066fe8d5c6d598034d0428298062f74b64784e5c33b8df73daeae5a7b",
+        "sample_tools": [
+          "resolve-library-id",
+          "query-docs"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 2 tool(s): resolve-library-id, query-docs",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3063,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 3,
+      "repo": "ChromeDevTools/chrome-devtools-mcp",
+      "stars": 35888,
+      "language": "TypeScript",
+      "commit": "045fb8c37d38",
+      "static_scan": {
+        "scan_elapsed_ms": 237,
+        "mcp_configs_scanned": 208,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 77,
+            "server_name": "chrome-devtools",
+            "message": "Runs unpinned `npx chrome-devtools-mcp@latest` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-server-telemetry",
+            "severity": "medium",
+            "file": "src/telemetry/ClearcutLogger.ts",
+            "line": 76,
+            "server_name": "ChromeDevTools__chrome-devtools-mcp",
+            "message": "Server enables default-on outbound usage telemetry (Google Clearcut `play.googleapis.com/log` + Google `ClearcutLogger`; opt-out via `CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS`)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 33,
+        "schema_pin_sha256": "821fd4dab9f529dc160a0dc755156b0d0f3f46346240c75505ed1831b45ad917",
+        "sample_tools": [
+          "click",
+          "close_page",
+          "drag",
+          "emulate",
+          "evaluate_script",
+          "fill"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 33 tool(s): click, close_page, drag, emulate, evaluate_script, fill (+27 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3171,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 4,
+      "repo": "DeusData/codebase-memory-mcp",
+      "stars": 35664,
+      "language": "C",
+      "commit": "cdfdf26483fa",
+      "static_scan": {
+        "scan_elapsed_ms": 4198,
+        "mcp_configs_scanned": 494,
+        "findings": [
+          {
+            "rule_id": "mcp-remote-code-exec",
+            "severity": "high",
+            "file": "README.md",
+            "line": 73,
+            "server_name": "DeusData__codebase-memory-mcp",
+            "message": "Setup guide pipes unpinned remote installer script (`https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh`) directly into a shell"
+          },
+          {
+            "rule_id": "mcp-remote-code-exec",
+            "severity": "high",
+            "file": "README.md",
+            "line": 524,
+            "server_name": "DeusData__codebase-memory-mcp",
+            "message": "Setup guide pipes unpinned remote installer script (`https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/scripts/setup.sh`) directly into a shell"
+          },
+          {
+            "rule_id": "mcp-remote-code-exec",
+            "severity": "high",
+            "file": "README.md",
+            "line": 530,
+            "server_name": "DeusData__codebase-memory-mcp",
+            "message": "Setup guide pipes unpinned remote installer script (`https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/scripts/setup-windows.ps1`) directly into a shell"
+          },
+          {
+            "rule_id": "npm-lifecycle-script-exec",
+            "severity": "high",
+            "file": "pkg/npm/package.json",
+            "line": 30,
+            "server_name": "npm:codebase-memory-mcp:postinstall",
+            "message": "Auto-run `postinstall` invokes local script `install.js` making an outbound network call (via `require('http')`)"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 591,
+            "server_name": "DeusData__codebase-memory-mcp",
+            "message": "Setup command installs plugin/MCP extension from mutable GitHub branch (`DeusData/codebase-memory-mcp`) without a pinned tag or commit"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 17,
+        "schema_pin_sha256": "36a1672b15f8789e67d99a852e3a53379d542ffc2b85c98a2ed9fa58b1925691",
+        "sample_tools": [
+          "index_repository",
+          "search_graph",
+          "query_graph",
+          "trace_path",
+          "get_code_snippet",
+          "get_file_outline"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 17 tool(s): index_repository, search_graph, query_graph, trace_path, get_code_snippet, get_file_outline (+11 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3462,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 5,
+      "repo": "microsoft/playwright-mcp",
+      "stars": 31507,
+      "language": "TypeScript",
+      "commit": "a62ea28698af",
+      "static_scan": {
+        "scan_elapsed_ms": 136,
+        "mcp_configs_scanned": 12,
+        "findings": [
+          {
+            "rule_id": "devcontainer-lifecycle-exec",
+            "severity": "high",
+            "file": ".devcontainer/devcontainer.json",
+            "line": 5,
+            "server_name": "devcontainer:privileged",
+            "message": "`devcontainer.json` enables `privileged: true`, granting root-equivalent host kernel and device access"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 86,
+            "server_name": "playwright",
+            "message": "Runs unpinned `npx @playwright/mcp@latest` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 25,
+        "schema_pin_sha256": "384c07267f3d0682169d8b3b46b5b990621c5fd42e612acb5666be422cd93ed6",
+        "sample_tools": [
+          "browser_close",
+          "browser_resize",
+          "browser_console_messages",
+          "browser_handle_dialog",
+          "browser_emulate_media",
+          "browser_evaluate"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 25 tool(s): browser_close, browser_resize, browser_console_messages, browser_handle_dialog, browser_emulate_media, browser_evaluate (+19 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 2914,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 6,
+      "repo": "ahujasid/mcp-for-blender",
+      "stars": 19168,
+      "language": "Python",
+      "commit": "b6a2ce30c146",
+      "static_scan": {
+        "scan_elapsed_ms": 195,
+        "mcp_configs_scanned": 28,
+        "findings": [
+          {
+            "rule_id": "mcp-remote-code-exec",
+            "severity": "high",
+            "file": "README.md",
+            "line": 46,
+            "server_name": "ahujasid__mcp-for-blender",
+            "message": "Setup guide pipes unpinned remote installer script (`https://www.mcp-for-blender.com/install.sh`) directly into a shell"
+          },
+          {
+            "rule_id": "mcp-remote-code-exec",
+            "severity": "high",
+            "file": "README.md",
+            "line": 52,
+            "server_name": "ahujasid__mcp-for-blender",
+            "message": "Setup guide pipes unpinned remote installer script (`https://www.mcp-for-blender.com/install.ps1`) directly into a shell"
+          },
+          {
+            "rule_id": "mcp-broad-filesystem",
+            "severity": "high",
+            "file": "README.md",
+            "line": 356,
+            "server_name": "blender",
+            "message": "Runs `docker run` with `--network=host`, exposing host loopback services directly to the container"
+          },
+          {
+            "rule_id": "plugin-compiled-binary",
+            "severity": "high",
+            "file": "integrations/claude/mcp-for-blender/vendor/mcp_for_blender-2.2.9-py3-none-any.whl",
+            "line": 1,
+            "server_name": "mcp:blender",
+            "message": "Bundled package archive (`integrations/claude/mcp-for-blender/vendor/mcp_for_blender-2.2.9-py3-none-any.whl`) inside plugin, hook, skill, or MCP config \u2014 inspect archive provenance"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 103,
+            "server_name": "blender",
+            "message": "Runs unpinned `uvx mcp-for-blender` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "integrations/codex/plugins/mcp-for-blender/.mcp.json",
+            "line": 3,
+            "server_name": "mcp-for-blender",
+            "message": "Runs unpinned `uvx mcp-for-blender` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-server-telemetry",
+            "severity": "medium",
+            "file": "src/blender_mcp/telemetry.py",
+            "line": 314,
+            "server_name": "ahujasid__mcp-for-blender",
+            "message": "Server enables default-on outbound usage telemetry (Supabase `/rest/v1/telemetry_events`; opt-out via `BLENDER_MCP_DISABLE_TELEMETRY` / `DISABLE_TELEMETRY`; docs state collected data may be used to train AI/ML models)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 10,
+        "schema_pin_sha256": "4d065a12ae263a8ad5e51c321719137bb36e3d71d403740c414144bd8523ca89",
+        "sample_tools": [
+          "get_addon_status",
+          "disable_telemetry",
+          "get_scene_info",
+          "execute_blender_code",
+          "record_trajectory_feedback",
+          "look"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 10 tool(s): get_addon_status, disable_telemetry, get_scene_info, execute_blender_code, record_trajectory_feedback, look (+4 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3057,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 7,
+      "repo": "github/github-mcp-server",
+      "stars": 18757,
+      "language": "Go",
+      "commit": "67d4dc489700",
+      "static_scan": {
+        "scan_elapsed_ms": 420,
+        "mcp_configs_scanned": 220,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 276,
+            "server_name": "github",
+            "message": "Runs unpinned container image `docker run ghcr.io/github/github-mcp-server` \u2014 pin to an immutable `@sha256:...` digest or `x.y.z` tag"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 434,
+            "server_name": "github",
+            "message": "Setup config stores plain-text credential in `env.GITHUB_PERSONAL_ACCESS_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "docs/installation-guides/install-antigravity.md",
+            "line": 41,
+            "server_name": "github",
+            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "docs/installation-guides/install-opencode.md",
+            "line": 99,
+            "server_name": "github",
+            "message": "Setup config stores plain-text credential in `environment.GITHUB_PERSONAL_ACCESS_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 46,
+        "schema_pin_sha256": "c1dc5307e026f05d997221a40c5d945e8dc215ecadbec5eb467bfe70e659de73",
+        "sample_tools": [
+          "add_comment_to_pending_review",
+          "add_issue_comment",
+          "add_reply_to_pull_request_comment",
+          "assign_copilot_to_issue",
+          "create_branch",
+          "create_or_update_file"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 46 tool(s): add_comment_to_pending_review, add_issue_comment, add_reply_to_pull_request_comment, assign_copilot_to_issue, create_branch, create_or_update_file (+40 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [
+          "Live outbound HTTPS CONNECT connection to `api.github.com:443`"
+        ],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3012,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 8,
+      "repo": "mksglu/context-mode",
+      "stars": 17435,
+      "language": "TypeScript",
+      "commit": "3cbdaeeb2ce6",
+      "static_scan": {
+        "scan_elapsed_ms": 3573,
+        "mcp_configs_scanned": 285,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 63,
+            "server_name": "mksglu__context-mode",
+            "message": "Setup command installs plugin/MCP extension from mutable GitHub branch (`mksglu/context-mode`) without a pinned tag or commit"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 9,
+        "schema_pin_sha256": "94e5d78515a5d3afa21b61f46841d4c07354daeba2535591611e1cb72186583e",
+        "sample_tools": [
+          "ctx_execute",
+          "ctx_batch",
+          "ctx_index",
+          "ctx_search",
+          "ctx_resume",
+          "ctx_stats"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 9 tool(s): ctx_execute, ctx_batch, ctx_index, ctx_search, ctx_resume, ctx_stats (+3 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 2806,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 9,
+      "repo": "tirth8205/code-review-graph",
+      "stars": 16898,
+      "language": "Python",
+      "commit": "bbdda4b9e4b4",
+      "static_scan": {
+        "scan_elapsed_ms": 473,
+        "mcp_configs_scanned": 130,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": ".mcp.json",
+            "line": 3,
+            "server_name": "code-review-graph",
+            "message": "Runs unpinned `uvx code-review-graph` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "plugin-workspace-hook-exec",
+            "severity": "medium",
+            "file": "hooks/hooks.json",
+            "line": 3,
+            "server_name": "hook:SessionStart",
+            "message": "Workspace config registers automatic shell command for `SessionStart` (`cat >/dev/null || true; command -v code-review-graph >/dev/null ...`) \u2014 opening this project can execute repo-controlled code"
+          },
+          {
+            "rule_id": "plugin-workspace-hook-exec",
+            "severity": "medium",
+            "file": "hooks/hooks.json",
+            "line": 15,
+            "server_name": "hook:PostToolUse",
+            "message": "Workspace config registers automatic shell command for `PostToolUse` (`cat >/dev/null || true; command -v code-review-graph >/dev/null ...`) \u2014 opening this project can execute repo-controlled code"
+          },
+          {
+            "rule_id": "plugin-workspace-hook-exec",
+            "severity": "medium",
+            "file": "hooks/hooks.json",
+            "line": 15,
+            "server_name": "hook:PostToolUse",
+            "message": "Workspace config registers automatic shell command for `PostToolUse` (`command -v code-review-graph >/dev/null 2>&1 && code-review-grap...`) \u2014 opening this project can execute repo-controlled code"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 30,
+        "schema_pin_sha256": "5b9b093a067b54538ca7d459ec8491bd041b63b3cfd6b28d54c8bc2e2eeb898f",
+        "sample_tools": [
+          "build_or_update_graph_tool",
+          "run_postprocess_tool",
+          "get_minimal_context_tool",
+          "get_impact_radius_tool",
+          "query_graph_tool",
+          "get_review_context_tool"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 30 tool(s): build_or_update_graph_tool, run_postprocess_tool, get_minimal_context_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool (+24 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3611,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 10,
+      "repo": "oraios/serena",
+      "stars": 16724,
+      "language": "Python",
+      "commit": "0cef825f802d",
+      "static_scan": {
+        "scan_elapsed_ms": 394,
+        "mcp_configs_scanned": 233,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "docs/02-usage/020_running.md",
+            "line": 238,
+            "server_name": "oraios__serena",
+            "message": "Setup command runs mutable container tag `docker run ghcr.io/oraios/serena:latest` without a version or `@sha256:...` digest"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 3,
+        "schema_pin_sha256": "ef78d17374071f0941ec1d3b70befc1793c7e056ca602d58948302bb98afd39d",
+        "sample_tools": [
+          "activate_project",
+          "initial_instructions",
+          "serena_repl"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 3 tool(s): activate_project, initial_instructions, serena_repl",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [
+          "Live outbound HTTPS CONNECT connection to `pypi.org:443`",
+          "Live outbound HTTPS CONNECT connection to `oraios-software.de:443`"
+        ],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3613,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 11,
+      "repo": "czlonkowski/n8n-mcp",
+      "stars": 16472,
+      "language": "TypeScript",
+      "commit": "ccede0be774f",
+      "static_scan": {
+        "scan_elapsed_ms": 6785,
+        "mcp_configs_scanned": 463,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "docs/CLAUDE_CODE_SETUP.md",
+            "line": 72,
+            "server_name": "n8n-mcp",
+            "message": "Runs unpinned `npx n8n-mcp` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "docs/CLAUDE_CODE_SETUP.md",
+            "line": 80,
+            "server_name": "n8n-mcp",
+            "message": "Setup config stores plain-text credential in `env.N8N_API_KEY` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "docs/DATABASE_CONFIGURATION.md",
+            "line": 47,
+            "server_name": "n8n-mcp",
+            "message": "Runs unpinned container image `docker run ghcr.io/czlonkowski/n8n-mcp:latest` \u2014 pin to an immutable `@sha256:...` digest or `x.y.z` tag"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "docs/HTTP_DEPLOYMENT.md",
+            "line": 359,
+            "server_name": "n8n-remote",
+            "message": "Runs unpinned `npx mcp-remote` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "docs/HTTP_DEPLOYMENT.md",
+            "line": 385,
+            "server_name": "n8n-local-http",
+            "message": "Setup config stores plain-text credential in `env.AUTH_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "docs/OFFICIAL_MCP_SETUP.md",
+            "line": 115,
+            "server_name": "n8n-mcp",
+            "message": "Setup config stores plain-text credential in `env.N8N_MCP_ACCESS_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "docs/README_CLAUDE_SETUP.md",
+            "line": 88,
+            "server_name": "n8n-remote",
+            "message": "Setup config stores plain-text credential in `env.MCP_AUTH_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-server-telemetry",
+            "severity": "medium",
+            "file": "src/telemetry/telemetry-types.ts",
+            "line": 120,
+            "server_name": "czlonkowski__n8n-mcp",
+            "message": "Server enables default-on outbound usage telemetry (`https://telemetry.n8n-mcp.com`; opt-out via `DISABLE_TELEMETRY` / `N8N_MCP_TELEMETRY_DISABLED`; docs state collected data may be used to train AI/ML models)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 7,
+        "schema_pin_sha256": "03cace4210f4a4550fef063841f135e486b4400c8b95ef6cab05cd8ad103317d",
+        "sample_tools": [
+          "tools_documentation",
+          "search_nodes",
+          "get_node",
+          "validate_node",
+          "get_template",
+          "search_templates"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 7 tool(s): tools_documentation, search_nodes, get_node, validate_node, get_template, search_templates (+1 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3465,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 12,
+      "repo": "xpzouying/xiaohongshu-mcp",
+      "stars": 15025,
+      "language": "Go",
+      "commit": "bb6fa2e20871",
+      "static_scan": {
+        "scan_elapsed_ms": 304,
+        "mcp_configs_scanned": 59,
+        "findings": [
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 493,
+            "server_name": "xiaohongshu-mcp",
+            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "plugin-skill-network",
+            "severity": "medium",
+            "file": "skills/post-to-xhs/scripts/cdp_publish.py",
+            "line": 94,
+            "server_name": "skill:post-to-xhs",
+            "message": "Skill or plugin script makes an outbound network call (via `requests.get`) \u2014 inspect script inputs for data exfiltration"
+          },
+          {
+            "rule_id": "plugin-skill-network",
+            "severity": "medium",
+            "file": "skills/post-to-xhs/scripts/chrome_launcher.py",
+            "line": 74,
+            "server_name": "skill:post-to-xhs",
+            "message": "Imported helper module makes an outbound network call (via `socket.socket`) \u2014 inspect script inputs for data exfiltration"
+          },
+          {
+            "rule_id": "plugin-skill-network",
+            "severity": "medium",
+            "file": "skills/post-to-xhs/scripts/image_downloader.py",
+            "line": 74,
+            "server_name": "skill:post-to-xhs",
+            "message": "Skill or plugin script makes an outbound network call (via `requests.get`) \u2014 inspect script inputs for data exfiltration"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "http-daemon",
+        "booted": true,
+        "handshake_ok": false,
+        "initialize_ok": false,
+        "tools_count": 0,
+        "schema_pin_sha256": null,
+        "sample_tools": [],
+        "leaktap_inventory_event": null,
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [
+          "Live outbound HTTPS CONNECT connection to `cdn.one-world.ai:443`"
+        ],
+        "live_raw_sockets": [],
+        "elapsed_ms": 4626,
+        "stderr_tail": "time=\"2026-11-17T09:09:13Z\" level=info msg=\"\u9996\u6b21\u8fd0\u884c\uff1a\u4e0b\u8f7d\u5185\u7f6e\u6d4f\u89c8\u5668 148.0.7778.215\uff08linux-x64.tar.xz\uff0c\u7ea6 140-190MB\uff0c\u4ec5\u4e00\u6b21\uff09...\" | time=\"2026-11-17T09:09:15Z\" level=info msg=\"\u89e3\u538b\u5185\u7f6e\u6d4f\u89c8\u5668 ...\""
+      }
+    },
+    {
+      "rank": 13,
+      "repo": "googleapis/mcp-toolbox",
+      "stars": 14686,
+      "language": "Go",
+      "commit": "2253fe76f09d",
+      "static_scan": {
+        "scan_elapsed_ms": 791,
+        "mcp_configs_scanned": 564,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 86,
+            "server_name": "toolbox-postgres",
+            "message": "Runs unpinned `npx @toolbox-sdk/server` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 1,
+        "schema_pin_sha256": "150369bd5794939bf1870811825a551ef969898405d8291d7a14dfa55413104f",
+        "sample_tools": [
+          "ping-sqlite"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 1 tool(s): ping-sqlite",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [
+          "Live outbound HTTPS CONNECT connection to `api.github.com:443`"
+        ],
+        "live_raw_sockets": [],
+        "elapsed_ms": 2761,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 14,
+      "repo": "apify/apify-mcp-server",
+      "stars": 13621,
+      "language": "TypeScript",
+      "commit": "97365c13fb88",
+      "static_scan": {
+        "scan_elapsed_ms": 337,
+        "mcp_configs_scanned": 212,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 160,
+            "server_name": "actors-mcp-server",
+            "message": "Runs unpinned `npx @apify/actors-mcp-server` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 162,
+            "server_name": "actors-mcp-server",
+            "message": "Setup config stores plain-text credential in `env.APIFY_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          },
+          {
+            "rule_id": "mcp-server-telemetry",
+            "severity": "medium",
+            "file": "src/telemetry.ts",
+            "line": 3,
+            "server_name": "apify__apify-mcp-server",
+            "message": "Server enables default-on outbound usage telemetry (Segment `@segment/analytics-node` + Sentry `.ingest.us.sentry.io` + Sentry `@sentry/node`)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 13,
+        "schema_pin_sha256": "36af568c0970862667757e33e28162e5f15e6006a717193570cae41d267397b2",
+        "sample_tools": [
+          "search-actors",
+          "fetch-actor-details",
+          "call-actor",
+          "get-actor-run",
+          "get-dataset-items",
+          "get-key-value-store-record"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 13 tool(s): search-actors, fetch-actor-details, call-actor, get-actor-run, get-dataset-items, get-key-value-store-record (+7 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [
+          "Live outbound telemetry connection to `o272833.ingest.us.sentry.io:443` (Sentry)"
+        ],
+        "live_connect_hosts": [
+          "Live outbound HTTPS CONNECT connection to `api.apify.com:443`"
+        ],
+        "live_raw_sockets": [],
+        "elapsed_ms": 4621,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 15,
+      "repo": "GLips/Figma-Context-MCP",
+      "stars": 13561,
+      "language": "TypeScript",
+      "commit": "c083d65c7e00",
+      "static_scan": {
+        "scan_elapsed_ms": 151,
+        "mcp_configs_scanned": 65,
+        "findings": [
+          {
+            "rule_id": "mcp-cli-arg-secret",
+            "severity": "high",
+            "file": "README.md",
+            "line": 66,
+            "server_name": "Framelink MCP for Figma",
+            "message": "Setup config passes credential via CLI flag `--figma-api-key` in MCP `args` \u2014 exposes live secrets in both plain-text config and OS process lists (`ps aux`)"
+          },
+          {
+            "rule_id": "mcp-undisclosed-telemetry",
+            "severity": "high",
+            "file": "src/telemetry/client.ts",
+            "line": 11,
+            "server_name": "GLips__Figma-Context-MCP",
+            "message": "Server enables default-on outbound usage telemetry (PostHog `us.i.posthog.com`) with no disclosure in root `README.md`"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 66,
+            "server_name": "Framelink MCP for Figma",
+            "message": "Runs unpinned `npx figma-developer-mcp` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 2,
+        "schema_pin_sha256": "f23037b2e7a51611c42d6ca92ed3e002311584e667bc8d99df8f7bb3b829bdb0",
+        "sample_tools": [
+          "get_figma_data",
+          "download_figma_images"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 2 tool(s): get_figma_data, download_figma_images",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3270,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 16,
+      "repo": "CoplayDev/unity-mcp",
+      "stars": 13049,
+      "language": "Python",
+      "commit": "5914ce5bd9d1",
+      "static_scan": {
+        "scan_elapsed_ms": 688,
+        "mcp_configs_scanned": 570,
+        "findings": [
+          {
+            "rule_id": "mcp-plaintext-http",
+            "severity": "high",
+            "file": "Server/README.md",
+            "line": 227,
+            "server_name": "UnityMCP",
+            "message": "Connects to remote MCP server over unencrypted HTTP (`http://remote-server:8080/mcp`)"
+          },
+          {
+            "rule_id": "mcp-undisclosed-telemetry",
+            "severity": "high",
+            "file": "Server/src/core/telemetry.py",
+            "line": 152,
+            "server_name": "CoplayDev__unity-mcp",
+            "message": "Server enables default-on outbound usage telemetry (`https://api-prod.coplay.dev/telemetry/events`; opt-out via `DISABLE_TELEMETRY` / `MCP_DISABLE_TELEMETRY`) with no disclosure in root `README.md`"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 55,
+            "server_name": "CoplayDev__unity-mcp",
+            "message": "Quickstart package URL (`https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main`) tracks mutable branch `HEAD` instead of a pinned release tag"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "Server/README.md",
+            "line": 53,
+            "server_name": "UnityMCP",
+            "message": "Runs unpinned `uvx mcpforunityserver` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          },
+          {
+            "rule_id": "mcp-plaintext-secret-template",
+            "severity": "medium",
+            "file": "Server/README.md",
+            "line": 229,
+            "server_name": "UnityMCP",
+            "message": "Setup config stores plain-text credential in `headers.X-API-Key` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 49,
+        "schema_pin_sha256": "5cc18af80c6098756fde6abdaf3f453213281ad7b54ec483427ca1234d8a4700",
+        "sample_tools": [
+          "batch_execute",
+          "blender_bridge",
+          "debug_request_context",
+          "execute_code",
+          "execute_menu_item",
+          "find_gameobjects"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 49 tool(s): batch_execute, blender_bridge, debug_request_context, execute_code, execute_menu_item, find_gameobjects (+43 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [
+          "Live outbound HTTPS CONNECT connection to `pypi.org:443`",
+          "Live outbound HTTPS CONNECT connection to `api-prod.coplay.dev:443`"
+        ],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3817,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 17,
+      "repo": "0x4m4/hexstrike-ai",
+      "stars": 12546,
+      "language": "Python",
+      "commit": "d689933ff579",
+      "static_scan": {
+        "scan_elapsed_ms": 147,
+        "mcp_configs_scanned": 2,
+        "findings": []
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 150,
+        "schema_pin_sha256": "6725ab0b4e6b60209e1624c642a5274b68d93d81bbf67dfd63add6d2da00f159",
+        "sample_tools": [
+          "nmap_scan",
+          "gobuster_scan",
+          "nuclei_scan",
+          "prowler_scan",
+          "trivy_scan",
+          "scout_suite_assessment"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 150 tool(s): nmap_scan, gobuster_scan, nuclei_scan, prowler_scan, trivy_scan, scout_suite_assessment (+144 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 9726,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 18,
+      "repo": "mrexodia/ida-pro-mcp",
+      "stars": 12358,
+      "language": "Python",
+      "commit": "13e480cb1198",
+      "static_scan": {
+        "scan_elapsed_ms": 221,
+        "mcp_configs_scanned": 100,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "high",
+            "file": "README.md",
+            "line": 98,
+            "server_name": "mrexodia__ida-pro-mcp",
+            "message": "Setup guide installs directly from mutable Git branch archive (`https://github.com/mrexodia/ida-pro-mcp/archive/refs/heads/main.zip`) without a release tag or commit hash"
+          },
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 62,
+            "server_name": "mrexodia__ida-pro-mcp",
+            "message": "Setup command installs plugin/MCP extension from mutable GitHub branch (`mrexodia/claude-marketplace`) without a pinned tag or commit"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": false,
+        "initialize_ok": true,
+        "tools_count": 0,
+        "schema_pin_sha256": null,
+        "sample_tools": [],
+        "leaktap_inventory_event": null,
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 12731,
+        "stderr_tail": "[MCP] No IDA instances discovered, using default 127.0.0.1:13337"
+      }
+    },
+    {
+      "rank": 19,
+      "repo": "hangwin/mcp-chrome",
+      "stars": 12186,
+      "language": "TypeScript",
+      "commit": "f48e71751e00",
+      "static_scan": {
+        "scan_elapsed_ms": 396,
+        "mcp_configs_scanned": 445,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "medium",
+            "file": "README.md",
+            "line": 133,
+            "server_name": "chrome-mcp-stdio",
+            "message": "Runs unpinned `npx node` without an exact `x.y.z` version pin (note: top-level pins still leave transitive `^`/`~` dependencies mutable without a lockfile)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 27,
+        "schema_pin_sha256": "6bc01a86e3632e69f25849ffbb27872127c07a22d35103d2d3f044c0362dff68",
+        "sample_tools": [
+          "get_windows_and_tabs",
+          "performance_start_trace",
+          "performance_stop_trace",
+          "performance_analyze_insight",
+          "chrome_read_page",
+          "chrome_computer"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 27 tool(s): get_windows_and_tabs, performance_start_trace, performance_stop_trace, performance_analyze_insight, chrome_read_page, chrome_computer (+21 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 2960,
+        "stderr_tail": ""
+      }
+    },
+    {
+      "rank": 20,
+      "repo": "LaurieWired/GhidraMCP",
+      "stars": 11969,
+      "language": "Java",
+      "commit": "1e980252087b",
+      "static_scan": {
+        "scan_elapsed_ms": 120,
+        "mcp_configs_scanned": 9,
+        "findings": [
+          {
+            "rule_id": "mcp-unpinned-package",
+            "severity": "high",
+            "file": "README.md",
+            "line": 59,
+            "server_name": "ghidra",
+            "message": "Runs unpinned `uvx git+https://github.com/LaurieWired/GhidraMCP` \u2014 pulls mutable remote package code on start (pin an exact `x.y.z` version, or vendor with a lockfile to pin transitive `^`/`~` dependencies)"
+          }
+        ]
+      },
+      "live_tap": {
+        "mode": "stdio",
+        "booted": true,
+        "handshake_ok": true,
+        "initialize_ok": true,
+        "tools_count": 30,
+        "schema_pin_sha256": "7374fdabe0576a06045d5f800c51fa25c3f77599836c33133f855a082365cbda",
+        "sample_tools": [
+          "get_program_info",
+          "list_functions",
+          "list_methods",
+          "search_functions_by_name",
+          "list_classes",
+          "list_namespaces"
+        ],
+        "leaktap_inventory_event": "Observed MCP `tools/list` response exposing 30 tool(s): get_program_info, list_functions, list_methods, search_functions_by_name, list_classes, list_namespaces (+24 more)",
+        "tool_poisoning_findings": [],
+        "live_telemetry": [],
+        "live_connect_hosts": [],
+        "live_raw_sockets": [],
+        "elapsed_ms": 3057,
+        "stderr_tail": ""
+      }
+    }
+  ]
+}
