@@ -30,6 +30,7 @@ enum ResolvedCredential {
     Standard {
         effective_rule_id: String,
         secret: String,
+        secret_key: Option<String>,
     },
     Aws {
         access_key_id: String,
@@ -95,6 +96,7 @@ pub fn verify_secret_findings(findings: &mut [TranscriptFinding], engine: &RuleE
             ResolvedCredential::Standard {
                 effective_rule_id,
                 secret: raw_secret,
+                secret_key: finding.secret_key.clone(),
             }
         };
 
@@ -123,7 +125,8 @@ pub fn verify_secret_findings(findings: &mut [TranscriptFinding], engine: &RuleE
                     ResolvedCredential::Standard {
                         effective_rule_id,
                         secret,
-                    } => check_single_credential(effective_rule_id, secret),
+                        secret_key,
+                    } => check_single_credential(effective_rule_id, secret, secret_key.as_deref()),
                     ResolvedCredential::Aws {
                         access_key_id,
                         secret_access_key,
@@ -576,7 +579,11 @@ fn endpoint_url(provider_slug: &str, default_origin: &str, path: &str) -> String
     format!("{default_origin}{path}")
 }
 
-fn check_single_credential(rule_id: &str, secret: &str) -> VerificationOutcome {
+fn check_single_credential(
+    rule_id: &str,
+    secret: &str,
+    secret_key: Option<&str>,
+) -> VerificationOutcome {
     let bearer = format!("Bearer {secret}");
 
     match rule_id {
@@ -689,6 +696,32 @@ fn check_single_credential(rule_id: &str, secret: &str) -> VerificationOutcome {
             }
         }
         "stripe-live-key" => {
+            if let Some(kn) = secret_key {
+                let lower_kn = kn.to_ascii_lowercase();
+                if [
+                    "clerk",
+                    "eleven",
+                    "workos",
+                    "polar",
+                    "lemon",
+                    "paystack",
+                    "flutterwave",
+                    "razorpay",
+                    "dodo",
+                    "resend",
+                    "trigger",
+                ]
+                .iter()
+                .any(|v| lower_kn.contains(v))
+                {
+                    return VerificationOutcome {
+                        verified: None,
+                        detail: Some(format!(
+                            "skipped Stripe check: variable `{kn}` indicates non-Stripe vendor"
+                        )),
+                    };
+                }
+            }
             let url = endpoint_url("stripe", "https://api.stripe.com", "/v1/charges?limit=1");
             let hdrs = [("Authorization", bearer.as_str())];
             classify_rest_check("Stripe API", &url, &hdrs, true)

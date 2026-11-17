@@ -1178,12 +1178,13 @@ fn return_pooled_upstream(pool: &UpstreamPool, key: PoolKey, reader: BufReader<U
     });
 }
 
-fn connect_tcp_timeout(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
-    use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+fn connect_tcp_addrs_timeout(
+    addrs: &[std::net::SocketAddr],
+    timeout: Duration,
+) -> io::Result<TcpStream> {
     let mut last_err = None;
     for addr in addrs {
-        match TcpStream::connect_timeout(&addr, timeout) {
+        match TcpStream::connect_timeout(addr, timeout) {
             Ok(s) => {
                 let _ = s.set_read_timeout(Some(Duration::from_secs(300)));
                 let _ = s.set_write_timeout(Some(Duration::from_secs(60)));
@@ -1195,9 +1196,24 @@ fn connect_tcp_timeout(host: &str, port: u16, timeout: Duration) -> io::Result<T
     Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DNS lookup empty")))
 }
 
+fn connect_tcp_timeout(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    connect_tcp_addrs_timeout(&addrs, timeout)
+}
+
 fn open_fresh_upstream(
     parsed: &ParsedUrl,
     proxy: &Option<ProxyConfig>,
+    timeout: Duration,
+) -> io::Result<BufReader<UpstreamStream>> {
+    open_fresh_upstream_with_addrs(parsed, proxy, None, timeout)
+}
+
+fn open_fresh_upstream_with_addrs(
+    parsed: &ParsedUrl,
+    proxy: &Option<ProxyConfig>,
+    pinned_addrs: Option<&[std::net::SocketAddr]>,
     timeout: Duration,
 ) -> io::Result<BufReader<UpstreamStream>> {
     let stream = match (proxy, parsed.is_https) {
@@ -1269,7 +1285,10 @@ fn open_fresh_upstream(
             UpstreamStream::Plain(tcp)
         }
         (None, true) => {
-            let tcp = connect_tcp_timeout(&parsed.host, parsed.port, timeout)?;
+            let tcp = match pinned_addrs {
+                Some(addrs) => connect_tcp_addrs_timeout(addrs, timeout)?,
+                None => connect_tcp_timeout(&parsed.host, parsed.port, timeout)?,
+            };
             let sni = rustls::pki_types::ServerName::try_from(parsed.host.clone())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
             let tls_conn = rustls::ClientConnection::new(shared_tls_config(), sni)
@@ -1277,7 +1296,10 @@ fn open_fresh_upstream(
             UpstreamStream::Tls(Box::new(rustls::StreamOwned::new(tls_conn, tcp)))
         }
         (None, false) => {
-            let tcp = connect_tcp_timeout(&parsed.host, parsed.port, timeout)?;
+            let tcp = match pinned_addrs {
+                Some(addrs) => connect_tcp_addrs_timeout(addrs, timeout)?,
+                None => connect_tcp_timeout(&parsed.host, parsed.port, timeout)?,
+            };
             UpstreamStream::Plain(tcp)
         }
     };
@@ -2285,8 +2307,67 @@ fn redact_json_secrets_in_place(
                     count += kc;
                 }
             }
-            for v in map.values_mut() {
+            for (k, v) in map.iter_mut() {
                 count += redact_json_secrets_in_place(v, depth + 1, engine);
+                if let serde_json::Value::String(s) = v {
+                    if (2..=96).contains(&k.len())
+                        && (8..=256).contains(&s.len())
+                        && !s.contains("REDACTED_BY_LEAKTAP")
+                        && !k.bytes().any(|b| matches!(b, b'"' | b'\\' | b'\r' | b'\n'))
+                    {
+                        if !s.bytes().any(|b| matches!(b, b'"' | b'\\' | b'\r' | b'\n')) {
+                            let prefix_len = k.len() + 4;
+                            let val_end = prefix_len + s.len();
+                            let probe = format!("\"{k}\": \"{s}\"");
+                            let mut val_spans: Vec<(usize, usize, String)> = Vec::new();
+                            for m in engine.scan_text(&probe) {
+                                if m.category == RuleCategory::Secret
+                                    && m.start >= prefix_len
+                                    && m.end <= val_end
+                                    && m.start < m.end
+                                {
+                                    let rel_start = m.start - prefix_len;
+                                    let rel_end = m.end - prefix_len;
+                                    if s.is_char_boundary(rel_start) && s.is_char_boundary(rel_end)
+                                    {
+                                        let repl = crate::rules::redact_replacement(
+                                            &m.rule_id,
+                                            &s[rel_start..rel_end],
+                                        );
+                                        val_spans.push((rel_start, rel_end, repl));
+                                    }
+                                }
+                            }
+                            if !val_spans.is_empty() {
+                                val_spans.sort_by_key(|(st, _, _)| *st);
+                                let mut rebuilt = String::with_capacity(s.len() + 32);
+                                let mut cursor = 0usize;
+                                let mut applied = 0usize;
+                                for (st, en, repl) in val_spans {
+                                    if st < cursor {
+                                        continue;
+                                    }
+                                    rebuilt.push_str(&s[cursor..st]);
+                                    rebuilt.push_str(&repl);
+                                    cursor = en;
+                                    applied += 1;
+                                }
+                                rebuilt.push_str(&s[cursor..]);
+                                *s = rebuilt;
+                                count += applied;
+                            }
+                        } else if let Ok(escaped_s) = serde_json::to_string(s) {
+                            let probe = format!("\"{k}\": {escaped_s}");
+                            let prefix_len = k.len() + 4;
+                            if engine.scan_text(&probe).iter().any(|m| {
+                                m.category == RuleCategory::Secret && m.start >= prefix_len
+                            }) {
+                                *s = "[REDACTED_BY_LEAKTAP]".to_string();
+                                count += 1;
+                            }
+                        }
+                    }
+                }
             }
             count
         }
@@ -2362,11 +2443,22 @@ pub(crate) fn simple_http_exchange(
     body: Option<&[u8]>,
     timeout: Duration,
 ) -> io::Result<HttpExchangeResponse> {
+    simple_http_exchange_pinned(method, target_url, None, headers, body, timeout)
+}
+
+pub(crate) fn simple_http_exchange_pinned(
+    method: &str,
+    target_url: &str,
+    pinned_addrs: Option<&[std::net::SocketAddr]>,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> io::Result<HttpExchangeResponse> {
     const MAX_EXCHANGE_RESP_BYTES: usize = 2 * 1024 * 1024;
 
     let parsed = parse_target_url(target_url)?;
     let proxy = proxy_for_url(target_url, &parsed.host);
-    let mut up_reader = open_fresh_upstream(&parsed, &proxy, timeout)?;
+    let mut up_reader = open_fresh_upstream_with_addrs(&parsed, &proxy, pinned_addrs, timeout)?;
     let _ = up_reader
         .get_ref()
         .tcp_ref()

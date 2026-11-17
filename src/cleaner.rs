@@ -131,6 +131,8 @@ pub fn clean_transcripts_filtered(
                 }
             }
             if !is_comp && total_db_hits > 0 {
+                scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-wal"));
+                scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-shm"));
                 summary.uncleaned_sqlite_secrets += total_db_hits;
                 summary.uncleaned_sqlite_files.push(disp.clone());
             } else if is_comp && initial_hits > 0 {
@@ -190,6 +192,8 @@ pub fn clean_transcripts_filtered(
                     }
                 }
                 if !is_comp && total_db_hits > 0 {
+                    scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-wal"));
+                    scrubbed_sqlite_companions.insert(companion_sqlite_path(path, "-shm"));
                     summary.uncleaned_sqlite_secrets += total_db_hits;
                     summary.uncleaned_sqlite_files.push(disp.clone());
                 } else if is_comp && initial_hits > 0 {
@@ -1863,6 +1867,33 @@ fn cleanup_temp_sqlite_family(tmp_db: &Path) {
     let _ = fs::remove_file(companion_sqlite_path(tmp_db, "-journal"));
 }
 
+fn is_sqlite_db_locked_by_another_process(path: &Path, py_bin: &str) -> bool {
+    const LOCK_PROBE_PY: &str = r#"import sqlite3, sys
+try:
+    con = sqlite3.connect(sys.argv[1], timeout=1.0, isolation_level=None)
+    con.execute("BEGIN EXCLUSIVE")
+    con.execute("ROLLBACK")
+    con.close()
+    sys.exit(0)
+except sqlite3.OperationalError as exc:
+    msg = str(exc).lower()
+    if "locked" in msg or "busy" in msg:
+        sys.exit(75)
+    sys.exit(0)
+except Exception:
+    sys.exit(0)
+"#;
+    std::process::Command::new(py_bin)
+        .arg("-c")
+        .arg(LOCK_PROBE_PY)
+        .arg(path.as_os_str())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.code() == Some(75))
+}
+
 fn try_scrub_sqlite_db(
     path: &Path,
     orig_meta: &fs::Metadata,
@@ -1881,6 +1912,14 @@ fn try_scrub_sqlite_db(
             target_fingerprint,
         );
     };
+
+    if apply && is_sqlite_db_locked_by_another_process(path, py_bin) {
+        eprintln!(
+            "[leaktap:warn] skipping live-locked SQLite database {} (close the active IDE/agent session before running `leaktap clean --apply`)",
+            shorten_home(path)
+        );
+        return Ok(None);
+    }
 
     let (tmp_db, tmp_file) = create_unique_temp_file(path, orig_meta)?;
     // Copy main SQLite DB bytes into the unique `0600` sibling temp file

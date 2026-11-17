@@ -95,8 +95,8 @@ pub fn reap_reparented_zombies_except(exclude_pid: u32) {
 
 /// Spawns a zero-root user-space background poller watching outbound TCP and connected UDP sockets
 /// opened by `root_pid` and its descendants (including reparented orphans).
-/// Note: User-space polling (`2ms` on Linux `/proc`, `150ms` on macOS `lsof`) is best-effort
-/// telemetry and may miss sub-millisecond socket bursts or unconnected `sendto()` UDP datagrams.
+/// Note: User-space polling (`15ms` on Linux `/proc`, `500ms` on macOS `lsof`) is best-effort
+/// telemetry and may miss sub-`15ms` socket bursts or unconnected `sendto()` UDP datagrams.
 pub fn spawn_socket_watcher<F>(
     root_pid: u32,
     ignore_loopback_port: Option<u16>,
@@ -114,9 +114,9 @@ where
             return;
         }
         #[cfg(target_os = "macos")]
-        let poll_interval = Duration::from_millis(150);
+        let poll_interval = Duration::from_millis(500);
         #[cfg(not(target_os = "macos"))]
-        let poll_interval = Duration::from_millis(2);
+        let poll_interval = Duration::from_millis(15);
 
         #[cfg(target_os = "macos")]
         let mut mac_cmdline_cache: std::collections::HashMap<u32, String> =

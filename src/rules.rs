@@ -168,6 +168,7 @@ pub fn parse_inline_ignore_directive(line: &str, next_line_only: bool) -> Option
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DocHints {
     pub has_gcp_sa: bool,
+    pub has_firebase_web_config: bool,
     pub has_jwk_asymmetric_kty: bool,
     pub has_jwk_d_param: bool,
     pub has_jwk_oct_kty: bool,
@@ -181,6 +182,9 @@ impl DocHints {
         let lower = text.to_ascii_lowercase();
         let has_gcp_sa =
             lower.contains("service_account") || lower.contains(".iam.gserviceaccount.com");
+        let has_firebase_web_config = lower.contains("firebaseconfig")
+            || lower.contains(".firebaseapp.com")
+            || (lower.contains("messagingsenderid") && lower.contains("appid"));
         let has_kty =
             text.contains("\"kty\"") || text.contains("\\\"kty\\\"") || text.contains("'kty'");
         let has_jwk_asymmetric_kty = has_kty
@@ -208,6 +212,7 @@ impl DocHints {
             || text.contains("\\\"stringData\\\"");
         Self {
             has_gcp_sa,
+            has_firebase_web_config,
             has_jwk_asymmetric_kty,
             has_jwk_d_param,
             has_jwk_oct_kty,
@@ -220,14 +225,20 @@ impl DocHints {
     pub fn merge(self, other: Self) -> Self {
         Self {
             has_gcp_sa: self.has_gcp_sa || other.has_gcp_sa,
+            has_firebase_web_config: self.has_firebase_web_config || other.has_firebase_web_config,
             has_jwk_asymmetric_kty: self.has_jwk_asymmetric_kty || other.has_jwk_asymmetric_kty,
             has_jwk_d_param: self.has_jwk_d_param || other.has_jwk_d_param,
             has_jwk_oct_kty: self.has_jwk_oct_kty || other.has_jwk_oct_kty,
             is_k8s_secret_manifest: self.is_k8s_secret_manifest || other.is_k8s_secret_manifest,
-            in_k8s_data_entry: self.in_k8s_data_entry || other.in_k8s_data_entry,
+            in_k8s_data_entry: self.has_k8s_data_entry_fallback(other),
             in_k8s_string_data_entry: self.in_k8s_string_data_entry
                 || other.in_k8s_string_data_entry,
         }
+    }
+
+    #[inline]
+    fn has_k8s_data_entry_fallback(self, other: Self) -> bool {
+        self.in_k8s_data_entry || other.in_k8s_data_entry
     }
 }
 
@@ -409,6 +420,23 @@ struct RuleSpec {
 
 const RULE_SPECS: &[RuleSpec] = &[
     RuleSpec {
+        id: "clerk-secret-key",
+        name: "Clerk Secret Key",
+        description: "Clerk backend secret API key (`CLERK_SECRET_KEY` / `clerkSecretKey`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &[
+            "CLERK_SECRET_KEY",
+            "clerk_secret_key",
+            "clerkSecretKey",
+            "CLERK_API_KEY",
+            "clerk_api_key",
+        ],
+        pattern: r#"(?:CLERK_SECRET_KEY|clerk_secret_key|clerkSecretKey|CLERK_API_KEY|clerk_api_key)(?:\\"|\\+u002[27]|["'])?\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\"|\\+u002[27]|["'])?(sk_(?:live|test)_[0-9a-zA-Z]{24,99})\b"#,
+        secret_group: 1,
+        min_entropy: 3.2,
+    },
+    RuleSpec {
         id: "stripe-live-key",
         name: "Stripe Live Key",
         description: "Live Stripe secret, restricted API key, or webhook signing secret.",
@@ -429,6 +457,17 @@ const RULE_SPECS: &[RuleSpec] = &[
         pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])((?:AKIA|ASIA|AGPA|AIDA|AROA)[A-Z0-9]{16})\b"#,
         secret_group: 1,
         min_entropy: 3.0,
+    },
+    RuleSpec {
+        id: "aws-bedrock-api-key",
+        name: "AWS Bedrock API Key",
+        description: "Amazon Bedrock API key (`ABSK...`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["ABSK"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(ABSK[A-Za-z0-9+/=_\-]{32,256})(?:$|[^A-Za-z0-9+/=_\-])"#,
+        secret_group: 1,
+        min_entropy: 3.6,
     },
     RuleSpec {
         id: "aws-secret-key",
@@ -470,6 +509,17 @@ const RULE_SPECS: &[RuleSpec] = &[
         pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9\-_]{32,200}|[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}))\b"#,
         secret_group: 1,
         min_entropy: 3.6,
+    },
+    RuleSpec {
+        id: "deepseek-api-key",
+        name: "DeepSeek / Hex API Key",
+        description: "DeepSeek or compatible 32-hex `sk-...` API key.",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["sk-"],
+        pattern: r#"(?:^|[^A-Za-z0-9_\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(sk-[0-9a-f]{32})\b"#,
+        secret_group: 1,
+        min_entropy: 3.4,
     },
     RuleSpec {
         id: "github-pat",
@@ -521,6 +571,17 @@ const RULE_SPECS: &[RuleSpec] = &[
         category: RuleCategory::Secret,
         anchors: &["ya29."],
         pattern: r#"(?:^|[^A-Za-z0-9_\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(ya29\.[0-9A-Za-z\-_]{40,512})\b"#,
+        secret_group: 1,
+        min_entropy: 3.6,
+    },
+    RuleSpec {
+        id: "google-oauth-refresh-token",
+        name: "Google OAuth Refresh Token",
+        description: "Long-lived Google Cloud / Workspace / Gemini OAuth 2.0 refresh token (`1//0...`).",
+        severity: Severity::Critical,
+        category: RuleCategory::Secret,
+        anchors: &["1//0"],
+        pattern: r#"(?:^|[\s"'=:,(\[{]|\\+u002[27]|\\[nrt"'])(1//0[0-9A-Za-z_\-]{40,200})\b"#,
         secret_group: 1,
         min_entropy: 3.6,
     },
@@ -1154,14 +1215,39 @@ const RULE_SPECS: &[RuleSpec] = &[
         min_entropy: 3.7,
     },
     RuleSpec {
+        id: "cli-flag-secret",
+        name: "CLI Command Secret Flag",
+        description: "Secret credential passed via CLI flags (`curl -u user:pass`, `aws configure set aws_secret_access_key`, `--password`, `--api-key`, `--access-token`).",
+        severity: Severity::High,
+        category: RuleCategory::Secret,
+        anchors: &[
+            "--password",
+            "--passphrase",
+            "--api-key",
+            "--apikey",
+            "--access-token",
+            "--auth-token",
+            "--client-secret",
+            "--secret-key",
+            "--bearer-token",
+            "aws_secret_access_key",
+            "curl ",
+        ],
+        pattern: r#"(?:(?:--(?:password|passphrase|api-key|apikey|access-token|auth-token|client-secret|secret-key|bearer-token))\s+(?:\\"|["'])?([A-Za-z0-9/+=\-_!@#$%^&*~.?]{10,180})(?:\\"|["'])?|aws\s+configure\s+set\s+(?:[A-Za-z0-9._\-]+\.)?aws_secret_access_key\s+(?:\\"|["'])?([A-Za-z0-9/+=]{40})(?:\\"|["'])?|curl\b[^\r\n;|&]{0,160}?\s(?:-u|--user)\s+(?:\\"|["'])?[A-Za-z0-9._@\-]{1,64}:([A-Za-z0-9/+=\-_!@#$%^&*~.?]{8,128})(?:\\"|["'])?)"#,
+        secret_group: 1,
+        min_entropy: 3.1,
+    },
+    RuleSpec {
         id: "dotenv-generic-secret",
         name: "Secret Assignment",
-        description: "High-entropy secret assigned to API_KEY, PASSWORD, PASSPHRASE, SECRET, TOKEN, or camelCase/snake_case secret fields in .env, shell, YAML, or JSON.",
+        description: "High-entropy secret assigned to API_KEY, ACCESS_KEY, PASSWORD, PASSPHRASE, SECRET, TOKEN, or camelCase/snake_case secret fields in .env, shell, YAML, or JSON.",
         severity: Severity::High,
         category: RuleCategory::Secret,
         anchors: &[
             "_SECRET",
             "_API_KEY",
+            "_ACCESS_KEY",
+            "_KEY",
             "_TOKEN",
             "_PRIVATE_KEY",
             "_ENCRYPTION_KEY",
@@ -1179,6 +1265,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "_PWD",
             "_PAT",
             "API_KEY",
+            "ACCESS_KEY",
             "SECRET_KEY",
             "ACCESS_TOKEN",
             "AUTH_TOKEN",
@@ -1201,6 +1288,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "APP_KEY",
             "_secret",
             "_api_key",
+            "_access_key",
             "_token",
             "_password",
             "_passphrase",
@@ -1215,6 +1303,7 @@ const RULE_SPECS: &[RuleSpec] = &[
             "_service_key",
             "_storage_key",
             "api_key",
+            "access_key",
             "password",
             "passphrase",
             "Passphrase",
@@ -1244,6 +1333,8 @@ const RULE_SPECS: &[RuleSpec] = &[
             "_APIKEY",
             "_apikey",
             "apiKey",
+            "accessKey",
+            "AccessKey",
             "secretKey",
             "clientSecret",
             "accessToken",
@@ -1265,10 +1356,11 @@ const RULE_SPECS: &[RuleSpec] = &[
             "storageKey",
             "accessKeySecret",
             "api-key",
+            "access-key",
             "client-secret",
             "access-token",
         ],
-        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSPHRASE|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passphrase|_passwd|_pass|_token|-secret|-api-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|-passphrase|ApiKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password|Passphrase)|API_KEY|APIKEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSPHRASE|PASSWD|SECRET|TOKEN|api_key|apikey|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passphrase|sshPassphrase|keyPassphrase|pgpPassphrase|passwd|apiKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?(),;]{8,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"([^\r\n"\\]{8,180})\\+"|"((?:\\["'\\bfnrt/]|[^"\\\r\n]){8,180})"|'((?:\\['"\\bfnrt/]|[^'\\\r\n]){8,180})'|\\+u0022([^\r\n"'\\]{8,180})\\+u0022|\\+u0027([^\r\n"'\\]{8,180})\\+u0027|([A-Za-z0-9/+=\-_!@#$%^&*~.?]{8,180})))"#,
+        pattern: r#"(?:^|[^A-Za-z0-9_.\-\\]|\\+u00[0-3][0-9a-fA-F]|\\\\|\\[nrt"'])(?:[A-Za-z][A-Za-z0-9_\-]*(?:_SECRET|_SECRET_KEY|_SECRET_KEY_BASE|_API_KEY|_APIKEY|_ACCESS_KEY|_APP_KEY|_APPKEY|_ACCESS_TOKEN|_AUTH_TOKEN|_OAUTH_TOKEN|_REFRESH_TOKEN|_PRIVATE_KEY|_ENCRYPTION_KEY|_MASTER_KEY|_SIGNING_KEY|_SERVICE_ROLE_KEY|_SERVICE_KEY|_STORAGE_KEY|_AUTH_KEY|_HMAC_KEY|_PASSWORD|_PASSPHRASE|_PASSWD|_PASS|_PWD|_PAT|_TOKEN|_secret|_secret_key|_secret_key_base|_api_key|_apikey|_access_key|_app_key|_appkey|_access_token|_auth_token|_oauth_token|_refresh_token|_private_key|_encryption_key|_master_key|_signing_key|_service_role_key|_service_key|_storage_key|_auth_key|_hmac_key|_password|_passphrase|_passwd|_pass|_token|-secret|-api-key|-access-key|-app-key|-access-token|-auth-token|-refresh-token|-private-key|-password|-passphrase|ApiKey|AccessKey|AppKey|SecretKey|ClientSecret|AccessToken|AuthToken|RefreshToken|PrivateKey|SigningKey|EncryptionKey|MasterKey|WebhookSecret|Password|Passphrase)|OPENAI_KEY|ANTHROPIC_KEY|DEEPSEEK_KEY|GEMINI_KEY|STRIPE_KEY|CLERK_KEY|SUPABASE_KEY|RESEND_KEY|MISTRAL_KEY|GROQ_KEY|COHERE_KEY|TOGETHER_KEY|FIREWORKS_KEY|PERPLEXITY_KEY|XAI_KEY|OPENROUTER_KEY|SENDGRID_KEY|TWILIO_KEY|DATADOG_KEY|API_KEY|APIKEY|ACCESS_KEY|SECRET_KEY|SECRET_KEY_BASE|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PWD|PGPASSWORD|CLIENT_SECRET|WEBHOOK_SECRET|ENCRYPTION_KEY|MASTER_KEY|SIGNING_KEY|APP_KEY|PASSWORD|PASSPHRASE|PASSWD|SECRET|TOKEN|api_key|apikey|access_key|client_secret|webhook_secret|encryption_key|master_key|signing_key|secret_key|secret_key_base|app_key|access_token|auth_token|refresh_token|private_key|password|passphrase|sshPassphrase|keyPassphrase|pgpPassphrase|passwd|apiKey|accessKey|appKey|secretKey|clientSecret|accessToken|authToken|refreshToken|privateKey|signingKey|encryptionKey|masterKey|webhookSecret|dbPassword|databasePassword|redisPassword|bearerToken|sessionSecret|jwtSecret|appSecret|serviceRoleKey|storageKey|accessKeySecret|api-key|access-key|app-key|client-secret|access-token)(?:\\+"|\\+u002[27]|["'])?(?:[ \t]*:[ \t]*[|>][0-9]*[-+]?[0-9]*[ \t]*(?:#[^\r\n\\]*)?(?:\r?\n|(?:\\+r)?\\+n|(?:\\+u000[dD])?\\+u000[aA])[ \t]+([A-Za-z0-9/+=\-_!@#$%^&*~.?(),;]{8,180})|\s*(?:[:=]|\\+u003[aAdD])\s*(?:\\+"([^\r\n"\\]{8,180})\\+"|"((?:\\["'\\bfnrt/]|[^"\\\r\n]){8,180})"|'((?:\\['"\\bfnrt/]|[^'\\\r\n]){8,180})'|\\+u0022([^\r\n"'\\]{8,180})\\+u0022|\\+u0027([^\r\n"'\\]{8,180})\\+u0027|([A-Za-z0-9/+=\-_!@#$%^&*~.?]{8,180})))"#,
         secret_group: 1,
         min_entropy: 3.00,
     },
@@ -1869,6 +1961,8 @@ impl RuleEngine {
                 for caps in rule.regex.captures_iter(text) {
                     let m = if rule.id == "dotenv-generic-secret" {
                         (1..=7).find_map(|g| caps.get(g))
+                    } else if rule.id == "cli-flag-secret" {
+                        (1..=3).find_map(|g| caps.get(g))
                     } else {
                         caps.get(rule.secret_group)
                     };
@@ -1908,7 +2002,8 @@ impl RuleEngine {
                         end: m.end(),
                         masked: mask_value(&rule.id, val),
                         fingerprint: fp,
-                        secret_key: extract_matched_key_name(&rule.id, full_match),
+                        secret_key: extract_matched_key_name(&rule.id, full_match)
+                            .or_else(|| infer_preceding_key_name(text, m.start())),
                         decoded_inner: None,
                     });
                 }
@@ -1946,10 +2041,12 @@ impl RuleEngine {
         }
 
         // Decode RFC 8259 inline JSON `\uXXXX` (including UTF-16 surrogates, double-escaped `\\uXXXX`
-        // in `.jsonl` transcripts), `\t`, and `\/` escapes, mapping match offsets back to exact raw byte spans.
+        // in `.jsonl` transcripts), Python/shell/C `\xXX`, `\t`, and `\/` escapes, mapping match offsets back to exact raw byte spans.
         if allow_json_unescape
             && (text.contains("\\u")
                 || text.contains("\\U")
+                || text.contains("\\x")
+                || text.contains("\\X")
                 || text.contains("\\/")
                 || text.contains("\\t"))
         {
@@ -2035,6 +2132,7 @@ impl RuleEngine {
                                 matches!(
                                     id,
                                     "dotenv-generic-secret"
+                                        | "cli-flag-secret"
                                         | "kubernetes-secret-data"
                                         | "base64-encoded-secret"
                                         | "hex-encoded-secret"
@@ -3202,6 +3300,23 @@ fn unescape_json_inline_with_spans(raw: &str) -> Option<(String, Vec<usize>, Vec
                 i = bs_end + 1;
                 continue;
             }
+            if bs_end + 3 <= len
+                && (bytes[bs_end] == b'x' || bytes[bs_end] == b'X')
+                && bytes[bs_end + 1].is_ascii_hexdigit()
+                && bytes[bs_end + 2].is_ascii_hexdigit()
+            {
+                let hi = (bytes[bs_end + 1] as char).to_digit(16).unwrap_or(0);
+                let lo = (bytes[bs_end + 2] as char).to_digit(16).unwrap_or(0);
+                let b = ((hi << 4) | lo) as u8;
+                if b.is_ascii_graphic() || matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                    out.push(b as char);
+                    starts.push(bs_start);
+                    ends.push(bs_end + 3);
+                    changed = true;
+                    i = bs_end + 3;
+                    continue;
+                }
+            }
             if bs_end + 5 <= len && (bytes[bs_end] == b'u' || bytes[bs_end] == b'U') {
                 if let Some(code) = parse_hex4(&bytes[bs_end + 1..bs_end + 5]) {
                     let first_end = bs_end + 5;
@@ -3620,6 +3735,74 @@ fn extract_matched_key_name(rule_id: &str, full_match: &str) -> Option<String> {
     Some(final_key.to_string())
 }
 
+fn infer_preceding_key_name(text: &str, match_start: usize) -> Option<String> {
+    let window_start = match_start.saturating_sub(140);
+    let mut prefix = &text[window_start..match_start];
+    while let Some(stripped) = prefix
+        .strip_suffix("u0022")
+        .or_else(|| prefix.strip_suffix("u0027"))
+    {
+        prefix = stripped.trim_end_matches('\\');
+    }
+    prefix = prefix
+        .trim_end_matches(|c: char| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '\\'));
+    if let Some(stripped) = prefix
+        .strip_suffix("u003d")
+        .or_else(|| prefix.strip_suffix("u003D"))
+        .or_else(|| prefix.strip_suffix("u003a"))
+        .or_else(|| prefix.strip_suffix("u003A"))
+    {
+        prefix = stripped.trim_end_matches('\\');
+    } else {
+        prefix = prefix.strip_suffix(['=', ':'])?;
+    }
+    while let Some(stripped) = prefix
+        .strip_suffix("u0022")
+        .or_else(|| prefix.strip_suffix("u0027"))
+    {
+        prefix = stripped.trim_end_matches('\\');
+    }
+    prefix = prefix
+        .trim_end_matches(|c: char| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '\\'));
+    let bytes = prefix.as_bytes();
+    let mut ident_start = bytes.len();
+    while ident_start > 0
+        && (bytes.len() - ident_start) <= 96
+        && (bytes[ident_start - 1].is_ascii_alphanumeric()
+            || matches!(bytes[ident_start - 1], b'_' | b'-' | b'.'))
+    {
+        ident_start -= 1;
+    }
+    let ident = &prefix[ident_start..];
+    if ident.len() < 2 || ident.len() > 96 || !ident.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    Some(ident.to_string())
+}
+
+fn is_public_supabase_anon_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let _hdr = parts.next();
+    let Some(payload_b64) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_none() || payload_b64.len() > 1024 {
+        return false;
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64.as_bytes())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64.as_bytes()));
+    let Ok(raw_bytes) = decoded else {
+        return false;
+    };
+    let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&raw_bytes) else {
+        return false;
+    };
+    let role = json_val.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    let iss = json_val.get("iss").and_then(|v| v.as_str()).unwrap_or("");
+    role == "anon" && matches!(iss, "supabase" | "supabase-demo")
+}
+
 fn passes_post_filter(
     rule: &CompiledRule,
     full_text: &str,
@@ -3654,9 +3837,84 @@ fn passes_post_filter(
         return false;
     }
 
+    if rule.category == RuleCategory::Secret {
+        if val.starts_with("AIza") {
+            if eff_hints.has_firebase_web_config {
+                return false;
+            }
+            let lower_ctx = full_text.to_ascii_lowercase();
+            if lower_ctx.contains("firebaseconfig")
+                || lower_ctx.contains(".firebaseapp.com")
+                || (lower_ctx.contains("messagingsenderid") && lower_ctx.contains("appid"))
+            {
+                return false;
+            }
+        }
+        if val.starts_with("eyJ")
+            && (val.starts_with("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkw")
+                || is_public_supabase_anon_jwt(val))
+        {
+            return false;
+        }
+    }
+
     match rule.id.as_str() {
         "aws-access-key" => {
             if val.ends_with("EXAMPLE") || val == "AKIAIOSFODNN7EXAMPLE" {
+                return false;
+            }
+        }
+        "deepseek-api-key" => {
+            let hex_part = val.strip_prefix("sk-").unwrap_or(val);
+            let digits = hex_part.bytes().filter(|b| b.is_ascii_digit()).count();
+            let alphas = hex_part
+                .bytes()
+                .filter(|b| matches!(b, b'a'..=b'f'))
+                .count();
+            if digits < 4 || alphas < 4 {
+                return false;
+            }
+        }
+        "google-oauth-refresh-token" => {
+            let sfx = val.strip_prefix("1//0").unwrap_or(val);
+            let has_upper = sfx.bytes().any(|b| b.is_ascii_uppercase());
+            let has_lower = sfx.bytes().any(|b| b.is_ascii_lowercase());
+            let has_digit = sfx.bytes().any(|b| b.is_ascii_digit());
+            if !(has_upper && has_lower && has_digit) {
+                return false;
+            }
+        }
+        "cli-flag-secret" => {
+            let lower_val = val.to_ascii_lowercase();
+            if val.starts_with('$')
+                || val.starts_with('<')
+                || val.starts_with('{')
+                || val.starts_with('-')
+                || lower_val.starts_with("http://")
+                || lower_val.starts_with("https://")
+                || looks_like_filesystem_path(val)
+                || is_uuid_like(&lower_val)
+                || [
+                    ".txt", ".json", ".yaml", ".yml", ".pem", ".key", ".env", ".toml", ".ini",
+                    ".conf",
+                ]
+                .iter()
+                .any(|ext| lower_val.ends_with(ext))
+            {
+                return false;
+            }
+            let ent = shannon_entropy(val);
+            let has_digit = val.bytes().any(|b| b.is_ascii_digit());
+            let has_pw_symbol = val
+                .bytes()
+                .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'_' | b'-' | b'.' | b'/'));
+            let pure_alpha_slug = val
+                .bytes()
+                .all(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'-' | b'.'));
+            if pure_alpha_slug && ent < 4.1 {
+                return false;
+            }
+            if !(has_digit || has_pw_symbol || ent >= 3.85) {
                 return false;
             }
         }
@@ -3737,7 +3995,10 @@ fn passes_post_filter(
         }
         "jwt-token" => {
             // Canonical RFC 7519 / jwt.io documentation token (`{"sub":"1234567890","name":"John Doe"}`)
-            if val.starts_with("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkw") {
+            // and public client-side Supabase `anon` role JWTs (`{"iss":"supabase","role":"anon"}`).
+            if val.starts_with("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkw")
+                || is_public_supabase_anon_jwt(val)
+            {
                 return false;
             }
         }
@@ -3920,12 +4181,15 @@ fn passes_post_filter(
                 "API_KEY",
                 "API-KEY",
                 "APIKEY",
+                "ACCESSKEY",
+                "_KEY",
                 "APP_KEY",
                 "APP-KEY",
                 "APPKEY",
                 "AUTH_KEY",
                 "AUTH_TOKEN",
                 "ACCESS_KEY",
+                "ACCESS-KEY",
                 "ACCESS_TOKEN",
                 "PRIVATE_KEY",
                 "SIGNING_KEY",
@@ -4020,7 +4284,8 @@ fn passes_post_filter(
             if host_only.ends_with(".cluster.local")
                 || matches!(
                     host_only,
-                    "host.docker.internal"
+                    "metadata.google.internal"
+                        | "host.docker.internal"
                         | "gateway.docker.internal"
                         | "vm.docker.internal"
                         | "host.containers.internal"
@@ -4363,6 +4628,7 @@ pub fn mask_value(rule_id: &str, raw: &str) -> String {
     if matches!(
         rule_id,
         "dotenv-generic-secret"
+            | "cli-flag-secret"
             | "url-query-secret"
             | "http-bearer-token"
             | "aws-secret-key"
@@ -4387,13 +4653,16 @@ pub fn mask_value(rule_id: &str, raw: &str) -> String {
 /// the secret value is replaced with `[REDACTED_BY_LEAKTAP]`.
 fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
     const KNOWN_PREFIXES: &[(&str, &[&str])] = &[
+        ("clerk-secret-key", &["sk_live_", "sk_test_"]),
         ("stripe-live-key", &["sk_live_", "rk_live_", "whsec_"]),
         ("aws-access-key", &["AKIA", "ASIA", "AGPA", "AIDA", "AROA"]),
+        ("aws-bedrock-api-key", &["ABSK"]),
         ("anthropic-api-key", &["sk-ant-"]),
         (
             "openai-api-key",
             &["sk-proj-", "sk-svcacct-", "sk-admin-", "sk-"],
         ),
+        ("deepseek-api-key", &["sk-"]),
         (
             "github-pat",
             &["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
@@ -4406,6 +4675,7 @@ fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
         ),
         ("gcp-api-key", &["AIza"]),
         ("google-oauth-token", &["ya29."]),
+        ("google-oauth-refresh-token", &["1//0"]),
         ("google-oauth-client-secret", &["GOCSPX-"]),
         ("supabase-secret-key", &["sb_secret_", "sbp_"]),
         (
@@ -4486,7 +4756,7 @@ fn public_vendor_prefix(rule_id: &str, raw: &str) -> Option<&'static str> {
 }
 
 /// Returns `true` when source-level `# leaktap:ignore` comments are honored for `path`.
-/// Machine-generated AI transcripts and SQLite state DBs (`.jsonl`, `.vscdb`, `.db`, `.sqlite`, `-wal`)
+/// Machine-generated AI transcripts, agent state directories, logs, backups, and SQLite state DBs
 /// never honor inline comments so untrusted prompt/tool payloads cannot self-suppress leaked secrets.
 pub fn path_allows_inline_ignore(path: Option<&std::path::Path>) -> bool {
     let Some(p) = path else {
@@ -4497,14 +4767,55 @@ pub fn path_allows_inline_ignore(path: Option<&std::path::Path>) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    !(name.ends_with(".jsonl")
+    if name.ends_with(".jsonl")
         || name.ends_with(".ndjson")
         || name.ends_with(".vscdb")
         || name.ends_with(".sqlite")
         || name.ends_with(".sqlite3")
         || name.ends_with(".db")
         || name.ends_with("-wal")
-        || name.ends_with(".wal"))
+        || name.ends_with(".wal")
+        || name.ends_with("-shm")
+        || name.ends_with("-journal")
+        || name.ends_with(".log")
+        || name.ends_with(".txt")
+        || name.ends_with(".bak")
+        || name == ".claude.json"
+        || name == "api_conversation_history.json"
+        || name == "ui_messages.json"
+        || name.starts_with(".aider")
+    {
+        return false;
+    }
+    const AGENT_STATE_DIRS: &[&str] = &[
+        ".claude",
+        ".codex",
+        ".gemini",
+        ".cursor",
+        ".windsurf",
+        ".continue",
+        ".cline",
+        ".roo",
+        ".amp",
+        ".opencode",
+        ".goose",
+        ".factory",
+        ".augment",
+        ".kiro",
+        ".amazonq",
+        ".junie",
+        ".trae",
+        ".leaktap",
+    ];
+    for comp in p.components() {
+        if let std::path::Component::Normal(os) = comp {
+            let lower = os.to_string_lossy().to_ascii_lowercase();
+            if AGENT_STATE_DIRS.contains(&lower.as_str()) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 pub fn match_suppressed_by_spec(spec: &InlineIgnoreSpec, m: &RawMatch) -> bool {

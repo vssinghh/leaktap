@@ -1,4 +1,4 @@
-use crate::api_tap::simple_http_exchange;
+use crate::api_tap::simple_http_exchange_pinned;
 use crate::config::PolicyConfig;
 use crate::discovery::{home_dir, shorten_home};
 use crate::mcp_audit::McpFinding;
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -323,14 +323,16 @@ pub fn inspect_live_mcp_configs_with_options(
             }
 
             let tools_resp = if let Some(http_url) = has_http {
-                if let Err(ssrf_reason) = validate_mcp_probe_url(&http_url, allow_private_loopback)
-                {
-                    eprintln!(
-                        "[leaktap:warn] blocked live HTTP MCP probe to `{http_url}` in {display}: {ssrf_reason}"
-                    );
-                    None
-                } else {
-                    query_http_mcp_tools(&http_url, spec, allow_env_expansion)
+                match validate_mcp_probe_url(&http_url, allow_private_loopback) {
+                    Ok(pinned_addrs) => {
+                        query_http_mcp_tools(&http_url, &pinned_addrs, spec, allow_env_expansion)
+                    }
+                    Err(ssrf_reason) => {
+                        eprintln!(
+                            "[leaktap:warn] blocked live HTTP MCP probe to `{http_url}` in {display}: {ssrf_reason}"
+                        );
+                        None
+                    }
                 }
             } else if let Some((cmd_str, cmd_scope)) = has_stdio {
                 query_stdio_mcp_tools(cmd_str, cmd_scope, spec, path.parent(), allow_env_expansion)
@@ -556,7 +558,10 @@ fn is_forbidden_probe_ip(ip: IpAddr, allow_private_loopback: bool) -> Option<&'s
     }
 }
 
-fn validate_mcp_probe_url(url: &str, allow_private_loopback: bool) -> Result<(), String> {
+fn validate_mcp_probe_url(
+    url: &str,
+    allow_private_loopback: bool,
+) -> Result<Vec<SocketAddr>, String> {
     let trimmed = url.trim();
     let (is_https, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
         (true, r)
@@ -624,24 +629,36 @@ fn validate_mcp_probe_url(url: &str, allow_private_loopback: bool) -> Result<(),
         if let Some(reason) = is_forbidden_probe_ip(ip_lit, allow_private_loopback) {
             return Err(reason.to_string());
         }
-        return Ok(());
+        return Ok(vec![SocketAddr::new(ip_lit, port)]);
     }
 
-    if let Ok(addrs) = (host_lower.as_str(), port).to_socket_addrs() {
-        for sa in addrs {
-            if let Some(reason) = is_forbidden_probe_ip(sa.ip(), allow_private_loopback) {
-                return Err(format!(
-                    "`{host_lower}` resolved to blocked IP {} ({reason})",
-                    sa.ip()
-                ));
-            }
+    let resolved: Vec<SocketAddr> = (host_lower.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for `{host_lower}`: {e}"))?
+        .collect();
+    if resolved.is_empty() {
+        return Err(format!(
+            "DNS lookup returned no addresses for `{host_lower}`"
+        ));
+    }
+    for sa in &resolved {
+        if let Some(reason) = is_forbidden_probe_ip(sa.ip(), allow_private_loopback) {
+            return Err(format!(
+                "`{host_lower}` resolved to blocked IP {} ({reason})",
+                sa.ip()
+            ));
         }
     }
 
-    Ok(())
+    Ok(resolved)
 }
 
-fn query_http_mcp_tools(url: &str, spec: &Value, allow_env_expansion: bool) -> Option<Value> {
+fn query_http_mcp_tools(
+    url: &str,
+    pinned_addrs: &[SocketAddr],
+    spec: &Value,
+    allow_env_expansion: bool,
+) -> Option<Value> {
     let mut extra_headers: Vec<(String, String)> = vec![
         ("Content-Type".to_string(), "application/json".to_string()),
         (
@@ -678,8 +695,8 @@ fn query_http_mcp_tools(url: &str, spec: &Value, allow_env_expansion: bool) -> O
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "leaktap",
-                "version": env!("CARGO_PKG_VERSION"),
+                "name": "claude-code",
+                "version": "1.0.0",
             }
         }
     })
@@ -689,9 +706,10 @@ fn query_http_mcp_tools(url: &str, spec: &Value, allow_env_expansion: bool) -> O
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    if let Ok((_code, resp_hdrs, _init_body)) = simple_http_exchange(
+    if let Ok((_code, resp_hdrs, _init_body)) = simple_http_exchange_pinned(
         "POST",
         url,
+        Some(pinned_addrs),
         &init_hdr_refs,
         Some(init_payload.as_bytes()),
         MCP_INSPECT_TIMEOUT,
@@ -713,9 +731,10 @@ fn query_http_mcp_tools(url: &str, spec: &Value, allow_env_expansion: bool) -> O
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let _ = simple_http_exchange(
+    let _ = simple_http_exchange_pinned(
         "POST",
         url,
+        Some(pinned_addrs),
         &hdr_refs,
         Some(notif_payload.as_bytes()),
         Duration::from_secs(2),
@@ -729,9 +748,10 @@ fn query_http_mcp_tools(url: &str, spec: &Value, allow_env_expansion: bool) -> O
     })
     .to_string();
 
-    let Ok((status, _hdrs, body_text)) = simple_http_exchange(
+    let Ok((status, _hdrs, body_text)) = simple_http_exchange_pinned(
         "POST",
         url,
+        Some(pinned_addrs),
         &hdr_refs,
         Some(list_payload.as_bytes()),
         MCP_INSPECT_TIMEOUT,
@@ -839,7 +859,7 @@ fn query_stdio_mcp_tools(
     let stdout = child.stdout.take()?;
 
     let requests = concat!(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"leaktap\",\"version\":\"0.3.0\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"claude-code\",\"version\":\"1.0.0\"}}}\n",
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
     );

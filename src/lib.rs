@@ -306,10 +306,11 @@ fn execute_tap(args: &TapArgs) -> i32 {
 }
 
 pub fn run_scan_report(args: &ScanArgs) -> FullScanReport {
+    let eff_paths = args.effective_paths();
     let policy = PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
         args.policy_git_ref.as_deref(),
-        &args.paths,
+        &eff_paths,
         args.trust_project_config,
         args.no_config,
     )
@@ -321,14 +322,17 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
     if let Some(ref pins) = args.mcp_pins_file {
         crate::mcp_inspect::set_configured_mcp_pins_path(Some(pins.clone()));
     }
+    let eff_paths = args.effective_paths();
     let started = Instant::now();
     let mut engine = RuleEngine::with_policy(!args.no_pii, Some(policy));
-    engine.set_honor_inline_ignore(!args.no_inline_ignore);
+    let honor_inline =
+        !args.no_inline_ignore && (args.policy_git_ref.is_none() || args.allow_inline_ignore);
+    engine.set_honor_inline_ignore(honor_inline);
     let active_checks = args.verify || (args.inspect_mcp && !args.no_mcp);
 
     if args.staged || args.git_history {
         let mut git_out = run_git_scan(
-            &args.paths,
+            &eff_paths,
             args.staged,
             args.git_history,
             args.max_commits,
@@ -342,7 +346,7 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
 
         return FullScanReport {
             roots: git_out.roots,
-            scan_paths: args.paths.clone(),
+            scan_paths: eff_paths,
             mcp_files_scanned: git_out.mcp_files_scanned,
             mcp_bytes_scanned: git_out.mcp_bytes_scanned,
             active_checks,
@@ -353,7 +357,7 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
     }
 
     let targets =
-        discover_targets_with_all_and_policy(&args.paths, args.all, !args.no_mcp, Some(policy));
+        discover_targets_with_all_and_policy(&eff_paths, args.all, !args.no_mcp, Some(policy));
     let mut transcripts = scan_transcripts(&targets.transcript_files, &engine);
     if args.verify {
         verify_secret_findings(&mut transcripts.secret_findings, &engine);
@@ -389,7 +393,7 @@ pub fn run_scan_report_with_policy(args: &ScanArgs, policy: &PolicyConfig) -> Fu
 
     FullScanReport {
         roots: targets.scanned_roots,
-        scan_paths: args.paths.clone(),
+        scan_paths: eff_paths,
         mcp_files_scanned,
         mcp_bytes_scanned,
         active_checks,
@@ -432,6 +436,7 @@ fn audit_discovered_mcp_and_plugins(
 }
 
 pub fn execute_scan(args: &ScanArgs) -> i32 {
+    let eff_paths = args.effective_paths();
     warn_ci_untrusted_project_config(
         args.trust_project_config,
         args.config.as_deref(),
@@ -440,7 +445,7 @@ pub fn execute_scan(args: &ScanArgs) -> i32 {
     let policy = match PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
         args.policy_git_ref.as_deref(),
-        &args.paths,
+        &eff_paths,
         args.trust_project_config,
         args.no_config,
     ) {
@@ -494,6 +499,7 @@ pub fn execute_scan(args: &ScanArgs) -> i32 {
 }
 
 pub fn execute_clean(args: &CleanArgs) -> i32 {
+    let eff_paths = args.effective_paths();
     warn_ci_untrusted_project_config(
         args.trust_project_config,
         args.config.as_deref(),
@@ -502,7 +508,7 @@ pub fn execute_clean(args: &CleanArgs) -> i32 {
     let policy = match PolicyConfig::load_with_git_ref(
         args.config.as_deref(),
         args.policy_git_ref.as_deref(),
-        &args.paths,
+        &eff_paths,
         args.trust_project_config,
         args.no_config,
     ) {
@@ -513,7 +519,7 @@ pub fn execute_clean(args: &CleanArgs) -> i32 {
         }
     };
     warn_ignored_untrusted_configs(&policy);
-    let targets = discover_clean_targets_with_policy(&args.paths, args.include_code, Some(&policy));
+    let targets = discover_clean_targets_with_policy(&eff_paths, args.include_code, Some(&policy));
     let create_backup = args.backup && !args.no_backup;
     match clean_transcripts_with_policy(
         &targets.transcript_files,

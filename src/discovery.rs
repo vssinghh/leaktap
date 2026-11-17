@@ -725,8 +725,7 @@ pub fn has_plugin_or_skill_root_ancestor(path: &Path) -> bool {
 }
 
 fn is_temporary_leaktap_artifact(file_name: &str) -> bool {
-    file_name.ends_with(".leaktap.bak")
-        || file_name.ends_with(".leaktap.tmp")
+    file_name.ends_with(".leaktap.tmp")
         || (file_name.contains(".leaktap.") && file_name.ends_with(".tmp"))
 }
 
@@ -744,6 +743,11 @@ fn classify_file(
     };
 
     if is_temporary_leaktap_artifact(file_name) {
+        return;
+    }
+    // During directory `clean` (`!ctx.include_mcp && !explicit_file`), preserve `<file>.leaktap.bak`
+    // backups created by `--backup` unless the user explicitly passed `--path <file>.leaktap.bak`.
+    if !ctx.include_mcp && !explicit_file && file_name.ends_with(".leaktap.bak") {
         return;
     }
 
@@ -849,7 +853,7 @@ pub fn is_safe_default_clean_target(path: &Path) -> bool {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    if is_temporary_leaktap_artifact(file_name) {
+    if is_temporary_leaktap_artifact(file_name) || file_name.ends_with(".leaktap.bak") {
         return false;
     }
     if file_name == ".claude.json" {
@@ -1331,6 +1335,7 @@ fn is_transcript_file(
         || file_name.ends_with(".json")
         || file_name.ends_with(".log")
         || file_name.ends_with(".txt")
+        || file_name.ends_with(".leaktap.bak")
         || file_name == "conversation_summaries.db"
         || file_name == "conversation_summaries.db-wal"
         || file_name == ".aider.chat.history.md"

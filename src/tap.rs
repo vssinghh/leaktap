@@ -422,7 +422,15 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     }
 
     if inspect_api_enabled {
-        emit_api_tap_bypass_warnings(program, args.quiet, &emit_cb);
+        let has_workspace_tamper = emit_api_tap_bypass_warnings(program, args.quiet, &emit_cb);
+        if block_secrets_enabled && has_workspace_tamper {
+            let _ = writeln!(
+                io::stderr(),
+                "[leaktap:CRITICAL] Workspace configuration overrides API base URL or cloud routing while `--block-secrets` is active; refusing to launch `{}` so DLP enforcement cannot be bypassed.",
+                program_stem(program)
+            );
+            return Ok(1);
+        }
     }
 
     if !args.no_net_watch && !is_info_only && !OS_SOCKET_WATCH_SUPPORTED && !args.quiet {
@@ -1069,8 +1077,9 @@ pub fn is_sensitive_env_pair(key: &str, val: &str, engine: &RuleEngine) -> bool 
     trimmed.len() >= 12 && has_sensitive_name && shannon_entropy(trimmed) >= 3.4
 }
 
-fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallback) {
+fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallback) -> bool {
     let mut warnings: Vec<String> = Vec::new();
+    let mut has_workspace_tamper = false;
     let stem = program_stem(program);
 
     for var in [
@@ -1098,16 +1107,19 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
         );
     }
 
-    // Check workspace and user `.claude/settings*.json` for `env` overrides that hijack BASE_URL or cloud routing after launch
-    let mut settings_candidates = Vec::new();
+    // Check workspace and user `.claude/settings*.json` and `.gemini/settings.json` for `env` overrides
+    // that hijack BASE_URL or cloud routing after launch
+    let mut settings_candidates: Vec<(PathBuf, bool)> = Vec::new();
     if let Ok(cwd) = env::current_dir() {
-        settings_candidates.push(cwd.join(".claude").join("settings.json"));
-        settings_candidates.push(cwd.join(".claude").join("settings.local.json"));
+        settings_candidates.push((cwd.join(".claude").join("settings.json"), true));
+        settings_candidates.push((cwd.join(".claude").join("settings.local.json"), true));
+        settings_candidates.push((cwd.join(".gemini").join("settings.json"), true));
     }
     if let Some(home) = home_dir() {
-        settings_candidates.push(home.join(".claude").join("settings.json"));
+        settings_candidates.push((home.join(".claude").join("settings.json"), false));
+        settings_candidates.push((home.join(".gemini").join("settings.json"), false));
     }
-    for cand in settings_candidates {
+    for (cand, is_workspace) in settings_candidates {
         let Ok(raw) = fs::read_to_string(&cand) else {
             continue;
         };
@@ -1133,6 +1145,9 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
                     | "CLAUDE_CODE_USE_VERTEX"
                     | "CLAUDE_CODE_USE_FOUNDRY"
             ) {
+                if is_workspace {
+                    has_workspace_tamper = true;
+                }
                 warnings.push(format!(
                     "`{}` defines `env.{k}`, which can override `leaktap`'s local API tap URL after startup",
                     cand.display()
@@ -1143,14 +1158,14 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
 
     // Check workspace and user `.codex/config.toml` for `[model_providers]` `base_url` or env overrides
     // that route Codex requests directly to a custom endpoint instead of `OPENAI_BASE_URL`.
-    let mut codex_candidates = Vec::new();
+    let mut codex_candidates: Vec<(PathBuf, bool)> = Vec::new();
     if let Ok(cwd) = env::current_dir() {
-        codex_candidates.push(cwd.join(".codex").join("config.toml"));
+        codex_candidates.push((cwd.join(".codex").join("config.toml"), true));
     }
     if let Some(home) = home_dir() {
-        codex_candidates.push(home.join(".codex").join("config.toml"));
+        codex_candidates.push((home.join(".codex").join("config.toml"), false));
     }
-    for cand in codex_candidates {
+    for (cand, is_workspace) in codex_candidates {
         let Ok(raw) = fs::read_to_string(&cand) else {
             continue;
         };
@@ -1166,6 +1181,9 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.trim().is_empty())
             {
+                if is_workspace {
+                    has_workspace_tamper = true;
+                }
                 warnings.push(format!(
                     "`{}` defines `{top_key}`, which can bypass `leaktap`'s local OpenAI API tap",
                     cand.display()
@@ -1180,6 +1198,9 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
                     .and_then(|v| v.as_str())
                     .is_some_and(|s| !s.trim().is_empty())
                 {
+                    if is_workspace {
+                        has_workspace_tamper = true;
+                    }
                     warnings.push(format!(
                         "`{}` defines `model_providers.{prov_id}.base_url`, which routes custom provider traffic around `OPENAI_BASE_URL`",
                         cand.display()
@@ -1210,6 +1231,9 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
                         | "XAI_BASE_URL"
                         | "GROQ_BASE_URL"
                 ) {
+                    if is_workspace {
+                        has_workspace_tamper = true;
+                    }
                     warnings.push(format!(
                         "`{}` defines `{k}` in env settings, which can override `leaktap`'s local API tap URL",
                         cand.display()
@@ -1231,6 +1255,8 @@ fn emit_api_tap_bypass_warnings(program: &str, quiet: bool, emit_cb: &TapCallbac
             let _ = writeln!(io::stderr(), "[leaktap:warn] {msg}");
         }
     }
+
+    has_workspace_tamper
 }
 
 fn build_loopback_no_proxy() -> String {

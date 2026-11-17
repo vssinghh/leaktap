@@ -78,7 +78,7 @@ pub enum Commands {
 
     /// Wrap any CLI or MCP server command with custom wiretap flags (cooperative DLP + user-space socket polling)
     #[command(
-        long_about = "Wrap any CLI or MCP server command with environment scrubbing, cooperative `*_BASE_URL` HTTP API inspection (`--block-secrets` / `--redact-secrets`), passive non-TTY stdio/HTTP MCP tool poisoning checks, and user-space child socket polling (`2ms` Linux `/proc`, `150ms` macOS `lsof`).\n\nSecurity boundary: `tap` operates without root or kernel hooks. A hostile binary that ignores `*_BASE_URL` env vars, finishes a sub-`2ms` socket burst, or sends connectionless UDP/DNS packets can bypass user-space interception — run untrusted code inside `bubblewrap`, `sandbox-exec`, or a network-isolated container."
+        long_about = "Wrap any CLI or MCP server command with environment scrubbing, cooperative `*_BASE_URL` HTTP API inspection (`--block-secrets` / `--redact-secrets`), passive non-TTY stdio/HTTP MCP tool poisoning checks, and user-space child socket polling (`15ms` Linux `/proc`, `500ms` macOS `lsof`).\n\nSecurity boundary: `tap` operates without root or kernel hooks. A hostile binary that ignores `*_BASE_URL` env vars, finishes a sub-`15ms` socket burst, or sends connectionless UDP/DNS packets can bypass user-space interception — run untrusted code inside `bubblewrap`, `sandbox-exec`, or a network-isolated container."
     )]
     Tap(TapArgs),
 
@@ -119,6 +119,10 @@ pub struct ScanArgs {
     #[arg(short, long = "path")]
     pub paths: Vec<PathBuf>,
 
+    /// Optional positional file(s) or folder(s) to scan (`leaktap scan .` or `leaktap scan /path/to/dir`)
+    #[arg(value_name = "PATHS")]
+    pub positional_paths: Vec<PathBuf>,
+
     /// Scan both the full current workspace directory AND all user-home global AI agent directories together
     #[arg(long)]
     pub all: bool,
@@ -146,6 +150,10 @@ pub struct ScanArgs {
     /// Ignore inline `# leaktap:ignore` / `// leaktap:allow` suppression comments in scanned text files
     #[arg(long)]
     pub no_inline_ignore: bool,
+
+    /// Honor inline `# leaktap:ignore` comments in source files even when `--policy-git-ref` is active
+    #[arg(long)]
+    pub allow_inline_ignore: bool,
 
     /// CI / pre-commit gating shorthand: equivalent to `--fail-on high` when `--fail-on` is at its default `none` (exits 1 on HIGH or CRITICAL findings)
     #[arg(long)]
@@ -192,6 +200,18 @@ pub struct ScanArgs {
     pub update_mcp_pins: bool,
 }
 
+impl ScanArgs {
+    pub fn effective_paths(&self) -> Vec<PathBuf> {
+        let mut out = self.paths.clone();
+        for p in &self.positional_paths {
+            if !out.contains(p) {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -214,6 +234,10 @@ pub struct CleanArgs {
     /// Specific file(s) or folder(s) to clean (defaults to auto-discovered agent session folders)
     #[arg(short, long = "path")]
     pub paths: Vec<PathBuf>,
+
+    /// Optional positional file(s) or folder(s) to clean (`leaktap clean /path/to/session.jsonl --apply`)
+    #[arg(value_name = "PATHS")]
+    pub positional_paths: Vec<PathBuf>,
 
     /// Write scrubbed files to disk (without --apply, runs a safe read-only preview)
     #[arg(long)]
@@ -246,6 +270,18 @@ pub struct CleanArgs {
     /// Ignore all policy files
     #[arg(skip)]
     pub no_config: bool,
+}
+
+impl CleanArgs {
+    pub fn effective_paths(&self) -> Vec<PathBuf> {
+        let mut out = self.paths.clone();
+        for p in &self.positional_paths {
+            if !out.contains(p) {
+                out.push(p.clone());
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Parser)]
