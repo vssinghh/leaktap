@@ -62,6 +62,7 @@ impl GitBlobSandbox {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let candidate = base.join(format!("leaktap-git-{pid}-{seq}-{nanos}-{attempt}"));
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             {

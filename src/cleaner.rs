@@ -1,5 +1,7 @@
 use crate::config::PolicyConfig;
-use crate::discovery::{has_agent_session_ancestor, shorten_home};
+#[cfg(unix)]
+use crate::discovery::has_agent_session_ancestor;
+use crate::discovery::shorten_home;
 use crate::rules::{redact_replacement, RuleEngine};
 use crate::scanner::{
     contains_subslice, count_sqlite_secret_hits, decode_utf16_with_endianness,

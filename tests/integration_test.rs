@@ -7142,9 +7142,22 @@ fn round8_ps_encoded_utf16_b64_standalone_skill_decoy_urls_skip_dirs_k8s_diff_an
     );
 }
 
+fn test_py_bin() -> &'static str {
+    ["python3", "python"]
+        .into_iter()
+        .find(|&cand| {
+            Command::new(cand)
+                .args(["-c", "import sqlite3"])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .expect("python3 or python with sqlite3 must be available in CI")
+}
+
 #[test]
 fn round9_sqlite_bare_columns_without_rowid_wal_and_clean() {
     let bin = env!("CARGO_BIN_EXE_leaktap");
+    let py = test_py_bin();
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("state.vscdb");
 
@@ -7172,7 +7185,7 @@ conn.execute("PRAGMA wal_autocheckpoint=0")
 conn.execute("INSERT INTO CompositeState VALUES ('env', 'DD_API_KEY', ?)", (d_tok,))
 conn.commit()
 "#;
-    let st = Command::new("python3")
+    let st = Command::new(py)
         .args([
             "-c",
             py_setup,
@@ -7242,7 +7255,7 @@ assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 theme = conn.execute("SELECT value FROM ItemTable WHERE key='uiTheme'").fetchone()[0]
 assert theme == b"vs-dark", f"unexpected uiTheme: {theme}"
 "#;
-    let vst = Command::new("python3")
+    let vst = Command::new(py)
         .args(["-c", verify_py, db_path.to_str().unwrap()])
         .status()
         .expect("verify sqlite integrity");
@@ -7369,6 +7382,7 @@ fn round9_tap_stdio_pin_isolation_and_api_tap_tools_and_indirect_injection() {
     use std::time::Duration;
 
     let bin = env!("CARGO_BIN_EXE_leaktap");
+    let py = test_py_bin();
     let tmp = TempDir::new().unwrap();
     let pins_file = tmp.path().join("shared_tap_pins.json");
     let log_a = tmp.path().join("tap_a.jsonl");
@@ -7407,7 +7421,7 @@ print(json.dumps({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"beta_tool",
             "--log",
             log_a.to_str().unwrap(),
             "--",
-            "python3",
+            py,
             srv_a.to_str().unwrap(),
         ])
         .output()
@@ -7426,7 +7440,7 @@ print(json.dumps({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"beta_tool",
             "--log",
             log_b.to_str().unwrap(),
             "--",
-            "python3",
+            py,
             srv_b.to_str().unwrap(),
         ])
         .output()
@@ -8438,6 +8452,7 @@ fn round10_cross_file_exfil_ide_devcontainer_npm_rules_ci_pins_and_pure_rust_sql
         ),
     )
     .unwrap();
+    let py = test_py_bin();
     let pin_log = pins_dir.path().join("pin_tap.jsonl");
     for _ in 0..2 {
         let out = Command::new(bin)
@@ -8453,7 +8468,7 @@ fn round10_cross_file_exfil_ide_devcontainer_npm_rules_ci_pins_and_pure_rust_sql
                 "--log",
                 pin_log.to_str().unwrap(),
                 "--",
-                "python3",
+                py,
                 mut_srv.to_str().unwrap(),
             ])
             .output()
@@ -8505,7 +8520,7 @@ shutil.copy2(wal_src, pure_db)
 shutil.copy2(wal_src + "-wal", pure_wal)
 c2.close()
 "#;
-    let py_setup_status = Command::new("python3")
+    let py_setup_status = Command::new(py)
         .args([
             "-c",
             setup_py,
@@ -8549,7 +8564,7 @@ assert chk == "ok", f"integrity_check={chk}"
 assert tok not in val, f"secret still in protobuf BLOB: {val!r}"
 assert val[0] == 0x0a and val[1] == len(tok) and val.endswith(b"\x12\x04done"), f"protobuf framing corrupted: {val!r}"
 "#;
-    assert!(Command::new("python3")
+    assert!(Command::new(py)
         .args([
             "-c",
             verify_proto_py,
@@ -8589,7 +8604,7 @@ assert len(rows) == 2, f"expected BOTH B-tree row and WAL-frame row (proving val
 for r in rows:
     assert tok not in r and "REDACTED" in r, f"expected redacted prompt, got: {r!r}"
 "#;
-    let pure_verify_out = Command::new("python3")
+    let pure_verify_out = Command::new(py)
         .args([
             "-c",
             verify_pure_py,
@@ -8612,6 +8627,7 @@ fn round10_final_polish_regression_suite() {
     use std::net::TcpListener;
 
     let bin = env!("CARGO_BIN_EXE_leaktap");
+    let py = test_py_bin();
     let root = TempDir::new().unwrap();
 
     // 1. Positional `leaktap scan <dir>`, `.leaktap.bak` scanned by `scan` yet skipped by directory `clean`
@@ -8790,7 +8806,7 @@ sys.stdout.write("LOCKED\n")
 sys.stdout.flush()
 time.sleep(10)
 "#;
-    let mut holder = Command::new("python3")
+    let mut holder = Command::new(py)
         .args(["-c", init_lock_py, locked_db.to_str().unwrap(), &sql_tok])
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -8855,7 +8871,8 @@ import os, urllib.request
 url = os.environ["OPENAI_BASE_URL"].rstrip("/") + "/chat/completions"
 payload = b'{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"metadata":{"dbPassword":"K9#mP2$vL8@ProdDb99!"}}'
 req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "Authorization": "Bearer dummy"}, method="POST")
-with urllib.request.urlopen(req, timeout=5) as resp:
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(req, timeout=5) as resp:
     assert resp.status == 200
 "#;
     let redact_out = Command::new(bin)
@@ -8868,7 +8885,7 @@ with urllib.request.urlopen(req, timeout=5) as resp:
             "--no-net-watch",
             "--no-live-log",
             "--",
-            "python3",
+            py,
             "-c",
             py_client,
         ])

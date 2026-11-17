@@ -965,12 +965,8 @@ fn is_top_level_instruction_or_plugin_file(path: &Path, file_name: &str) -> bool
             return true;
         }
     }
-    if (file_name.ends_with(".instructions.md") || file_name.ends_with(".prompt.md"))
+    (file_name.ends_with(".instructions.md") || file_name.ends_with(".prompt.md"))
         && path.to_string_lossy().contains(".github")
-    {
-        return true;
-    }
-    false
 }
 
 /// Detects compiled native / WebAssembly / bytecode binaries (`ELF`, `Mach-O`, `PE`, `Wasm`, `.node`, `.so`, `.dylib`, `.dll`, `.exe`, `.pyc`).

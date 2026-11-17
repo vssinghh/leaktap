@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -854,6 +856,7 @@ fn query_stdio_mcp_tools(
         .stderr(Stdio::null());
 
     let mut child = cmd.spawn().ok()?;
+    #[cfg(unix)]
     let child_pid = child.id();
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
