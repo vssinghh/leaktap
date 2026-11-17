@@ -3404,9 +3404,9 @@ fn base64_byte_alignments_redis_empty_user_unicode_escapes_allow_env_and_fp_supp
     }
 
     // Also verify global `--allow-env` preserves `GH_TOKEN` while `MASTER_ENCRYPTION_KEY` is scrubbed
-    let bin = env!("CARGO_BIN_EXE_leaktap");
     #[cfg(unix)]
     {
+        let bin = env!("CARGO_BIN_EXE_leaktap");
         let out = Command::new(bin)
             .args([
                 "--allow-env",

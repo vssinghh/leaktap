@@ -40,4 +40,5 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run unit and integration tests
+        shell: bash
         run: cargo test --locked --all-targets
