@@ -607,3 +607,134 @@ npm install -g mcp-chrome-bridge
         unpinned[0]
     );
 }
+
+#[test]
+fn skill_network_line_numbers_and_telemetry_subfolder_opt_in_nuances() {
+    // 1. Skill scripts with preceding comments must report the exact 1-indexed source line
+    //    and ignore local 127.0.0.1 CDP helpers (`CDP_HOST = "127.0.0.1"` / `host: str = "127.0.0.1"`).
+    let skill_repo = TempDir::new().expect("skill_repo");
+    let scripts_dir = skill_repo.path().join("skills/publisher/scripts");
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::write(
+        skill_repo.path().join("skills/publisher/SKILL.md"),
+        "---\nname: publisher\n---\nRun `python scripts/main.py`.\n",
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("cdp_helper.py"),
+        "CDP_HOST = \"127.0.0.1\"\nCDP_PORT = 9222\n# long comment line 1\n# long comment line 2\nclass Cdp:\n    def __init__(self):\n        self.host = CDP_HOST\n        self.port = CDP_PORT\n    def tabs(self):\n        url = f\"http://{self.host}:{self.port}/json\"\n        return requests.get(url, timeout=5)\n",
+    )
+    .unwrap();
+    fs::write(
+        scripts_dir.join("port_check.py"),
+        "# comment a\n# comment b\ndef is_port_open(port: int, host: str = \"127.0.0.1\") -> bool:\n    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:\n        return s.connect_ex((host, port)) == 0\n",
+    )
+    .unwrap();
+    // Line 6 is `resp = requests.get(url, timeout=10)` after 4 comment lines
+    fs::write(
+        scripts_dir.join("downloader.py"),
+        "# comment line 1 — extra text to shift byte offsets significantly\n# comment line 2 — extra text to shift byte offsets significantly\n# comment line 3 — extra text to shift byte offsets significantly\n# comment line 4 — extra text to shift byte offsets significantly\ndef fetch_img(url: str):\n    resp = requests.get(url, timeout=10)\n    return resp\n",
+    )
+    .unwrap();
+
+    let rep_skill = run_scan_report(&ScanArgs {
+        paths: vec![skill_repo.path().to_path_buf()],
+        no_pii: true,
+        ..Default::default()
+    });
+    let net_hits: Vec<_> = rep_skill
+        .mcp_findings
+        .iter()
+        .filter(|f| f.rule_id == "plugin-skill-network")
+        .collect();
+    assert_eq!(
+        net_hits.len(),
+        1,
+        "expected only external downloader.py to trigger plugin-skill-network, got: {net_hits:?}"
+    );
+    assert!(
+        net_hits[0].config_file.ends_with("downloader.py") && net_hits[0].line == 6,
+        "expected exact line 6 on downloader.py, got: {:?}",
+        net_hits[0]
+    );
+
+    // 2. Sub-folder telemetry disclosure (`Server/README.md` without root `README.md`) is noted fairly,
+    //    and opt-in-only AI training terms (`TERMS_AND_CONDITIONS.md`) do not tag default-on usage telemetry.
+    let sub_repo = TempDir::new().expect("sub_repo");
+    fs::create_dir_all(sub_repo.path().join("Server/src")).unwrap();
+    fs::write(
+        sub_repo.path().join("pyproject.toml"),
+        "[project]\nname = \"unity-bridge-mcp\"\ndependencies = [\"fastmcp>=0.4.0\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        sub_repo.path().join("README.md"),
+        "# Unity Bridge MCP\nQuickstart guide without mentioning analytics.\n",
+    )
+    .unwrap();
+    fs::write(
+        sub_repo.path().join("Server/README.md"),
+        "# Server\nSet `DISABLE_TELEMETRY=1` to opt out of anonymous telemetry.\n",
+    )
+    .unwrap();
+    fs::write(
+        sub_repo.path().join("Server/src/telemetry.py"),
+        "import httpx\nENDPOINT = 'https://api.example.com/telemetry/events'\ndef send(ev):\n    if os.getenv('DISABLE_TELEMETRY'): return\n    httpx.post(ENDPOINT, json=ev)\n",
+    )
+    .unwrap();
+    let rep_sub = run_scan_report(&ScanArgs {
+        paths: vec![sub_repo.path().to_path_buf()],
+        no_pii: true,
+        ..Default::default()
+    });
+    let sub_tel = rep_sub
+        .mcp_findings
+        .iter()
+        .find(|f| f.rule_id == "mcp-undisclosed-telemetry")
+        .expect("expected mcp-undisclosed-telemetry when root README omits disclosure");
+    assert!(
+        sub_tel
+            .message
+            .contains("opt-out documented in sub-folder docs"),
+        "expected sub-folder disclosure note in message: {}",
+        sub_tel.message
+    );
+
+    let optin_ml_repo = TempDir::new().expect("optin_ml_repo");
+    fs::create_dir_all(optin_ml_repo.path().join("src")).unwrap();
+    fs::write(
+        optin_ml_repo.path().join("pyproject.toml"),
+        "[project]\nname = \"blender-style-mcp\"\ndependencies = [\"mcp>=1.0.0\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        optin_ml_repo.path().join("README.md"),
+        "# Blender Style MCP\nTelemetry is **opt-in**. Minimal anonymous usage ping can be disabled with `DISABLE_TELEMETRY=true`. Telemetry data may be used to train AI models.\n",
+    )
+    .unwrap();
+    fs::write(
+        optin_ml_repo.path().join("TERMS_AND_CONDITIONS.md"),
+        "Telemetry is strictly opt-in. If you opt in to telemetry, your data may be used to train machine learning models.\n",
+    )
+    .unwrap();
+    fs::write(
+        optin_ml_repo.path().join("src/telemetry.py"),
+        "import httpx\nURL = 'https://xyz.supabase.co/rest/v1/telemetry_events'\ndef send():\n    if os.getenv('DISABLE_TELEMETRY'): return\n    httpx.post(URL)\n",
+    )
+    .unwrap();
+    let rep_optin = run_scan_report(&ScanArgs {
+        paths: vec![optin_ml_repo.path().to_path_buf()],
+        no_pii: true,
+        ..Default::default()
+    });
+    let optin_tel = rep_optin
+        .mcp_findings
+        .iter()
+        .find(|f| f.rule_id == "mcp-server-telemetry")
+        .expect("expected mcp-server-telemetry");
+    assert!(
+        !optin_tel.message.contains("train AI/ML models"),
+        "opt-in-only AI training tier must not be attributed to default-on usage telemetry: {}",
+        optin_tel.message
+    );
+}

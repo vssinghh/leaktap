@@ -13,7 +13,7 @@
   <text x="462.5" y="22.5" text-anchor="middle" fill="#8b949e" class="t" style="font-size:12px">leaktap ui — interactive 4-tab terminal UI</text>
   <g>
     <path d="M 25.8 47.5 H 21.9 V 57.3" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
-    <text x="33.6" y="52.0" fill="#e6edf3" xml:space="preserve" class="t">leaktap v0.4.0 — 5 file(s) scanned in 178ms</text>
+    <text x="33.6" y="52.0" fill="#e6edf3" xml:space="preserve" class="t">leaktap v0.4.1 — 5 file(s) scanned in 178ms</text>
     <line x1="369.0" y1="47.5" x2="899.4" y2="47.5" stroke="#e6edf3" stroke-width="1.2"/>
     <path d="M 899.4 47.5 H 903.3 V 57.3" fill="none" stroke="#e6edf3" stroke-width="1.2"/>
   </g>

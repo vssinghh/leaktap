@@ -1398,18 +1398,36 @@ fn detect_non_official_external_network_call(text: &str) -> Option<(usize, Strin
         return None;
     }
 
+    let file_has_loopback_cdp_host = {
+        let low = code.to_ascii_lowercase();
+        low.contains("cdp_host = \"127.0.0.1\"")
+            || low.contains("cdp_host = '127.0.0.1'")
+            || low.contains("cdp_host = \"localhost\"")
+            || low.contains("cdp_host = 'localhost'")
+    };
     let resolved_url_vars = resolve_url_identifiers(&code);
     for mat in re.net_call.find_iter(&code) {
         if is_false_positive_cli_net_token(&code, mat.start(), mat.end()) {
             continue;
         }
         let line_start = code[..mat.start()].rfind('\n').map_or(0, |i| i + 1);
+        let mut lookback_start = line_start;
+        for _ in 0..3 {
+            if lookback_start == 0 {
+                break;
+            }
+            lookback_start = code[..lookback_start - 1].rfind('\n').map_or(0, |i| i + 1);
+        }
         let window_end = (mat.end() + 240).min(code.len());
         let mut safe_end = window_end;
         while safe_end < code.len() && !code.is_char_boundary(safe_end) {
             safe_end += 1;
         }
         let call_window = &code[line_start..safe_end];
+        let enclosing_window = &code[lookback_start..safe_end];
+        if file_has_loopback_cdp_host && enclosing_window.contains("{self.host}:{self.port}/json") {
+            continue;
+        }
         let urls = urls_for_call_window(call_window, &resolved_url_vars);
         let non_local_urls: Vec<&str> = urls
             .iter()
@@ -1419,14 +1437,14 @@ fn detect_non_official_external_network_call(text: &str) -> Option<(usize, Strin
         if !urls.is_empty() && non_local_urls.is_empty() {
             continue;
         }
-        if urls.is_empty() && call_window_targets_localhost_only(call_window) {
+        if urls.is_empty() && call_window_targets_localhost_only(enclosing_window) {
             continue;
         }
         if !non_local_urls.is_empty() && non_local_urls.iter().all(|u| is_official_llm_api_url(u)) {
             continue;
         }
 
-        let ln = line_at_offset(text, mat.start());
+        let ln = line_at_offset(&code, mat.start());
         if let Some(&first_url) = non_local_urls.first() {
             let host = extract_url_host(first_url).unwrap_or(first_url);
             return Some((ln, format!("`{host}`")));
@@ -2984,7 +3002,17 @@ pub fn is_localhost_url(url: &str) -> bool {
     }
 
     let host = if let Some((h, port_str)) = authority.split_once(':') {
-        if port_str.contains(':') || port_str.parse::<u16>().is_err() {
+        let is_port_template = port_str
+            .strip_prefix("${")
+            .or_else(|| port_str.strip_prefix('{'))
+            .and_then(|s| s.strip_suffix('}'))
+            .is_some_and(|inner| {
+                !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+            });
+        if port_str.contains(':') || (!is_port_template && port_str.parse::<u16>().is_err()) {
             return false;
         }
         h

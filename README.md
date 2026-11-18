@@ -7,7 +7,7 @@
 
 Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`codex`), **Antigravity CLI** (`agy`), **Gemini CLI** (`gemini`), and local MCP servers (plus OpenRouter, DeepSeek, xAI, and Groq API endpoints). Offline `scan` also checks local state, MCP configs, and rule files left by Cursor, Windsurf, Cline, Roo Code, Zed, JetBrains Junie, Amazon Q, Kiro, Augment, Trae, Continue, and Aider.
 
-> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred MCP servers on GitHub (`464,529` stars combined). **90% (`18 / 20`)** use unpinned installs or mutable tags, **35% (`7 / 20`)** put API keys in JSON configs or CLI flags, **30% (`6 / 20`)** ship default-on telemetry (**2** without `README` notice), and **25% (`5 / 20`)** made non-API outbound HTTPS calls on startup (telemetry, update checks, or a `140` to `190 MB` browser download) before a single tool was called.
+> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred standalone MCP servers on GitHub (`629,809` stars combined). **90% (`18 / 20`)** use unpinned packages, `:latest` tags, or mutable branches, **35% (`7 / 20`)** guide users to put raw API keys in JSON configs or CLI flags, **30% (`6 / 20`)** ship default-on telemetry in static scans (**2** without root `README` notice, plus a **7th** caught live on the wire), and **25% (`5 / 20`)** made non-API outbound HTTPS calls on startup (telemetry, update checks, or a `140` to `190 MB` browser download) before a single tool was called.
 
 ![leaktap offline scan and live secret blocking](docs/assets/demo.svg)
 
@@ -16,15 +16,15 @@ Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`cod
 Build from a tagged release with `cargo`:
 
 ```bash
-cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.0 --locked
+cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.1 --locked
 ```
 
 Download a prebuilt binary on macOS or Linux (read the script before running it):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.1/install.sh
 less install.sh
-LEAKTAP_VERSION=v0.4.0 sh install.sh
+LEAKTAP_VERSION=v0.4.1 sh install.sh
 
 # Optional: verify GitHub Actions build attestation
 gh attestation verify ~/.local/bin/leaktap --repo vssinghh/leaktap
@@ -38,7 +38,7 @@ When you run `claude`, `codex`, or `agy` in a repo, it reads `.env` files, cloud
 
 Third-party MCP servers, plugins, and cloned repos add a second problem. A repo or plugin can register shell hooks in `.claude/settings.json` or `hooks.json`, auto-run commands in `.vscode/tasks.json`, `devcontainer.json`, or `package.json`, launch unpinned `npx` or `uvx` packages, override `ANTHROPIC_BASE_URL`, read `~/.ssh` or `~/.aws`, or sneak hidden instructions into `SKILL.md`, `CLAUDE.md`, or MCP tool descriptions.
 
-File sandboxes like `bubblewrap` and `sandbox-exec` can block folders outside your repo, but the CLI still needs read access to your workspace and access to the internet. Full HTTPS MITM proxies require custom root certificates and extra setup. `leaktap` is a single Rust binary that scans local state offline in ~120ms, scrubs leaked keys from text logs and SQLite databases, and inspects live API calls over localhost without installing root certificates.
+File sandboxes like `bubblewrap` and `sandbox-exec` can block folders outside your repo, but the CLI still needs read access to your workspace and access to the internet. Full HTTPS MITM proxies require custom root certificates and extra setup. `leaktap` is a single Rust binary that scans local state offline in ~150ms, scrubs leaked keys from text logs and SQLite databases, and inspects live API calls over localhost without installing root certificates.
 
 ## Usage
 

@@ -8,18 +8,18 @@ Supports **Claude Code**, **Codex CLI**, **Antigravity CLI**, **Gemini CLI**, an
 
 ```bash
 # Scan local logs, SQLite databases, MCP configs, and installed plugins offline
-npx leaktap@0.4.0
+npx leaktap@0.4.1
 
 # Open the interactive terminal UI
-npx leaktap@0.4.0 ui
+npx leaktap@0.4.1 ui
 
 # Start Claude Code, Codex CLI, or Antigravity CLI with live watching, blocking, or redaction
-npx leaktap@0.4.0 claude
-npx leaktap@0.4.0 --block-secrets claude
-npx leaktap@0.4.0 --redact-secrets claude
-npx leaktap@0.4.0 --allow-env GH_TOKEN claude
-npx leaktap@0.4.0 codex
-npx leaktap@0.4.0 agy
+npx leaktap@0.4.1 claude
+npx leaktap@0.4.1 --block-secrets claude
+npx leaktap@0.4.1 --redact-secrets claude
+npx leaktap@0.4.1 --allow-env GH_TOKEN claude
+npx leaktap@0.4.1 codex
+npx leaktap@0.4.1 agy
 ```
 
 Docs, `.leaktap.toml` policy examples, and limitations: https://github.com/vssinghh/leaktap
