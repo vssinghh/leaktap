@@ -31,11 +31,15 @@ import threading
 import time
 from pathlib import Path
 
+# Excluded SDKs, protocol specs, curated lists, and general CLI/web/workflow platforms
+# whose primary product is not a dedicated standalone MCP server.
 EXCLUDED_REPOS = {
+    # Curated lists, tutorials, specs, and SDKs / wrapper libraries
     "punkpeye/awesome-mcp-servers",
     "appcypher/awesome-mcp-servers",
     "wong2/awesome-mcp-servers",
     "PrefectHQ/fastmcp",
+    "tadata-org/fastapi_mcp",
     "modelcontextprotocol/inspector",
     "modelcontextprotocol/typescript-sdk",
     "modelcontextprotocol/python-sdk",
@@ -45,12 +49,37 @@ EXCLUDED_REPOS = {
     "modelcontextprotocol/go-sdk",
     "modelcontextprotocol/specification",
     "modelcontextprotocol/modelcontextprotocol",
+    "modelcontextprotocol/registry",
     "mcp-use/mcp-use",
     "microsoft/mcp-for-beginners",
     "lastmile-ai/mcp-agent",
     "cline/mcp-marketplace",
-    "activepieces/activepieces",
+    # General CLI agents, web apps, and workflow platforms (not standalone MCP servers)
     "n8n-io/n8n",
+    "activepieces/activepieces",
+    "triggerdotdev/trigger.dev",
+    "pipedreamhq/pipedream",
+    "ComposioHQ/composio",
+    "CopilotKit/CopilotKit",
+    "google-gemini/gemini-cli",
+    "D4Vinci/Scrapling",
+    "koala73/worldmonitor",
+    "ruvnet/ruflo",
+    "sansan0/TrendRadar",
+    "reactive-resume/reactive-resume",
+    "bytedance/UI-TARS-desktop",
+    "DayuanJiang/next-ai-draw-io",
+    "assafelovic/gpt-researcher",
+    "yikart/AiToEarn",
+    "pascalorg/editor",
+    "1Panel-dev/MaxKB",
+    "Evil0ctal/Douyin_TikTok_Download_API",
+    "modelscope/FunASR",
+    "wanshuiyin/Auto-claude-code-research-in-sleep",
+    "nukeop/nuclear",
+    "budtmo/docker-android",
+    "open-metadata/OpenMetadata",
+    "liketrek/TREK",
 }
 
 EXCLUDED_NAME_SUBSTRINGS = (
@@ -85,9 +114,9 @@ def resolve_leaktap_bin(explicit: str | None) -> str:
 
 
 def discover_top_mcp_repos(limit: int) -> list[dict]:
-    """Discover top-starred MCP server repositories on GitHub via `gh search repos`."""
+    """Discover top-starred standalone MCP server repositories on GitHub via `gh search repos`."""
     seen: dict[str, dict] = {}
-    for query in ("mcp in:name,description", "topic:mcp-server"):
+    for query in ("mcp in:name", "topic:mcp-server"):
         res = subprocess.run(
             [
                 "gh",
@@ -289,7 +318,7 @@ def run_layer2_stdio_tap(
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "leaktap-audit", "version": "0.4.0"},
+                    "clientInfo": {"name": "leaktap-audit", "version": "0.4.1"},
                 },
             }
             assert proc.stdin is not None
@@ -502,6 +531,11 @@ def main() -> int:
         help="Re-run static `leaktap scan` against exact repos/commits in an existing JSON dataset",
     )
     parser.add_argument(
+        "--refresh-stars",
+        action="store_true",
+        help="Refresh live GitHub stargazers_count via `gh api` when using `--from-dataset`",
+    )
+    parser.add_argument(
         "--tap-cmd",
         action="append",
         default=[],
@@ -520,22 +554,39 @@ def main() -> int:
             repo_key, raw_cmd = entry.split("=", 1)
             tap_cmds[repo_key.strip()] = raw_cmd.strip().split()
 
+    ver_proc = subprocess.run([leaktap_bin, "--version"], capture_output=True, text=True, check=False)
+    detected_ver = (
+        ver_proc.stdout.strip().split()[-1]
+        if ver_proc.returncode == 0 and ver_proc.stdout.strip()
+        else "0.4.1"
+    )
+
     existing_live: dict[str, dict] = {}
     snapshot_date = time.strftime("%Y-%m-%d")
-    leaktap_version = "0.4.0"
+    leaktap_version = detected_ver
     if args.from_dataset:
         prev = json.loads(Path(args.from_dataset).read_text())
         snapshot_date = prev.get("snapshot_date") or snapshot_date
-        leaktap_version = prev.get("leaktap_version") or leaktap_version
-        candidates = [
-            {
-                "repo": r["repo"],
-                "stars": r["stars"],
-                "language": r["language"],
-                "commit": r.get("commit"),
-            }
-            for r in prev.get("repositories", [])[: args.limit]
-        ]
+        candidates = []
+        for r in prev.get("repositories", [])[: args.limit]:
+            stars = r["stars"]
+            if args.refresh_stars:
+                gh_res = subprocess.run(
+                    ["gh", "api", f"repos/{r['repo']}", "--jq", ".stargazers_count"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if gh_res.returncode == 0 and gh_res.stdout.strip().isdigit():
+                    stars = int(gh_res.stdout.strip())
+            candidates.append(
+                {
+                    "repo": r["repo"],
+                    "stars": stars,
+                    "language": r["language"],
+                    "commit": r.get("commit"),
+                }
+            )
         for r in prev.get("repositories", []):
             if "live_tap" in r:
                 existing_live[r["repo"]] = r["live_tap"]

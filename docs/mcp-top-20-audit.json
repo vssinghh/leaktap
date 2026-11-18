@@ -1,9 +1,9 @@
 {
   "snapshot_date": "2026-11-17",
-  "leaktap_version": "0.4.0",
+  "leaktap_version": "0.4.1",
   "summary": {
     "audited_count": 20,
-    "combined_stars": 464529,
+    "combined_stars": 629809,
     "unpinned_package_or_tag_count": 18,
     "secret_in_config_or_cli_arg_count": 7,
     "cli_arg_secret_count": 2,
@@ -20,11 +20,11 @@
     {
       "rank": 1,
       "repo": "modelcontextprotocol/servers",
-      "stars": 84118,
+      "stars": 92074,
       "language": "TypeScript",
       "commit": "e1dc4b18dbb9",
       "static_scan": {
-        "scan_elapsed_ms": 443,
+        "scan_elapsed_ms": 448,
         "mcp_configs_scanned": 154,
         "findings": [
           {
@@ -96,11 +96,11 @@
     {
       "rank": 2,
       "repo": "upstash/context7",
-      "stars": 52897,
+      "stars": 65031,
       "language": "TypeScript",
       "commit": "a8de90a340f4",
       "static_scan": {
-        "scan_elapsed_ms": 256,
+        "scan_elapsed_ms": 273,
         "mcp_configs_scanned": 169,
         "findings": [
           {
@@ -179,7 +179,7 @@
             "rule_id": "plugin-skill-network",
             "severity": "medium",
             "file": "packages/pi/lib/api.ts",
-            "line": 35,
+            "line": 43,
             "server_name": "plugin:upstash__context7",
             "message": "Imported helper module makes an outbound network call (via `fetch`) \u2014 inspect script inputs for data exfiltration"
           }
@@ -208,11 +208,11 @@
     {
       "rank": 3,
       "repo": "ChromeDevTools/chrome-devtools-mcp",
-      "stars": 35888,
+      "stars": 58057,
       "language": "TypeScript",
       "commit": "045fb8c37d38",
       "static_scan": {
-        "scan_elapsed_ms": 238,
+        "scan_elapsed_ms": 251,
         "mcp_configs_scanned": 208,
         "findings": [
           {
@@ -260,11 +260,11 @@
     {
       "rank": 4,
       "repo": "DeusData/codebase-memory-mcp",
-      "stars": 35664,
+      "stars": 48791,
       "language": "C",
       "commit": "cdfdf26483fa",
       "static_scan": {
-        "scan_elapsed_ms": 4200,
+        "scan_elapsed_ms": 4237,
         "mcp_configs_scanned": 494,
         "findings": [
           {
@@ -336,11 +336,11 @@
     {
       "rank": 5,
       "repo": "microsoft/playwright-mcp",
-      "stars": 31507,
+      "stars": 39811,
       "language": "TypeScript",
       "commit": "a62ea28698af",
       "static_scan": {
-        "scan_elapsed_ms": 123,
+        "scan_elapsed_ms": 135,
         "mcp_configs_scanned": 12,
         "findings": [
           {
@@ -388,11 +388,11 @@
     {
       "rank": 6,
       "repo": "ahujasid/mcp-for-blender",
-      "stars": 19168,
+      "stars": 34829,
       "language": "Python",
       "commit": "b6a2ce30c146",
       "static_scan": {
-        "scan_elapsed_ms": 190,
+        "scan_elapsed_ms": 199,
         "mcp_configs_scanned": 28,
         "findings": [
           {
@@ -449,7 +449,7 @@
             "file": "src/blender_mcp/telemetry.py",
             "line": 314,
             "server_name": "ahujasid__mcp-for-blender",
-            "message": "Server enables default-on outbound usage telemetry (Supabase `/rest/v1/telemetry_events`; opt-out via `BLENDER_MCP_DISABLE_TELEMETRY` / `DISABLE_TELEMETRY`; docs state collected data may be used to train AI/ML models)"
+            "message": "Server enables default-on outbound usage telemetry (Supabase `/rest/v1/telemetry_events`; opt-out via `BLENDER_MCP_DISABLE_TELEMETRY` / `DISABLE_TELEMETRY`)"
           }
         ]
       },
@@ -480,11 +480,11 @@
     {
       "rank": 7,
       "repo": "github/github-mcp-server",
-      "stars": 18757,
+      "stars": 34553,
       "language": "Go",
       "commit": "67d4dc489700",
       "static_scan": {
-        "scan_elapsed_ms": 384,
+        "scan_elapsed_ms": 413,
         "mcp_configs_scanned": 220,
         "findings": [
           {
@@ -550,11 +550,11 @@
     {
       "rank": 8,
       "repo": "mksglu/context-mode",
-      "stars": 17435,
+      "stars": 34240,
       "language": "TypeScript",
       "commit": "3cbdaeeb2ce6",
       "static_scan": {
-        "scan_elapsed_ms": 3560,
+        "scan_elapsed_ms": 3645,
         "mcp_configs_scanned": 285,
         "findings": [
           {
@@ -594,11 +594,11 @@
     {
       "rank": 9,
       "repo": "tirth8205/code-review-graph",
-      "stars": 16898,
+      "stars": 32830,
       "language": "Python",
       "commit": "bbdda4b9e4b4",
       "static_scan": {
-        "scan_elapsed_ms": 474,
+        "scan_elapsed_ms": 502,
         "mcp_configs_scanned": 130,
         "findings": [
           {
@@ -662,11 +662,11 @@
     {
       "rank": 10,
       "repo": "oraios/serena",
-      "stars": 16724,
+      "stars": 31487,
       "language": "Python",
       "commit": "0cef825f802d",
       "static_scan": {
-        "scan_elapsed_ms": 337,
+        "scan_elapsed_ms": 355,
         "mcp_configs_scanned": 233,
         "findings": [
           {
@@ -706,11 +706,11 @@
     {
       "rank": 11,
       "repo": "czlonkowski/n8n-mcp",
-      "stars": 16472,
+      "stars": 23278,
       "language": "TypeScript",
       "commit": "ccede0be774f",
       "static_scan": {
-        "scan_elapsed_ms": 6545,
+        "scan_elapsed_ms": 6749,
         "mcp_configs_scanned": 463,
         "findings": [
           {
@@ -806,11 +806,11 @@
     {
       "rank": 12,
       "repo": "xpzouying/xiaohongshu-mcp",
-      "stars": 15025,
+      "stars": 17185,
       "language": "Go",
       "commit": "bb6fa2e20871",
       "static_scan": {
-        "scan_elapsed_ms": 295,
+        "scan_elapsed_ms": 301,
         "mcp_configs_scanned": 59,
         "findings": [
           {
@@ -824,24 +824,8 @@
           {
             "rule_id": "plugin-skill-network",
             "severity": "medium",
-            "file": "skills/post-to-xhs/scripts/cdp_publish.py",
-            "line": 94,
-            "server_name": "skill:post-to-xhs",
-            "message": "Skill or plugin script makes an outbound network call (via `requests.get`) \u2014 inspect script inputs for data exfiltration"
-          },
-          {
-            "rule_id": "plugin-skill-network",
-            "severity": "medium",
-            "file": "skills/post-to-xhs/scripts/chrome_launcher.py",
-            "line": 74,
-            "server_name": "skill:post-to-xhs",
-            "message": "Imported helper module makes an outbound network call (via `socket.socket`) \u2014 inspect script inputs for data exfiltration"
-          },
-          {
-            "rule_id": "plugin-skill-network",
-            "severity": "medium",
             "file": "skills/post-to-xhs/scripts/image_downloader.py",
-            "line": 74,
+            "line": 77,
             "server_name": "skill:post-to-xhs",
             "message": "Skill or plugin script makes an outbound network call (via `requests.get`) \u2014 inspect script inputs for data exfiltration"
           }
@@ -869,11 +853,11 @@
     {
       "rank": 13,
       "repo": "googleapis/mcp-toolbox",
-      "stars": 14686,
+      "stars": 16897,
       "language": "Go",
       "commit": "2253fe76f09d",
       "static_scan": {
-        "scan_elapsed_ms": 806,
+        "scan_elapsed_ms": 765,
         "mcp_configs_scanned": 564,
         "findings": [
           {
@@ -910,11 +894,11 @@
     {
       "rank": 14,
       "repo": "apify/apify-mcp-server",
-      "stars": 13621,
+      "stars": 16743,
       "language": "TypeScript",
       "commit": "97365c13fb88",
       "static_scan": {
-        "scan_elapsed_ms": 351,
+        "scan_elapsed_ms": 336,
         "mcp_configs_scanned": 212,
         "findings": [
           {
@@ -974,11 +958,11 @@
     {
       "rank": 15,
       "repo": "GLips/Figma-Context-MCP",
-      "stars": 13561,
+      "stars": 16239,
       "language": "TypeScript",
       "commit": "c083d65c7e00",
       "static_scan": {
-        "scan_elapsed_ms": 160,
+        "scan_elapsed_ms": 148,
         "mcp_configs_scanned": 65,
         "findings": [
           {
@@ -995,7 +979,7 @@
             "file": "src/telemetry/client.ts",
             "line": 11,
             "server_name": "GLips__Figma-Context-MCP",
-            "message": "Server enables default-on outbound usage telemetry (PostHog `us.i.posthog.com`) with no disclosure in root `README.md`"
+            "message": "Server enables default-on outbound usage telemetry (PostHog `us.i.posthog.com`) with no disclosure in root `README.md` or setup docs"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -1030,11 +1014,11 @@
     {
       "rank": 16,
       "repo": "CoplayDev/unity-mcp",
-      "stars": 13049,
+      "stars": 16042,
       "language": "Python",
       "commit": "5914ce5bd9d1",
       "static_scan": {
-        "scan_elapsed_ms": 739,
+        "scan_elapsed_ms": 690,
         "mcp_configs_scanned": 570,
         "findings": [
           {
@@ -1051,7 +1035,7 @@
             "file": "Server/src/core/telemetry.py",
             "line": 152,
             "server_name": "CoplayDev__unity-mcp",
-            "message": "Server enables default-on outbound usage telemetry (`https://api-prod.coplay.dev/telemetry/events`; opt-out via `DISABLE_TELEMETRY` / `MCP_DISABLE_TELEMETRY`) with no disclosure in root `README.md`"
+            "message": "Server enables default-on outbound usage telemetry (`https://api-prod.coplay.dev/telemetry/events`; opt-out via `DISABLE_TELEMETRY` / `MCP_DISABLE_TELEMETRY`) with no disclosure in root `README.md` (opt-out documented in sub-folder docs)"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -1109,11 +1093,11 @@
     {
       "rank": 17,
       "repo": "0x4m4/hexstrike-ai",
-      "stars": 12546,
+      "stars": 13704,
       "language": "Python",
       "commit": "d689933ff579",
       "static_scan": {
-        "scan_elapsed_ms": 150,
+        "scan_elapsed_ms": 146,
         "mcp_configs_scanned": 2,
         "findings": []
       },
@@ -1144,11 +1128,11 @@
     {
       "rank": 18,
       "repo": "mrexodia/ida-pro-mcp",
-      "stars": 12358,
+      "stars": 13506,
       "language": "Python",
       "commit": "13e480cb1198",
       "static_scan": {
-        "scan_elapsed_ms": 232,
+        "scan_elapsed_ms": 224,
         "mcp_configs_scanned": 100,
         "findings": [
           {
@@ -1189,11 +1173,11 @@
     {
       "rank": 19,
       "repo": "hangwin/mcp-chrome",
-      "stars": 12186,
+      "stars": 12552,
       "language": "TypeScript",
       "commit": "f48e71751e00",
       "static_scan": {
-        "scan_elapsed_ms": 408,
+        "scan_elapsed_ms": 401,
         "mcp_configs_scanned": 445,
         "findings": [
           {
@@ -1233,11 +1217,11 @@
     {
       "rank": 20,
       "repo": "LaurieWired/GhidraMCP",
-      "stars": 11969,
+      "stars": 11960,
       "language": "Java",
       "commit": "1e980252087b",
       "static_scan": {
-        "scan_elapsed_ms": 121,
+        "scan_elapsed_ms": 115,
         "mcp_configs_scanned": 9,
         "findings": [
           {

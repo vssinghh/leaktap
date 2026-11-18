@@ -1472,6 +1472,7 @@ fn audit_repo_runtime_telemetry(
     let primary = &hits[0];
 
     let root_readme_discloses = root_readme_mentions_telemetry(repo_dir);
+    let subfolder_discloses = !root_readme_discloses && subfolder_docs_mention_telemetry(repo_dir);
     let ml_training_note = repo_mentions_ml_training_on_telemetry(repo_dir);
 
     let collectors_joined: Vec<String> = all_collectors.into_iter().collect();
@@ -1499,12 +1500,20 @@ fn audit_repo_runtime_telemetry(
                 "Server enables default-on outbound usage telemetry ({collectors_str}{opt_out_note}{ml_suffix})"
             ),
         )
+    } else if subfolder_discloses {
+        (
+            "mcp-undisclosed-telemetry",
+            Severity::High,
+            format!(
+                "Server enables default-on outbound usage telemetry ({collectors_str}{opt_out_note}{ml_suffix}) with no disclosure in root `README.md` (opt-out documented in sub-folder docs)"
+            ),
+        )
     } else {
         (
             "mcp-undisclosed-telemetry",
             Severity::High,
             format!(
-                "Server enables default-on outbound usage telemetry ({collectors_str}{opt_out_note}{ml_suffix}) with no disclosure in root `README.md`"
+                "Server enables default-on outbound usage telemetry ({collectors_str}{opt_out_note}{ml_suffix}) with no disclosure in root `README.md` or setup docs"
             ),
         )
     };
@@ -1623,11 +1632,7 @@ fn extract_telemetry_opt_out_vars(txt: &str) -> Vec<String> {
         .collect()
 }
 
-fn root_readme_mentions_telemetry(repo_dir: &Path) -> bool {
-    let readme_path = repo_dir.join("README.md");
-    let Ok(txt) = crate::scanner::read_text_auto_encoding(&readme_path, MAX_REPO_DOC_BYTES) else {
-        return false;
-    };
+fn doc_text_mentions_telemetry(txt: &str) -> bool {
     let lower = txt.to_ascii_lowercase();
     lower.contains("telemetry")
         || lower.contains("usage statistics")
@@ -1635,22 +1640,58 @@ fn root_readme_mentions_telemetry(repo_dir: &Path) -> bool {
         || lower.contains("posthog")
 }
 
+fn root_readme_mentions_telemetry(repo_dir: &Path) -> bool {
+    let readme_path = repo_dir.join("README.md");
+    let Ok(txt) = crate::scanner::read_text_auto_encoding(&readme_path, MAX_REPO_DOC_BYTES) else {
+        return false;
+    };
+    doc_text_mentions_telemetry(&txt)
+}
+
+fn subfolder_docs_mention_telemetry(repo_dir: &Path) -> bool {
+    let root_readme = repo_dir.join("README.md");
+    let mut candidates = collect_setup_doc_files(repo_dir);
+    candidates.push(repo_dir.join("PRIVACY.md"));
+    let web_docs = repo_dir.join("website/docs");
+    if web_docs.is_dir() {
+        collect_english_setup_docs(&web_docs, 0, &mut candidates);
+    }
+    for p in candidates {
+        if p == root_readme || !p.is_file() {
+            continue;
+        }
+        if let Ok(txt) = crate::scanner::read_text_auto_encoding(&p, MAX_REPO_DOC_BYTES) {
+            if doc_text_mentions_telemetry(&txt) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn repo_mentions_ml_training_on_telemetry(repo_dir: &Path) -> bool {
-    for doc in ["PRIVACY.md", "README.md"] {
+    let mut found_ml_clause = false;
+    for doc in ["TERMS_AND_CONDITIONS.md", "PRIVACY.md", "README.md"] {
         let p = repo_dir.join(doc);
         let Ok(txt) = crate::scanner::read_text_auto_encoding(&p, MAX_REPO_DOC_BYTES) else {
             continue;
         };
         let lower = txt.to_ascii_lowercase();
+        if lower.contains("telemetry is **opt-in**")
+            || lower.contains("telemetry is strictly opt-in")
+            || lower.contains("if you opt in to telemetry")
+        {
+            return false;
+        }
         if lower.contains("telemetry")
             && (lower.contains("train ai models")
                 || lower.contains("machine learning models")
                 || lower.contains("build datasets and machine learning"))
         {
-            return true;
+            found_ml_clause = true;
         }
     }
-    false
+    found_ml_clause
 }
 
 fn find_case_insensitive_line(raw: &str, needle_lower: &str) -> usize {
