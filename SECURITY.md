@@ -7,7 +7,7 @@ Security fixes ship on the latest `0.4.x` release.
 | Version | Supported |
 | :--- | :--- |
 | `0.4.x` | Yes |
-| `< 0.4.0` | No (upgrade to `0.4.1+`) |
+| `< 0.4.0` | No (upgrade to `0.4.2+`) |
 
 ## Reporting a Vulnerability
 

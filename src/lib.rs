@@ -231,14 +231,28 @@ pub fn execute(cli: Cli) -> i32 {
             warn_ignored_untrusted_configs(&policy);
             let engine = RuleEngine::with_policy(true, Some(&policy));
             match rules_args.format {
-                RulesFormat::Json => println!("{}", render_rules_json(&engine)),
+                RulesFormat::Json => {
+                    write_stdout_ignore_broken_pipe(&render_rules_json(&engine), true);
+                }
                 RulesFormat::Text | RulesFormat::Terminal => {
-                    print!("{}", render_rules_terminal(&engine));
+                    write_stdout_ignore_broken_pipe(&render_rules_terminal(&engine), false);
                 }
             }
             0
         }
     }
+}
+
+fn write_stdout_ignore_broken_pipe(text: &str, trailing_newline: bool) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if out.write_all(text.as_bytes()).is_err() {
+        return;
+    }
+    if trailing_newline {
+        let _ = out.write_all(b"\n");
+    }
+    let _ = out.flush();
 }
 
 fn warn_ci_untrusted_project_config(
@@ -259,11 +273,16 @@ fn warn_ci_untrusted_project_config(
 
 fn warn_ignored_untrusted_configs(policy: &PolicyConfig) {
     if !policy.ignored_untrusted_configs.is_empty() {
-        let joined: Vec<String> = policy
-            .ignored_untrusted_configs
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
+        let mut seen_canon = HashSet::new();
+        let mut joined: Vec<String> = Vec::new();
+        for p in &policy.ignored_untrusted_configs {
+            let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+            if seen_canon.insert(key) {
+                joined.push(crate::report::terminal::sanitize_terminal_text(
+                    &p.display().to_string(),
+                ));
+            }
+        }
         eprintln!(
             "[leaktap] Note: ignored untrusted project policy file(s): {} (pass `--trust-project-config`, `--policy-git-ref <ref>`, or `--config <file>` to apply)",
             joined.join(", ")
@@ -484,11 +503,18 @@ pub fn execute_scan(args: &ScanArgs) -> i32 {
     let report = run_scan_report_with_policy(args, &policy);
 
     match args.format {
-        OutputFormat::Terminal => print!("{}", render_scan_terminal(&report)),
-        OutputFormat::Json => println!("{}", render_scan_json(&report)),
+        OutputFormat::Terminal => {
+            write_stdout_ignore_broken_pipe(&render_scan_terminal(&report), false);
+        }
+        OutputFormat::Json => {
+            write_stdout_ignore_broken_pipe(&render_scan_json(&report), true);
+        }
         OutputFormat::Sarif => {
             let sarif_engine = RuleEngine::with_policy(true, Some(&policy));
-            println!("{}", render_scan_sarif_with_rules(&report, &sarif_engine));
+            write_stdout_ignore_broken_pipe(
+                &render_scan_sarif_with_rules(&report, &sarif_engine),
+                true,
+            );
         }
     }
 
@@ -553,7 +579,7 @@ pub fn execute_clean(args: &CleanArgs) -> i32 {
         Some(&policy),
     ) {
         Ok(summary) => {
-            print!("{}", render_clean_terminal(&summary));
+            write_stdout_ignore_broken_pipe(&render_clean_terminal(&summary), false);
             if args.apply && summary.uncleaned_sqlite_secrets > 0 {
                 1
             } else {

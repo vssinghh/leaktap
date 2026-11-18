@@ -102,7 +102,16 @@ fn write_json_error_response(
         payload.len(),
         payload
     )?;
-    client.flush()
+    client.flush()?;
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let _ = client.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut drain = [0u8; 1024];
+    for _ in 0..4 {
+        if client.read(&mut drain).unwrap_or(0) == 0 {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub struct LocalApiTap {
@@ -143,7 +152,46 @@ struct UpstreamTargets {
     block_secrets: bool,
     redact_secrets: bool,
     update_mcp_pins: bool,
+    session_prefix: Option<String>,
     pool: UpstreamPool,
+}
+
+fn generate_session_prefix() -> String {
+    let mut bytes = [0u8; 16];
+    let filled = {
+        #[cfg(unix)]
+        {
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut bytes))
+                .is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    if !filled {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let h1 = {
+            let mut h = RandomState::new().build_hasher();
+            h.write_u32(std::process::id());
+            h.finish()
+        };
+        let h2 = {
+            let mut h = RandomState::new().build_hasher();
+            h.write_usize(&bytes as *const _ as usize);
+            h.finish()
+        };
+        bytes[..8].copy_from_slice(&h1.to_le_bytes());
+        bytes[8..].copy_from_slice(&h2.to_le_bytes());
+    }
+    let mut hex = String::with_capacity(37);
+    hex.push_str("/_lt_");
+    for b in bytes {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    hex
 }
 
 fn spawn_accept_loop(
@@ -260,6 +308,67 @@ pub fn start_local_api_tap_full(
     header_auditor: Arc<HeaderAuditor>,
     emit: TapCallback,
 ) -> io::Result<LocalApiTap> {
+    start_local_api_tap_inner(
+        anthropic_upstream,
+        openai_upstream,
+        chatgpt_upstream,
+        openai_explicit,
+        gemini_upstream,
+        block_secrets,
+        redact_secrets,
+        update_mcp_pins,
+        None,
+        engine,
+        header_auditor,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start_local_api_tap_authenticated(
+    anthropic_upstream: String,
+    openai_upstream: String,
+    chatgpt_upstream: String,
+    openai_explicit: bool,
+    gemini_upstream: String,
+    block_secrets: bool,
+    redact_secrets: bool,
+    update_mcp_pins: bool,
+    engine: Arc<RuleEngine>,
+    header_auditor: Arc<HeaderAuditor>,
+    emit: TapCallback,
+) -> io::Result<LocalApiTap> {
+    start_local_api_tap_inner(
+        anthropic_upstream,
+        openai_upstream,
+        chatgpt_upstream,
+        openai_explicit,
+        gemini_upstream,
+        block_secrets,
+        redact_secrets,
+        update_mcp_pins,
+        Some(generate_session_prefix()),
+        engine,
+        header_auditor,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_local_api_tap_inner(
+    anthropic_upstream: String,
+    openai_upstream: String,
+    chatgpt_upstream: String,
+    openai_explicit: bool,
+    gemini_upstream: String,
+    block_secrets: bool,
+    redact_secrets: bool,
+    update_mcp_pins: bool,
+    session_prefix: Option<String>,
+    engine: Arc<RuleEngine>,
+    header_auditor: Arc<HeaderAuditor>,
+    emit: TapCallback,
+) -> io::Result<LocalApiTap> {
     let v4_listener = TcpListener::bind("127.0.0.1:0")?;
     let port = v4_listener.local_addr()?.port();
 
@@ -279,6 +388,7 @@ pub fn start_local_api_tap_full(
     let stop = Arc::new(AtomicBool::new(false));
     let active_conns = Arc::new(AtomicUsize::new(0));
     let pool: UpstreamPool = Arc::new(Mutex::new(HashMap::new()));
+    let pfx = session_prefix.clone().unwrap_or_default();
     let upstreams = UpstreamTargets {
         anthropic: anthropic_upstream.trim_end_matches('/').to_string(),
         openai: openai_upstream.trim_end_matches('/').to_string(),
@@ -292,6 +402,7 @@ pub fn start_local_api_tap_full(
         block_secrets,
         redact_secrets,
         update_mcp_pins,
+        session_prefix,
         pool: Arc::clone(&pool),
     };
 
@@ -319,13 +430,13 @@ pub fn start_local_api_tap_full(
 
     Ok(LocalApiTap {
         port,
-        anthropic_base_url: format!("http://127.0.0.1:{port}/_anthropic"),
-        openai_base_url: format!("http://127.0.0.1:{port}/_openai"),
-        gemini_base_url: format!("http://localhost:{port}/_gemini"),
-        openrouter_base_url: format!("http://127.0.0.1:{port}/_openrouter"),
-        deepseek_base_url: format!("http://127.0.0.1:{port}/_deepseek"),
-        xai_base_url: format!("http://127.0.0.1:{port}/_xai"),
-        groq_base_url: format!("http://127.0.0.1:{port}/_groq"),
+        anthropic_base_url: format!("http://127.0.0.1:{port}{pfx}/_anthropic"),
+        openai_base_url: format!("http://127.0.0.1:{port}{pfx}/_openai"),
+        gemini_base_url: format!("http://localhost:{port}{pfx}/_gemini"),
+        openrouter_base_url: format!("http://127.0.0.1:{port}{pfx}/_openrouter"),
+        deepseek_base_url: format!("http://127.0.0.1:{port}{pfx}/_deepseek"),
+        xai_base_url: format!("http://127.0.0.1:{port}{pfx}/_xai"),
+        groq_base_url: format!("http://127.0.0.1:{port}{pfx}/_groq"),
         stop,
         pool,
     })
@@ -369,6 +480,7 @@ fn handle_client(
     let mut is_chunked = false;
     let mut content_encoding = String::new();
     let mut is_websocket_upgrade = false;
+    let mut is_browser_cross_origin = false;
     let mut has_chatgpt_account_id = false;
     let mut total_header_bytes: usize = 0;
     let mut framing_error: Option<&'static str> = None;
@@ -449,6 +561,12 @@ fn handle_client(
             }
         } else if key.eq_ignore_ascii_case("upgrade") && val.eq_ignore_ascii_case("websocket") {
             is_websocket_upgrade = true;
+        } else if (key.eq_ignore_ascii_case("origin") && !val.is_empty())
+            || (key.eq_ignore_ascii_case("sec-fetch-site")
+                && (val.eq_ignore_ascii_case("cross-site")
+                    || val.eq_ignore_ascii_case("same-site")))
+        {
+            is_browser_cross_origin = true;
         } else if key.eq_ignore_ascii_case("chatgpt-account-id") && !val.is_empty() {
             has_chatgpt_account_id = true;
         }
@@ -487,6 +605,50 @@ fn handle_client(
         let _ = client.flush();
         return Ok(());
     }
+
+    if is_browser_cross_origin {
+        emit(
+            "http",
+            "cross_origin_rejected",
+            "tap-cross-origin-request",
+            "HIGH",
+            "Rejected browser cross-origin HTTP request to local API tap".to_string(),
+        );
+        let _ = write_json_error_response(
+            &mut client,
+            "403 Forbidden",
+            "leaktap_cross_origin_rejected",
+            "[leaktap] Cross-origin browser requests to the local API tap are forbidden.",
+        );
+        return Ok(());
+    }
+
+    let route_path = if let Some(ref expected_pfx) = upstreams.session_prefix {
+        match raw_path.strip_prefix(expected_pfx.as_str()) {
+            Some("") => "/".to_string(),
+            Some(rest) if rest.starts_with('/') => rest.to_string(),
+            Some(rest) if rest.starts_with('?') => format!("/{rest}"),
+            _ => {
+                emit(
+                    "http",
+                    "unauthorized_local_client",
+                    "tap-unauthenticated-client",
+                    "HIGH",
+                    "Rejected local API tap request missing valid per-session route token"
+                        .to_string(),
+                );
+                let _ = write_json_error_response(
+                    &mut client,
+                    "403 Forbidden",
+                    "leaktap_unauthorized_local_client",
+                    "[leaktap] Missing or invalid local API tap session token.",
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        raw_path.clone()
+    };
 
     const MAX_TAP_BODY_BYTES: usize = 32 * 1024 * 1024;
     const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
@@ -557,13 +719,13 @@ fn handle_client(
     };
 
     let (provider, upstream_provider, mut target_url) =
-        if let Some(rest) = raw_path.strip_prefix("/_anthropic") {
+        if let Some(rest) = route_path.strip_prefix("/_anthropic") {
             (
                 "anthropic",
                 UpstreamProvider::Anthropic,
                 join_upstream_path(&upstreams.anthropic, rest),
             )
-        } else if let Some(rest) = raw_path.strip_prefix("/_openai") {
+        } else if let Some(rest) = route_path.strip_prefix("/_openai") {
             if has_chatgpt_account_id && !upstreams.openai_explicit {
                 let stripped = rest.strip_prefix("/v1").unwrap_or(rest);
                 (
@@ -578,39 +740,39 @@ fn handle_client(
                     join_upstream_path(&upstreams.openai, rest),
                 )
             }
-        } else if let Some(rest) = raw_path.strip_prefix("/_gemini") {
+        } else if let Some(rest) = route_path.strip_prefix("/_gemini") {
             (
                 "gemini",
                 UpstreamProvider::Gemini,
                 join_upstream_path(&upstreams.gemini, rest),
             )
-        } else if let Some(rest) = raw_path.strip_prefix("/_openrouter") {
+        } else if let Some(rest) = route_path.strip_prefix("/_openrouter") {
             (
                 "openrouter",
                 UpstreamProvider::OpenRouter,
                 join_upstream_path(&upstreams.openrouter, rest),
             )
-        } else if let Some(rest) = raw_path.strip_prefix("/_deepseek") {
+        } else if let Some(rest) = route_path.strip_prefix("/_deepseek") {
             (
                 "deepseek",
                 UpstreamProvider::DeepSeek,
                 join_upstream_path(&upstreams.deepseek, rest),
             )
-        } else if let Some(rest) = raw_path.strip_prefix("/_xai") {
+        } else if let Some(rest) = route_path.strip_prefix("/_xai") {
             (
                 "xai",
                 UpstreamProvider::Xai,
                 join_upstream_path(&upstreams.xai, rest),
             )
-        } else if let Some(rest) = raw_path.strip_prefix("/_groq") {
+        } else if let Some(rest) = route_path.strip_prefix("/_groq") {
             (
                 "groq",
                 UpstreamProvider::Groq,
                 join_upstream_path(&upstreams.groq, rest),
             )
         } else {
-            let suffix = if raw_path.starts_with('/') {
-                raw_path.as_str()
+            let suffix = if route_path.starts_with('/') {
+                route_path.as_str()
             } else {
                 "/"
             };
@@ -638,7 +800,7 @@ fn handle_client(
     let mut redacted_total: usize = 0;
 
     // 1. Audit outgoing request URL path and query string (exempting Gemini's auth `key=` parameter)
-    let url_inspect_target = sanitize_request_path_for_scan(&raw_path, provider);
+    let url_inspect_target = sanitize_request_path_for_scan(&route_path, provider);
     if !url_inspect_target.is_empty() {
         let mut url_matches = engine.scan_text(&url_inspect_target);
         let decoded_url = percent_decode(&url_inspect_target);

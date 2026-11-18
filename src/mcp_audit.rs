@@ -693,8 +693,9 @@ fn audit_toml_value_for_secrets(
         Value::String(s) => {
             // In Codex `config.toml`, `env_key = "OPENAI_API_KEY"` and `env_http_headers` values
             // name environment variables rather than literal secrets unless a real secret rule matches.
-            let is_env_name_ref =
-                leaf_key.eq_ignore_ascii_case("env_key") || key_path.contains("env_http_headers");
+            let is_env_name_ref = leaf_key.eq_ignore_ascii_case("env_key")
+                || leaf_key.eq_ignore_ascii_case("bearer_token_env_var")
+                || key_path.contains("env_http_headers");
             let line = find_line_number(raw_file, s).max(find_line_number(raw_file, leaf_key));
             if is_env_name_ref {
                 let matches = engine.scan_text_for_path(s.trim(), Some(path));
@@ -3416,6 +3417,26 @@ fn inspect_credential_value(
 
     let matches = engine.scan_text_for_path(trimmed, Some(path));
     if let Some(m) = matches.iter().find(|m| m.category == RuleCategory::Secret) {
+        let is_toml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+        let is_claude_desktop = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("claude_desktop_config.json"));
+        let fix_hint = if is_toml && location_label.contains("http_headers") {
+            format!(
+                "use `bearer_token_env_var` or `env_http_headers = {{ \"{key}\" = \"ENV_VAR_NAME\" }}` or OS keychain"
+            )
+        } else if is_toml {
+            "use `bearer_token_env_var` / `env_key` / shell environment variables or OS keychain"
+                .to_string()
+        } else if is_claude_desktop {
+            "Claude Desktop does not expand `${VAR}` in `claude_desktop_config.json`; load credentials from OS keychain, a `.mcpb` secret prompt, or a wrapper script".to_string()
+        } else {
+            format!("use `${{{key}}}` / `${{input:...}}` secret interpolation or a keychain")
+        };
         out.push(McpFinding {
             rule_id: "mcp-hardcoded-secret",
             server_name: server_name.to_string(),
@@ -3428,7 +3449,7 @@ fn inspect_credential_value(
                 &format!("{display}:{server_name}:{location_label}:{trimmed}"),
             ),
             message: format!(
-                "Hardcoded {} (`{}`) in `{location_label}` — use `${{{key}}}` env interpolation or a keychain",
+                "Hardcoded {} (`{}`) in `{location_label}` — {fix_hint}",
                 m.rule_name, m.masked
             ),
         });

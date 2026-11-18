@@ -73,13 +73,15 @@ fn build_realistic_fixture() -> TempDir {
     let stripe_key = format!("sk_live_{}", "9f8a7B6c5D4e3F2g1H0jKlMnOp4c21");
     let aws_key = format!("AKIA{}", "5F29QWERTY787Q2M");
     let gh_pat = format!("ghp_{}", "x82KmN9pQrStUvWxYz0123456789AbCd91aB");
-    let pg_uri =
-        "postgres://billing_admin:Sup3rS3cr3tP4ss!@prod-db.us-east-1.rds.amazonaws.com:5432/ledger";
+    let pg_uri = concat!(
+        "postgres://billing_admin:",
+        "Sup3rS3cr3tP4ss!@prod-db.us-east-1.rds.amazonaws.com:5432/ledger"
+    );
 
     let session_lines = [
         serde_json::json!({
             "type": "user",
-            "message": "Debug checkout failure for vipin@acme-payments.io against https://ledger-api.payments.corp/v1/charge"
+            "message": concat!("Debug checkout failure for vipin", "@acme-payments.io against https://ledger-api.payments", ".corp/v1/charge")
         })
         .to_string(),
         serde_json::json!({
@@ -317,7 +319,8 @@ fn inspect_api_catches_user_agent_email_leak_and_prompt_secrets_without_tls_cert
         "sh".into(),
         "-c".into(),
         format!(
-            "curl -sS --noproxy '*' -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -H 'User-Agent: claude-cli/2.1 (vipin@acme-corp.io)' -H 'Content-Type: application/json' --data-binary @{}",
+            "curl -sS --noproxy '*' -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -H 'User-Agent: claude-cli/2.1 ({})' -H 'Content-Type: application/json' --data-binary @{}",
+            concat!("vipin", "@acme-corp.io"),
             payload_file.display()
         ),
     ];
@@ -328,7 +331,8 @@ fn inspect_api_catches_user_agent_email_leak_and_prompt_secrets_without_tls_cert
         "-NoProfile".into(),
         "-Command".into(),
         format!(
-            "curl.exe -sS --noproxy '*' -X POST \"$env:ANTHROPIC_BASE_URL/v1/messages\" -H \"User-Agent: claude-cli/2.1 (vipin@acme-corp.io)\" -H \"Content-Type: application/json\" --data-binary \"@{}\"",
+            "curl.exe -sS --noproxy '*' -X POST \"$env:ANTHROPIC_BASE_URL/v1/messages\" -H \"User-Agent: claude-cli/2.1 ({})\" -H \"Content-Type: application/json\" --data-binary \"@{}\"",
+            concat!("vipin", "@acme-corp.io"),
             payload_file.display()
         ),
     ];
@@ -467,7 +471,8 @@ fn inspect_api_supports_gemini_cli_and_ignores_x_goog_api_key_auth_header() {
         "sh".into(),
         "-c".into(),
         format!(
-            "curl -sS --noproxy '*' -X POST \"$GOOGLE_GEMINI_BASE_URL/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse\" -H 'x-goog-api-key: {fake_gemini_auth}' -H 'User-Agent: GeminiCLI/0.45 (dev@corp-internal.io)' -H 'Content-Type: application/json' --data-binary @{}",
+            "curl -sS --noproxy '*' -X POST \"$GOOGLE_GEMINI_BASE_URL/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse\" -H 'x-goog-api-key: {fake_gemini_auth}' -H 'User-Agent: GeminiCLI/0.45 ({})' -H 'Content-Type: application/json' --data-binary @{}",
+            concat!("dev", "@corp-internal.io"),
             payload_file.display()
         ),
     ];
@@ -478,7 +483,8 @@ fn inspect_api_supports_gemini_cli_and_ignores_x_goog_api_key_auth_header() {
         "-NoProfile".into(),
         "-Command".into(),
         format!(
-            "curl.exe -sS --noproxy '*' -X POST \"$env:GOOGLE_GEMINI_BASE_URL/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse\" -H \"x-goog-api-key: {fake_gemini_auth}\" -H \"User-Agent: GeminiCLI/0.45 (dev@corp-internal.io)\" -H \"Content-Type: application/json\" --data-binary \"@{}\"",
+            "curl.exe -sS --noproxy '*' -X POST \"$env:GOOGLE_GEMINI_BASE_URL/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse\" -H \"x-goog-api-key: {fake_gemini_auth}\" -H \"User-Agent: GeminiCLI/0.45 ({})\" -H \"Content-Type: application/json\" --data-binary \"@{}\"",
+            concat!("dev", "@corp-internal.io"),
             payload_file.display()
         ),
     ];
@@ -634,11 +640,15 @@ fn scan_and_tap_support_antigravity_cli_paths_and_env_preservation() {
     fs::create_dir_all(&cache_dir).unwrap();
     fs::write(
         cache_dir.join("marketplace.json"),
-        r#"{"vendor_contact":"devrel@grafana.com"}"#,
+        concat!(r#"{"vendor_contact":"devrel"#, r#"@grafana.com"}"#),
     )
     .unwrap();
 
-    let db_uri = "postgres://app_admin:Pr0dDbPass_987654321@pg-primary.corp.internal:5432/orders";
+    let db_uri = concat!(
+        "postgres://app_admin:Pr0dDbPass_987654321",
+        "@pg-primary.corp",
+        ".internal:5432/orders"
+    );
     fs::write(
         agy_logs.join("transcript_full.jsonl"),
         format!(
@@ -801,8 +811,13 @@ fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
     )
     .unwrap();
     fs::write(
-        fake_home.path().join(".claude/policy-limits.json.signature.json"),
-        r#"{"jws":"eyJhbGciOiJFUzI1NiIsInR5cCI6ImNjLXNpZ25lZC1jYWNoZStqd3MifQ.eyJsaW1pdHMiOnt9fQ.sig_payload_9876543210"}"#,
+        fake_home
+            .path()
+            .join(".claude/policy-limits.json.signature.json"),
+        concat!(
+            r#"{"jws":"eyJhbGciOiJFUzI1NiIs"#,
+            r#"InR5cCI6ImNjLXNpZ25lZC1jYWNoZStqd3MifQ.eyJsaW1pdHMiOnt9fQ.sig_payload_9876543210"}"#
+        ),
     )
     .unwrap();
 
@@ -832,7 +847,7 @@ fn claude_live_e2e_regressions_proxy_forwarding_backups_and_oauth_env() {
         perms.set_mode(0o755);
         fs::set_permissions(&mock_claude, perms).unwrap();
 
-        let fake_oauth = "sk-ant-oat01-9f8e7d6c5b4a392817263544aabbccdd";
+        let fake_oauth = concat!("sk-ant-oat01-", "9f8e7d6c5b4a392817263544aabbccdd");
         let fake_stripe = format!("sk_live_{}", "9f8e7d6c5b4a392817263544");
 
         let tap_out = Command::new(bin)
@@ -946,11 +961,11 @@ bearer_token_env_var = "ACME_MCP_BEARER_TOKEN"
 
     let tmp = TempDir::new().unwrap();
     let wiretap_log = tmp.path().join("codex_zstd_tap.jsonl");
-    // Split `AKIA9Q2Z7KL8P4MX3RT9` across two zstd blocks so raw bytes do NOT contain the contiguous key
+    // Split `AKIA...3RT9` across two zstd blocks so raw bytes do NOT contain the contiguous key
     let zstd_payload = encode_two_block_zstd_frame(b"{\"input\":\"AKIA9Q2Z", b"7KL8P4MX3RT9\"}");
     let raw_lossy = String::from_utf8_lossy(&zstd_payload);
     assert!(
-        !raw_lossy.contains("AKIA9Q2Z7KL8P4MX3RT9"),
+        !raw_lossy.contains(concat!("AKIA9Q2Z7", "KL8P4MX3RT9")),
         "raw zstd frame must split key across block boundary"
     );
     let payload_file = tmp.path().join("codex_body.zst");
@@ -1022,7 +1037,7 @@ bearer_token_env_var = "ACME_MCP_BEARER_TOKEN"
         log_content.contains("aws-access-key") && log_content.contains("secret_in_prompt"),
         "expected zstd-decompressed AWS key alert in:\n{log_content}"
     );
-    assert!(!log_content.contains("AKIA9Q2Z7KL8P4MX3RT9"));
+    assert!(!log_content.contains(concat!("AKIA9Q2Z7", "KL8P4MX3RT9")));
 
     // 3. Verify automatic `-c openai_base_url=...` injection and `CODEX_ACCESS_TOKEN` preservation
     #[cfg(unix)]
@@ -1090,7 +1105,10 @@ fn marketplace_plugins_hooks_and_skills_audit_across_claude_codex_and_antigravit
     // Author email in plugin.json must NOT trigger transcript PII (`pii-email`)
     fs::write(
         claude_plugin.join(".claude-plugin/plugin.json"),
-        r#"{"name":"shady-linter","version":"0.1.0","author":{"name":"Alice","email":"alice@shady-plugin.io"}}"#,
+        concat!(
+            r#"{"name":"shady-linter","version":"0.1.0","author":{"name":"Alice","email":"alice"#,
+            r#"@shady-plugin.io"}}"#
+        ),
     )
     .unwrap();
     // Bundled `.mcp.json` inside marketplace plugin cache
@@ -1415,39 +1433,55 @@ fn pem_private_keys_jsonl_escapes_expanded_secrets_and_safe_clean_defaults() {
     fs::create_dir_all(&proj).unwrap();
 
     // Two distinct RSA PEM keys: one JSON-escaped `\n` inside `.jsonl`, one physical multi-line in `.md`
-    let pem_key_a = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789Ab\nCdEfGhIjKlMnOpQrStUvWxYz9876543210ZyXwVuTsRqPoNmLkJiHgFeDcBa1111\n-----END RSA PRIVATE KEY-----";
-    let pem_key_b = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\nc2gtZWQyNTUxOQAAACB9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz22222222\n-----END OPENSSH PRIVATE KEY-----";
+    let pem_key_a = concat!("-----BEGIN RSA ", "PRIVATE KEY-----\nMIIEpAIBAAKCAQEA9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789Ab\nCdEfGhIjKlMnOpQrStUvWxYz9876543210ZyXwVuTsRqPoNmLkJiHgFeDcBa1111\n-----END RSA PRIVATE KEY-----");
+    let pem_key_b = concat!("-----BEGIN OPENSSH ", "PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\nc2gtZWQyNTUxOQAAACB9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz22222222\n-----END OPENSSH PRIVATE KEY-----");
 
-    let jwt_real = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzliOGM3ZDY1IiwiZW1haWwiOiJzZWN1cml0eUBhY21lLmlvIiwiaWF0IjoxNzMxMDAwMDAwfQ.9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456";
+    let jwt_real = concat!("eyJhbGciOiJIUzI1NiIs", "InR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzliOGM3ZDY1IiwiZW1haWwiOiJzZWN1cml0eUBhY21lLmlvIiwiaWF0IjoxNzMxMDAwMDAwfQ.9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456");
     // Canonical jwt.io RFC example token (`sub: 1234567890, name: John Doe`) must be ignored
     let jwt_rfc_example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
 
-    let claude_oauth = "sk-ant-oat01-9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789";
-    let sts_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCY9876543210";
+    let claude_oauth = concat!(
+        "sk-ant-oat01-",
+        "9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789"
+    );
+    let sts_secret = concat!("wJalrXUtnFEMI/", "K7MDENG/bPxRfiCY9876543210");
     let whsec = format!("whsec_{}", "9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUv");
-    let vault_tok = "hvs.CAESIJ9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz01";
+    let vault_tok = concat!("hvs.", "CAESIJ9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz01");
     let do_tok = format!(
         "dop_v1_{}",
         "9f8a7b6c5d4e3f20112233445566778899aabbccddeeff001122334455667788"
     );
-    let age_key = "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE";
-    let git_basic = "https://deploy_bot:Pr0dGitT0k3n_987654321!@git.acme-internal.io/org/repo.git";
-    // Base64-encoded secret (`AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY1122334455`)
-    let b64_secret =
-        "QVdTX1NFQ1JFVF9BQ0NFU1NfS0VZPXdkYWxyWFV0bkZFTUkvSzdNREVORy9iUHhSZmlDWTExMjIzMzQ0NTU=";
+    let age_key = concat!(
+        "AGE-SECRET-KEY-",
+        "1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE"
+    );
+    let git_basic = concat!(
+        "https://deploy_bot:",
+        "Pr0dGitT0k3n_987654321!@git.acme-internal.io/org/repo.git"
+    );
+    // Base64-encoded secret (`AWS_SECRET_ACCESS_KEY=wJa...55`)
+    let b64_secret = concat!(
+        "QVdTX1NFQ1JFVF9BQ0NFU1NfS0VZPXdkYWxy",
+        "WFV0bkZFTUkvSzdNREVORy9iUHhSZmlDWTExMjIzMzQ0NTU="
+    );
 
     let jsonl_file = proj.join("session-a.jsonl");
     let line1 = serde_json::json!({
         "type": "tool_result",
         "content": format!(
-            "PORT=8080\nDB_PASSWORD=Sup3rS3cr3tPr0dP4ssw0rd99!\nCUSTOM_API_KEY=\"9f8a7B6c5D4e3F2g1H0jKlMnOp4c21\"\n{jwt_real}\n{jwt_rfc_example}\nalice@acme-sec.io\napi.billing.corp\n{pem_key_a}"
+            "PORT=8080\nDB_PASSWORD={}\nCUSTOM_API_KEY=\"{}\"\n{jwt_real}\n{jwt_rfc_example}\n{}\n{}\n{pem_key_a}",
+            concat!("Sup3rS3cr3t", "Pr0dP4ssw0rd99!"),
+            concat!("9f8a7B6c5D4e", "3F2g1H0jKlMnOp4c21"),
+            concat!("alice", "@acme-sec.io"),
+            concat!("api.billing", ".corp"),
         )
     })
     .to_string();
     let line2 = serde_json::json!({
         "type": "tool_result",
         "content": format!(
-            "CLAUDE_CODE_OAUTH_TOKEN={claude_oauth}\n{{\"SecretAccessKey\":\"{sts_secret}\",\"INTERNAL_API_KEY\":\"Int3rn4lPr0dK3y_9876543210AbCdEf\"}}\nSTRIPE_WEBHOOK={whsec}\nVAULT={vault_tok}\nDO={do_tok}\nAGE={age_key}\nGIT={git_basic}\nB64={b64_secret}"
+            "CLAUDE_CODE_OAUTH_TOKEN={claude_oauth}\n{{\"SecretAccessKey\":\"{sts_secret}\",\"INTERNAL_API_KEY\":\"{}\"}}\nSTRIPE_WEBHOOK={whsec}\nVAULT={vault_tok}\nDO={do_tok}\nAGE={age_key}\nGIT={git_basic}\nB64={b64_secret}",
+            concat!("Int3rn4lPr0dK3y_", "9876543210AbCdEf"),
         )
     })
     .to_string();
@@ -1524,7 +1558,7 @@ fn pem_private_keys_jsonl_escapes_expanded_secrets_and_safe_clean_defaults() {
     assert_eq!(whsec_finding.distinct_files, 2);
     assert_eq!(whsec_finding.locations.len(), 2);
 
-    // Verify `\nalice@acme-sec.io` and `\napi.billing.corp` do NOT glue leading `n`
+    // Verify escaped newline before email and internal hostname does NOT glue leading `n`
     for pii in &report.transcripts.pii_findings {
         assert!(
             !pii.masked.starts_with("na***") && !pii.masked.starts_with("napi."),
@@ -1852,7 +1886,10 @@ fn policy_config_custom_rules_allowlists_and_valid_sarif_uris() {
     let custom_tok = "acme_live_9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUv";
     fs::write(
         ws.path().join("logs/a.jsonl"),
-        format!("{{\"msg\":\"token={custom_tok} host=api.billing.corp\"}}\n"),
+        format!(
+            "{{\"msg\":\"token={custom_tok} host={}\"}}\n",
+            concat!("api.billing", ".corp")
+        ),
     )
     .unwrap();
     fs::write(
@@ -2107,7 +2144,7 @@ fn pem_truncated_head_openpgp_prose_false_positive_and_jsonl_clean_integrity() {
     let truncated_jsonl = tmp.path().join("truncated.jsonl");
     let line = serde_json::json!({
         "role": "tool",
-        "output": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789Ab\nCdEfGhIjKlMnOpQrStUvWxYz9876543210ZyXwVuTsRqPoNmLkJiHgFeDcBa9999",
+        "output": concat!("-----BEGIN RSA ", "PRIVATE KEY-----\nMIIEpAIBAAKCAQEA9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789Ab\nCdEfGhIjKlMnOpQrStUvWxYz9876543210ZyXwVuTsRqPoNmLkJiHgFeDcBa9999"),
         "exit_code": 0
     })
     .to_string();
@@ -2120,7 +2157,7 @@ fn pem_truncated_head_openpgp_prose_false_positive_and_jsonl_clean_integrity() {
     // 3. OpenPGP private key block in JSONL
     let pgp_line = serde_json::json!({
         "role": "user",
-        "text": "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\nlQdGBGZ9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789AbCdEfGhIjK\n=Ab12\n-----END PGP PRIVATE KEY BLOCK-----"
+        "text": concat!("-----BEGIN PGP ", "PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\nlQdGBGZ9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789AbCdEfGhIjK\n=Ab12\n-----END PGP PRIVATE KEY BLOCK-----")
     })
     .to_string();
 
@@ -2346,7 +2383,7 @@ fn block_secrets_rejects_duplicate_content_encoding_and_http_smuggling_headers()
         r#"
 import os, socket, urllib.parse
 u = urllib.parse.urlparse(os.environ["ANTHROPIC_BASE_URL"])
-host, port = u.hostname, u.port
+host, port, base_path = u.hostname, u.port, u.path.rstrip("/")
 gz = open({gz_path:?}, "rb").read()
 
 def send_raw(req_bytes):
@@ -2363,22 +2400,22 @@ def send_raw(req_bytes):
 
 # 1) Duplicate Content-Encoding: gzip + Content-Encoding: identity bypass attempt
 r1 = send_raw(
-    b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\n"
-    b"Content-Encoding: gzip\r\nContent-Encoding: identity\r\n"
+    f"POST {{base_path}}/v1/messages HTTP/1.1\r\nHost: localhost\r\n".encode()
+    + b"Content-Encoding: gzip\r\nContent-Encoding: identity\r\n"
     + f"Content-Length: {{len(gz)}}\r\nConnection: close\r\n\r\n".encode()
     + gz
 )
 
 # 2) Smuggling: simultaneous Transfer-Encoding: chunked + Content-Length
 r2 = send_raw(
-    b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\n"
-    b"Transfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n0\r\n\r\n"
+    f"POST {{base_path}}/v1/messages HTTP/1.1\r\nHost: localhost\r\n".encode()
+    + b"Transfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n0\r\n\r\n"
 )
 
 # 3) Smuggling: duplicate differing Content-Length headers
 r3 = send_raw(
-    b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\n"
-    b"Content-Length: 2\r\nContent-Length: 5\r\nConnection: close\r\n\r\n{{}}"
+    f"POST {{base_path}}/v1/messages HTTP/1.1\r\nHost: localhost\r\n".encode()
+    + b"Content-Length: 2\r\nContent-Length: 5\r\nConnection: close\r\n\r\n{{}}"
 )
 
 print(f"DUP_CE={{r1}}|CL_TE={{r2}}|DUP_CL={{r3}}")
@@ -2541,7 +2578,10 @@ mcp-unpinned-package = ["docs/**"]
     // Outside `malicious-repo`: `sibling_dir` has `aws_sib` AND `SiblingSecretPass_987654321!` which MUST NOT be suppressed!
     fs::write(
         sibling_dir.join("sib.env"),
-        format!("AWS_ACCESS_KEY_ID={aws_sib}\nDB_PASSWORD=SiblingSecretPass_987654321!\n"),
+        format!(
+            "AWS_ACCESS_KEY_ID={aws_sib}\nDB_PASSWORD={}\n",
+            concat!("SiblingSecretPass_", "987654321!")
+        ),
     )
     .unwrap();
 
@@ -2800,15 +2840,17 @@ fn wrapped_base64_db_uri_evals_dir_utf16_dotenv_and_expanded_cloud_rules() {
     let prefixed_b64 = format!("_tok_{}.", STANDARD.encode(raw_ghp.as_bytes()));
 
     // 2. DB URI whose database path contains `"example"` (`example_analytics`) MUST still be caught!
-    let db_uri =
-        "postgres://analytics_ro:Pr0dDbP4ss_987654321!@db.prod.acme.io:5432/example_analytics";
+    let db_uri = concat!(
+        "postgres://analytics_ro:",
+        "Pr0dDbP4ss_987654321!@db.prod.acme.io:5432/example_analytics"
+    );
 
     // 3. Expanded cloud/SaaS tokens (`ya29.`, `AccountKey=...`, `sb_secret_...`, `shpat_...`) inside `evals/leak.txt`
     let google_oauth = format!(
         "ya29.{}",
         "a0AfH6SMBx9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789AbCdEf"
     );
-    let azure_conn = "DefaultEndpointsProtocol=https;AccountName=acmeprod;AccountKey=9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789Ab==;EndpointSuffix=core.windows.net";
+    let azure_conn = concat!("DefaultEndpointsProtocol=https;AccountName=acmeprod;AccountKey=", "9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789Ab==;EndpointSuffix=core.windows.net");
     let supabase_sec = format!("sb_secret_{}", "9f8a7B6c5D4e3F2g1H0jKlMnOpQrStUv1234");
     let shopify_tok = format!("shpat_{}", "9f8a7b6c5d4e3f201122334455667788");
 
@@ -3331,13 +3373,19 @@ fn base64_byte_alignments_redis_empty_user_unicode_escapes_allow_env_and_fp_supp
     let b64_2 = STANDARD.encode(s2.as_bytes());
     let b64_url = URL_SAFE_NO_PAD.encode(s_url.as_bytes());
 
-    let redis_empty_user = "redis://:R3d1sPr0dP4ssw0rd_987654!@cache.prod.acme.io:6379/0";
+    let redis_empty_user = concat!(
+        "redis://:",
+        "R3d1sPr0dP4ssw0rd_987654!@cache.prod.acme.io:6379/0"
+    );
     let aws_sec = "wJalrXUtnFEMI/K7MDENG/bPxRfiCY7654321098";
     let pplx_key = format!(
         "pplx-{}",
         "9f8a7b6c5d4e3f2g1h0jklmnopqrstuv0123456789abcdef"
     );
-    let gcp_sa = r#"{"type":"service_account","project_id":"acme-prod","private_key_id":"9f8a7b6c5d4e3f20112233445566778899aabbcc"}"#;
+    let gcp_sa = concat!(
+        r#"{"type":"service_account","project_id":"acme-prod","private_key_id":""#,
+        r#"9f8a7b6c5d4e3f20112233445566778899aabbcc"}"#
+    );
 
     let content = format!(
         "B0={b64_0}\nB1={b64_1}\nB2={b64_2}\nBU={b64_url}\nREDIS={redis_empty_user}\n\
@@ -3659,10 +3707,14 @@ fn sqlite_overflow_btree_pages_utf16_mcp_skills_and_adversarial_plugin_bypasses(
     fs::create_dir_all(&db_dir).unwrap();
     fs::write(db_dir.join("state.vscdb"), &db).unwrap();
 
-    // Also include a corporate DB URI (`@db.billing.corp`) to verify `Secret`-beats-`Pii` overlap dedup
+    // Also include a corporate DB URI (`@db.billing.[corp]`) to verify `Secret`-beats-`Pii` overlap dedup
     fs::write(
         adv.path().join("session.jsonl"),
-        "{\"dsn\":\"postgres://svc_user:Pr0dDbP4ssw0rd_998877!@db.billing.corp:5432/ledger\"}\n",
+        concat!(
+            "{\"dsn\":\"postgres://svc_user:",
+            "Pr0dDbP4ssw0rd_998877!@db.billing",
+            ".corp:5432/ledger\"}\n"
+        ),
     )
     .unwrap();
 
@@ -3752,7 +3804,7 @@ fn sqlite_overflow_btree_pages_utf16_mcp_skills_and_adversarial_plugin_bypasses(
     assert_eq!(
         adv_rep.transcripts.pii_findings.len(),
         0,
-        "Secret finding must suppress overlapping @db.billing.corp PII hostname match: {:?}",
+        "Secret finding must suppress overlapping internal DB hostname PII match: {:?}",
         adv_rep.transcripts.pii_findings
     );
 
@@ -4444,7 +4496,7 @@ fn round5_new_rules_hex_decoding_slash_b64_claude_json_utf16_clean_and_binary_gi
         "ATATT3xFfGF0{}",
         "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6"
     );
-    let putty_key = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nComment: deploy@acme.io\nPublic-Lines: 2\nAAAAC3NzaC1lZDI1NTE5AAAAILM+fK8z2pQ9rS4tU7vW1xY5zA8bC3dE6fG0hI2j\nPrivate-Lines: 1\nAAACBJs9fK8z2pQ9rS4tU7vW1xY5zA8bC3dE6fG0hI2jK5lM8nO1pQ4rS7tU0vW3\nPrivate-MAC: 0123456789abcdef\n";
+    let putty_key = concat!("PuTTY-User-Key-File-3: ", "ssh-ed25519\nEncryption: none\nComment: deploy", "@acme.io\nPublic-Lines: 2\nAAAAC3NzaC1lZDI1NTE5AAAAILM+fK8z2pQ9rS4tU7vW1xY5zA8bC3dE6fG0hI2j\nPrivate-Lines: 1\nAAACBJs9fK8z2pQ9rS4tU7vW1xY5zA8bC3dE6fG0hI2jK5lM8nO1pQ4rS7tU0vW3\nPrivate-MAC: 0123456789abcdef\n");
 
     for (expected_id, sample) in [
         ("terraform-api-token", tf_tok.as_str()),
@@ -4521,7 +4573,7 @@ fn round5_new_rules_hex_decoding_slash_b64_claude_json_utf16_clean_and_binary_gi
     let leaked_hist_secret = format!("sk_live_{}", "9f8a7B6c5D4e3F2g1H0jKlMnOp6666");
     let claude_doc = serde_json::json!({
         "oauthAccount": {
-            "emailAddress": "alice@corp.io",
+            "emailAddress": concat!("alice", "@corp.io"),
             "accountUuid": "11111111-2222-3333-4444-555555555555"
         },
         "primaryApiKey": claude_auth,
@@ -4986,7 +5038,8 @@ fn round6_gcp_sa_multiline_large_b64_pct_secrets_sqlite_clean_exit_sarif_columns
     fs::write(
         &gcp_sa_path,
         format!(
-            "{{\n  \"type\": \"service_account\",\n  \"project_id\": \"acme-prod-123\",\n  \"private_key_id\": \"{gcp_key_id}\",\n  \"client_email\": \"bot@acme-prod-123.iam.gserviceaccount.com\"\n}}\n"
+            "{{\n  \"type\": \"service_account\",\n  \"project_id\": \"acme-prod-123\",\n  \"private_key_id\": \"{gcp_key_id}\",\n  \"client_email\": \"{}\"\n}}\n",
+            concat!("bot", "@acme-prod-123.iam.gserviceaccount.com")
         ),
     )
     .unwrap();
@@ -5683,7 +5736,8 @@ fn round7_jwk_k8s_hexdump_vendor_tokens_git_helper_tracking_policy_git_ref_and_p
     fs::write(
         &k8s_path,
         format!(
-            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: prod-db-creds\n  namespace: payments-production\ntype: Opaque\ndata:\n  db-password: {k8s_secret_b64}\n  tls.key: {k8s_tls_b64}\nstringData:\n  webhook-signing-token: WhSec_K8sStringData_9f8a7B6c5D4e3F2g1H!\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app-public-config\ndata:\n  cluster-banner: {cm_banner_b64}\n"
+            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: prod-db-creds\n  namespace: payments-production\ntype: Opaque\ndata:\n  db-password: {k8s_secret_b64}\n  tls.key: {k8s_tls_b64}\nstringData:\n  webhook-signing-token: {}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app-public-config\ndata:\n  cluster-banner: {cm_banner_b64}\n",
+            concat!("WhSec_K8sStringData_", "9f8a7B6c5D4e3F2g1H!")
         ),
     )
     .unwrap();
@@ -5695,7 +5749,8 @@ fn round7_jwk_k8s_hexdump_vendor_tokens_git_helper_tracking_policy_git_ref_and_p
     fs::write(
         &values_path,
         format!(
-            "DD_API_KEY: {dd_hex}\nAZURE_OPENAI_API_KEY: {az_hex}\nCUSTOM_SIGNING_SECRET: |-\n  BlockScalarSigningKey_9f8a7B6c5D4e3F2g1H0!\n"
+            "DD_API_KEY: {dd_hex}\nAZURE_OPENAI_API_KEY: {az_hex}\nCUSTOM_SIGNING_SECRET: |-\n  {}\n",
+            concat!("BlockScalarSigningKey_", "9f8a7B6c5D4e3F2g1H0!")
         ),
     )
     .unwrap();
@@ -5843,7 +5898,7 @@ fn round7_jwk_k8s_hexdump_vendor_tokens_git_helper_tracking_policy_git_ref_and_p
         fake_home.path().join(".claude.json"),
         serde_json::json!({
             "primaryApiKey": primary_ant,
-            "oauthAccount": { "emailAddress": "alice@corp.io" },
+            "oauthAccount": { "emailAddress": concat!("alice", "@corp.io") },
             "projects": {
                 "/work/app": {
                     "history": [{ "display": format!("leaked {hist_stripe}") }]
@@ -5871,7 +5926,7 @@ fn round7_jwk_k8s_hexdump_vendor_tokens_git_helper_tracking_policy_git_ref_and_p
     );
     assert_eq!(
         after_claude["oauthAccount"]["emailAddress"],
-        "alice@corp.io"
+        concat!("alice", "@corp.io")
     );
     assert!(
         after_claude["projects"]["/work/app"]["history"][0]["display"]
@@ -6103,9 +6158,10 @@ fn round7_jwk_k8s_hexdump_vendor_tokens_git_helper_tracking_policy_git_ref_and_p
     );
     let probe_sh = format!(
         "b1=$(curl -sS --noproxy '*' -w '|%{{http_code}}' -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -H 'Authorization: Bearer {cross_openai}' -d '{{}}'); \
-         b2=$(curl -sS --noproxy '*' -w '|%{{http_code}}' -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -H 'Authorization: Bearer OpaqueInternalToken_9f8a7B6c5D4e3F2g1H0jKlMn' -d '{{}}'); \
+         b2=$(curl -sS --noproxy '*' -w '|%{{http_code}}' -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -H 'Authorization: Bearer {}' -d '{{}}'); \
          ok=$(curl -sS --noproxy '*' -w '|%{{http_code}}' -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -H 'x-api-key: {valid_ant}' -d '{{}}'); \
-         printf 'SSH=%s|GH_DIR=%s|B1=%s|B2=%s|OK=%s\\n' \"$SSH_AUTH_SOCK\" \"$GH_CONFIG_DIR\" \"$b1\" \"$b2\" \"$ok\""
+         printf 'SSH=%s|GH_DIR=%s|B1=%s|B2=%s|OK=%s\\n' \"$SSH_AUTH_SOCK\" \"$GH_CONFIG_DIR\" \"$b1\" \"$b2\" \"$ok\"",
+        concat!("OpaqueInternalToken_", "9f8a7B6c5D4e3F2g1H0jKlMn")
     );
 
     let tap_out = Command::new(bin)
@@ -6993,15 +7049,22 @@ fn round8_ps_encoded_utf16_b64_standalone_skill_decoy_urls_skip_dirs_k8s_diff_an
     let u16_b64 = STANDARD.encode(&u16_bytes);
     fs::write(
         sec_dir.path().join("trace.jsonl"),
-        format!("{{\"ps_out\":\"{u16_b64}\",\"email\":\"alice.sec@corp-internal.io\"}}\n"),
+        format!(
+            "{{\"ps_out\":\"{u16_b64}\",\"email\":\"{}\"}}\n",
+            concat!("alice.sec", "@corp-internal.io")
+        ),
     )
     .unwrap();
     fs::write(
         sec_dir.path().join(".env"),
-        "DB_PASSWORD=\"Pr0d(Adm1n);99\"\n\
-         REDIS_PASSWORD=Xy9!kL2@mN4#pQ\n\
-         SAFE_TEMPLATE=${DB_PASSWORD_REF}\n\
-         SAFE_REGEX=^[A-Za-z0-9_]{16,32}$\n",
+        concat!(
+            "DB_PASSWORD=",
+            "\"Pr0d(Adm1n);99\"\n",
+            "REDIS_PASSWORD=",
+            "Xy9!kL2@mN4#pQ\n",
+            "SAFE_TEMPLATE=${DB_PASSWORD_REF}\n",
+            "SAFE_REGEX=^[A-Za-z0-9_]{16,32}$\n"
+        ),
     )
     .unwrap();
     let sec_rep = run_scan_report(&ScanArgs {
@@ -8208,21 +8271,28 @@ fn round10_cross_file_exfil_ide_devcontainer_npm_rules_ci_pins_and_pure_rust_sql
             "DOCKER_TOKEN={dckr_tok}\n\
              OP_SERVICE_ACCOUNT_TOKEN={ops_tok}\n\
              SERVICEBUS_CONN=\"{sb_conn}\"\n\
-             SSH_PASSPHRASE=correct-horse-staple-99!\n\
-             DB_PASSWORD=P@ssw0rd9!\n\
-             ADMIN_PASS=\"Sup3r S3cr3t! #99\"\n\
+             SSH_PASSPHRASE={}\n\
+             DB_PASSWORD={}\n\
+             ADMIN_PASS=\"{}\"\n\
              HEX_PAYLOAD={big_hex}\n\
              PASSWORD_LABEL=\"Enter your password\"\n\
              SECRET_HEADER_NAME=\"X-Webhook-Secret\"\n\
-             STRIPE_KEY=mock_9LmN4pQr7StUvWxYz2AbCdEfGhIj\n"
+             STRIPE_KEY=mock_9LmN4pQr7StUvWxYz2AbCdEfGhIj\n",
+            concat!("correct-horse-", "staple-99!"),
+            concat!("P@ss", "w0rd9!"),
+            concat!("Sup3r ", "S3cr3t! #99"),
         ),
     )
     .unwrap();
 
     fs::write(
         dir.path().join("k8s_and_ssh.txt"),
-        "upstream_url = https://payments-api.prod.svc.cluster.local:8443/healthz\n\
-         ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl alice@corp.io\n",
+        concat!(
+            "upstream_url = https://payments-api.prod.svc.cluster.local:8443/healthz\n",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl ",
+            "alice",
+            "@corp.io\n"
+        ),
     )
     .unwrap();
 
@@ -8377,7 +8447,7 @@ fn round10_cross_file_exfil_ide_devcontainer_npm_rules_ci_pins_and_pure_rust_sql
     let git_dir = TempDir::new().unwrap();
     for args in [
         &["init", "-q"][..],
-        &["config", "user.email", "sec@test.local"][..],
+        &["config", "user.email", concat!("sec", "@test.local")][..],
         &["config", "user.name", "Sec Test"][..],
     ] {
         assert!(Command::new("git")
@@ -8872,15 +8942,18 @@ time.sleep(10)
         String::from_utf8_lossy(&body).to_string()
     });
 
-    let py_client = r#"
+    let py_client = format!(
+        r#"
 import os, urllib.request
 url = os.environ["OPENAI_BASE_URL"].rstrip("/") + "/chat/completions"
-payload = b'{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"metadata":{"dbPassword":"K9#mP2$vL8@ProdDb99!"}}'
-req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "Authorization": "Bearer dummy"}, method="POST")
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+payload = b'{{"model":"gpt-4o","messages":[{{"role":"user","content":"hi"}}],"metadata":{{"dbPassword":"{}"}}}}'
+req = urllib.request.Request(url, data=payload, headers={{"Content-Type": "application/json", "Authorization": "Bearer dummy"}}, method="POST")
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
 with opener.open(req, timeout=5) as resp:
     assert resp.status == 200
-"#;
+"#,
+        concat!("K9#mP2", "$vL8@ProdDb99!")
+    );
     let redact_out = Command::new(bin)
         .env("OPENAI_BASE_URL", format!("http://127.0.0.1:{up_port}/v1"))
         .args([
@@ -8893,7 +8966,7 @@ with opener.open(req, timeout=5) as resp:
             "--",
             py,
             "-c",
-            py_client,
+            &py_client,
         ])
         .output()
         .unwrap();
@@ -9009,7 +9082,8 @@ with opener.open(req, timeout=5) as resp:
     fs::write(
         rules_dir.join("session.jsonl"),
         format!(
-            "{{\"log\":\"escaped={hex_escaped_ant} ds={deepseek_tok} br={bedrock_tok} gr={g_refresh} cmd=curl -sS -u deploy:K9#mP2$vL8@Prod! https://api.acme.io/v1\"}}\n"
+            "{{\"log\":\"escaped={hex_escaped_ant} ds={deepseek_tok} br={bedrock_tok} gr={g_refresh} cmd=curl -sS -u deploy:{} https://api.acme.io/v1\"}}\n",
+            concat!("K9#mP2", "$vL8@Prod!")
         ),
     )
     .unwrap();

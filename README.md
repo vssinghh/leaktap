@@ -7,7 +7,7 @@
 
 Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`codex`), **Antigravity CLI** (`agy`), **Gemini CLI** (`gemini`), and local MCP servers (plus OpenRouter, DeepSeek, xAI, and Groq API endpoints). Offline `scan` also checks local state, MCP configs, and rule files left by Cursor, Windsurf, Cline, Roo Code, Zed, JetBrains Junie, Amazon Q, Kiro, Augment, Trae, Continue, and Aider.
 
-> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred standalone MCP servers on GitHub (`629,809` stars combined). **90% (`18 / 20`)** use unpinned packages, `:latest` tags, or mutable branches, **35% (`7 / 20`)** guide users to put raw API keys in JSON configs or CLI flags, **30% (`6 / 20`)** ship default-on telemetry in static scans (**2** without root `README` notice, plus a **7th** caught live on the wire), and **25% (`5 / 20`)** made non-API outbound HTTPS calls on startup (telemetry, update checks, or a `140` to `190 MB` browser download) before a single tool was called.
+> **2026 Top 20 MCP Audit ([full write-up & dataset](docs/mcp-top-20-audit.md)):** We ran `leaktap scan` and `leaktap tap` across the 20 most-starred standalone MCP servers on GitHub (`629,809` stars combined). **25% (`5 / 20`)** made non-API outbound HTTPS calls on startup (telemetry, update checks, or a `140` to `190 MB` browser download) before any tool ran, **35% (`7 / 20`)** ship default-on telemetry in source or live traffic (**2** without root `README` notice), **35% (`7 / 20`)** guide users to put raw API keys in JSON configs or CLI flags, and **90% (`18 / 20`)** use unpinned installs (**5** mutable `:latest` tags or GitHub branches, **13** unpinned `npx`/`uvx` quickstarts).
 
 ![leaktap offline scan and live secret blocking](docs/assets/demo.svg)
 
@@ -16,15 +16,15 @@ Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`cod
 Build from a tagged release with `cargo`:
 
 ```bash
-cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.1 --locked
+cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.2 --locked
 ```
 
 Download a prebuilt binary on macOS or Linux (read the script before running it):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.1/install.sh
+curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.2/install.sh
 less install.sh
-LEAKTAP_VERSION=v0.4.1 sh install.sh
+LEAKTAP_VERSION=v0.4.2 sh install.sh
 
 # Optional: verify GitHub Actions build attestation
 gh attestation verify ~/.local/bin/leaktap --repo vssinghh/leaktap
@@ -189,8 +189,8 @@ leaktap rules --format json
 
 ## Limitations
 
-- `leaktap` runs in user space without `sudo`, custom root certificates, or kernel hooks. Third-party HTTPS traffic from child tools is logged by `HTTP CONNECT` hostname (for proxy-aware runtimes) or by IP and port, without decrypting the encrypted TLS payload.
-- A hostile binary that ignores `*_BASE_URL`, uses gRPC, finishes a network connection faster than the socket poll interval (`15ms` on Linux, `500ms` on macOS), or sends raw UDP/DNS packets will bypass user-space checks. Run untrusted third-party code in `bubblewrap`, `landlock`, `sandbox-exec`, or a VM/container.
+- `leaktap` runs in user space without `sudo`, custom root certificates, or Linux-only kernel (`eBPF` / `CAP_BPF`) hooks so it works out of the box on both macOS and Linux. Third-party HTTPS traffic from child tools is logged by `HTTP CONNECT` hostname (for proxy-aware runtimes) or by polling OS socket tables (`15ms` on Linux, `500ms` on macOS), without decrypting the encrypted TLS payload.
+- A hostile binary that ignores `*_BASE_URL` and `HTTPS_PROXY`, uses gRPC or HTTP/3 (QUIC over UDP), finishes a network connection faster than the socket poll interval, or sends raw UDP/DNS packets will bypass user-space checks. Run untrusted third-party code in `bubblewrap`, `landlock`, `sandbox-exec`, or a VM/container.
 - PII checks only cover developer email addresses and internal hostnames. They do not detect SSNs, payment cards, or medical records.
 - `leaktap clean --apply` only removes secrets from your local disk. Rotate any key that was already sent to an API or committed to a repo.
 - `.leaktap.toml` and `.leaktapignore` files inside scanned repos are ignored by default so a cloned repo cannot hide its own findings. Pass `--trust-project-config` or `--policy-git-ref` to use them.

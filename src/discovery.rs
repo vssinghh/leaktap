@@ -549,40 +549,55 @@ impl WalkContext<'_> {
 }
 
 fn walk_path(path: &Path, ctx: &mut WalkContext<'_>, in_customization_tree: bool, depth: usize) {
-    if depth > 16 || !path.exists() || ctx.is_ignored(path) {
+    walk_path_inner(path, ctx, in_customization_tree, depth, true);
+}
+
+fn walk_path_inner(
+    path: &Path,
+    ctx: &mut WalkContext<'_>,
+    in_customization_tree: bool,
+    depth: usize,
+    needs_canon_check: bool,
+) {
+    if depth > 16 || ctx.is_ignored(path) {
         return;
     }
 
-    let Ok(meta) = fs::metadata(path) else {
-        return;
-    };
-
-    if meta.is_file() {
-        let file_in_cust = in_customization_tree
-            || has_customization_ancestor(path)
-            || has_plugin_or_skill_root_ancestor(path);
-        classify_file(path, ctx, file_in_cust, true);
-        return;
-    }
-
-    if !meta.is_dir() {
-        return;
-    }
-
-    // Track canonical real directory path to traverse symlinked plugins safely without cycles
-    if let Ok(canon) = fs::canonicalize(path) {
-        if !ctx.visited_dirs.insert(canon) {
+    if depth == 0 {
+        let Ok(meta) = fs::metadata(path) else {
+            return;
+        };
+        if meta.is_file() {
+            let file_in_cust = in_customization_tree
+                || has_customization_ancestor(path)
+                || has_plugin_or_skill_root_ancestor(path);
+            classify_file(path, ctx, file_in_cust, true);
+            return;
+        }
+        if !meta.is_dir() {
             return;
         }
     }
 
-    let dir_is_cust = in_customization_tree || is_plugin_or_skill_root(path);
+    // Only canonicalize the initial root (`depth == 0`) or symlinked directories (`needs_canon_check`),
+    // avoiding expensive `realpath` chains on every non-symlink directory across FUSE/NFS/WSL2 mounts.
+    if needs_canon_check {
+        if let Ok(canon) = fs::canonicalize(path) {
+            if !ctx.visited_dirs.insert(canon) {
+                return;
+            }
+        }
+    }
 
-    let Ok(entries) = fs::read_dir(path) else {
+    let Ok(read_iter) = fs::read_dir(path) else {
         return;
     };
+    let entries: Vec<fs::DirEntry> = read_iter.flatten().collect();
 
-    for entry in entries.flatten() {
+    let dir_is_cust =
+        in_customization_tree || entries_indicate_plugin_or_skill_root(path, &entries);
+
+    for entry in entries {
         let p = entry.path();
         if ctx.is_ignored(&p) {
             continue;
@@ -590,24 +605,80 @@ fn walk_path(path: &Path, ctx: &mut WalkContext<'_>, in_customization_tree: bool
         let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-
-        let Ok(target_meta) = fs::metadata(&p) else {
+        let Ok(ft) = entry.file_type() else {
             continue;
         };
 
-        if target_meta.is_dir() {
+        if ft.is_symlink() {
+            let Ok(target_meta) = fs::metadata(&p) else {
+                continue;
+            };
+            if target_meta.is_dir() {
+                if should_ignore_dir(path, name, dir_is_cust) {
+                    continue;
+                }
+                let child_in_cust = dir_is_cust
+                    || is_customization_dir_name(name)
+                    || has_customization_ancestor(&p);
+                walk_path_inner(&p, ctx, child_in_cust, depth + 1, true);
+            } else if target_meta.is_file() {
+                classify_file(&p, ctx, dir_is_cust, false);
+            }
+        } else if ft.is_dir() {
             if should_ignore_dir(path, name, dir_is_cust) {
                 continue;
             }
-            let child_in_cust = dir_is_cust
-                || is_customization_dir_name(name)
-                || has_customization_ancestor(&p)
-                || is_plugin_or_skill_root(&p);
-            walk_path(&p, ctx, child_in_cust, depth + 1);
-        } else if target_meta.is_file() {
+            let child_in_cust =
+                dir_is_cust || is_customization_dir_name(name) || has_customization_ancestor(&p);
+            walk_path_inner(&p, ctx, child_in_cust, depth + 1, false);
+        } else if ft.is_file() {
             classify_file(&p, ctx, dir_is_cust, false);
         }
     }
+}
+
+fn entries_indicate_plugin_or_skill_root(dir: &Path, entries: &[fs::DirEntry]) -> bool {
+    let mut has_plugin_marker = false;
+    let mut has_repo_marker = false;
+    for entry in entries {
+        let os_name = entry.file_name();
+        let Some(name) = os_name.to_str() else {
+            continue;
+        };
+        if matches!(
+            name,
+            "plugin.json"
+                | ".claude-plugin"
+                | ".codex-plugin"
+                | "gemini-extension.json"
+                | "SKILL.md"
+        ) {
+            has_plugin_marker = true;
+        }
+        if matches!(
+            name,
+            ".git"
+                | "src"
+                | "packages"
+                | "internal"
+                | "Server"
+                | "server"
+                | "go.mod"
+                | "Cargo.toml"
+                | "pyproject.toml"
+                | "setup.py"
+                | "CMakeLists.txt"
+        ) {
+            has_repo_marker = true;
+        }
+    }
+    if !has_plugin_marker {
+        return false;
+    }
+    if has_repo_marker && !has_customization_ancestor(dir) {
+        return false;
+    }
+    true
 }
 
 fn should_ignore_dir(parent: &Path, name: &str, in_customization_tree: bool) -> bool {
