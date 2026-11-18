@@ -354,7 +354,7 @@ pub struct TapArgs {
     #[arg(skip)]
     pub redact_secrets: bool,
 
-    /// Disable best-effort user-space OS socket polling (`2ms` Linux `/proc`, `150ms` macOS `lsof`; TCP & connected UDP)
+    /// Disable best-effort user-space OS socket polling (`15ms` Linux `/proc`, `500ms` macOS `lsof`; TCP & connected UDP)
     #[arg(long)]
     pub no_net_watch: bool,
 

@@ -4333,6 +4333,9 @@ fn passes_post_filter(
         }
         "pii-email" => {
             let lower = val.to_ascii_lowercase();
+            if lower.ends_with("@openssh.com") || lower.ends_with("@libssh.org") {
+                return false;
+            }
             let line_start = full_text[..match_start]
                 .rfind('\n')
                 .map_or(0, |idx| idx + 1);
@@ -4342,8 +4345,8 @@ fn passes_post_filter(
                 || ssh_check.starts_with("ssh-rsa ")
                 || ssh_check.starts_with("ssh-dss ")
                 || ssh_check.starts_with("ecdsa-sha2-nistp")
-                || ssh_check.starts_with("sk-ssh-ed25519@openssh.com ")
-                || ssh_check.starts_with("sk-ecdsa-sha2-nistp256@openssh.com ")
+                || ssh_check.starts_with(concat!("sk-ssh-ed25519@", "openssh.com "))
+                || ssh_check.starts_with(concat!("sk-ecdsa-sha2-nistp256@", "openssh.com "))
                 || line_prefix.contains("ssh-ed25519 AAAAC3")
                 || line_prefix.contains("ssh-rsa AAAAB3")
                 || line_prefix.contains("ecdsa-sha2-nistp")

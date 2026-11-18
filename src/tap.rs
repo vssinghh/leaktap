@@ -1,4 +1,4 @@
-use crate::api_tap::{start_local_api_tap_full, TapCallback};
+use crate::api_tap::{start_local_api_tap_authenticated, TapCallback};
 use crate::cli::TapArgs;
 use crate::config::PolicyConfig;
 use crate::discovery::home_dir;
@@ -145,18 +145,46 @@ pub fn default_live_log_path() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".leaktap").join("live.jsonl"))
 }
 
+pub(crate) fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let existed = dir.exists();
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(dir)?;
+        let is_leaktap_state_dir = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| matches!(n, ".leaktap" | "leaktap"));
+        if !existed || is_leaktap_state_dir {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+    }
+}
+
 fn open_private_append_file(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        create_private_dir_all(parent)?;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
-            .open(path)
+            .open(path)?;
+        enforce_private_permissions(path);
+        Ok(file)
     }
     #[cfg(not(unix))]
     {
@@ -274,10 +302,11 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
     exposed_env_keys.sort();
     preserved_profile_keys.sort();
     if scrub_env_enabled && !suppress_live_stderr && !preserved_profile_keys.is_empty() {
+        let safe_keys =
+            crate::report::terminal::sanitize_terminal_text(&preserved_profile_keys.join(", "));
         let _ = writeln!(
             io::stderr(),
-            "[leaktap:info] Preserved ambient profile/context selector(s): {} (not stripped so CLI tools do not fall back to `[default]`; use an OS filesystem sandbox to restrict `~/.aws`/`~/.kube` access).",
-            preserved_profile_keys.join(", ")
+            "[leaktap:info] Preserved ambient profile/context selector(s): {safe_keys} (not stripped so CLI tools do not fall back to `[default]`; use an OS filesystem sandbox to restrict `~/.aws`/`~/.kube` access).",
         );
     }
 
@@ -297,7 +326,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
             .or_else(|_| env::var("GEMINI_API_BASE_URL"))
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
 
-        let tap = start_local_api_tap_full(
+        let tap = start_local_api_tap_authenticated(
             anth_upstream,
             oai_upstream,
             chatgpt_upstream,
@@ -348,7 +377,7 @@ pub fn run_tap(args: &TapArgs) -> io::Result<i32> {
                 "env-inheritance",
                 "HIGH",
                 format!(
-                    "Scrubbed {} sensitive env var(s) before launch: {}",
+                    "Scrubbed {} sensitive env var(s) before launch: {} (pass --allow-env <VAR> or --no-scrub-env to keep)",
                     exposed_env_keys.len(),
                     summarize_list(&exposed_env_keys, 5)
                 ),
@@ -1001,7 +1030,9 @@ fn emit_alert(
     }
 
     if !quiet {
-        let _ = writeln!(io::stderr(), "[leaktap:{severity}] {detail}");
+        let safe_sev = crate::report::terminal::sanitize_terminal_text(severity);
+        let safe_detail = crate::report::terminal::sanitize_terminal_text(&detail);
+        let _ = writeln!(io::stderr(), "[leaktap:{safe_sev}] {safe_detail}");
     }
 }
 

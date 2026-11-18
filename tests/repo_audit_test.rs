@@ -15,8 +15,9 @@ fn utf8_multibyte_char_boundaries_never_panic_in_skill_or_secret_scans() {
     let cyrillic_prefix = "Модуль проверки безопасности — используйте токен ";
     let fake_b64 = "QWxhZGRpbjpvcGVuIHNlc2FtZSBmb3IgdGVzdGluZyBvbmx5Cg==";
     let pad_140 = "Ж".repeat(75); // 150 bytes of 2-byte UTF-8 codepoints
+    let test_sec = concat!("k9Xm2Qp7Vr4", "Tn8Wz1Yb6Cd3Fg5Hj0Kl9");
     let content = format!(
-        "---\nname: multilang\n---\n{cyrillic_prefix}{fake_b64}\n{pad_140} API_SECRET=\"k9Xm2Qp7Vr4Tn8Wz1Yb6Cd3Fg5Hj0Kl9\"\n"
+        "---\nname: multilang\n---\n{cyrillic_prefix}{fake_b64}\n{pad_140} API_SECRET=\"{test_sec}\"\n"
     );
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
 
@@ -737,4 +738,406 @@ fn skill_network_line_numbers_and_telemetry_subfolder_opt_in_nuances() {
         "opt-in-only AI training tier must not be attributed to default-on usage telemetry: {}",
         optin_tel.message
     );
+}
+
+#[test]
+fn v042_terminal_and_tui_escape_injection_and_bidi_controls_are_sanitized() {
+    use leaktap::cli::UiArgs;
+    use leaktap::report::terminal::render_scan_terminal;
+    use leaktap::tui::{render_snapshot_text, ActiveTab, DashboardApp};
+
+    let dir = TempDir::new().expect("tempdir");
+    // Server name packs CSI clear-line + green spoof, OSC-52 clipboard write + BEL, and BiDi RLO
+    let malicious_name = "srv\x1b[2K\x1b[32mFAKE_CLEAN\x1b]52;c;cHduZWQ=\x07\u{202E}txt.exe";
+    let mcp_doc = serde_json::json!({
+        "mcpServers": {
+            malicious_name: {
+                "command": "npx",
+                "args": ["-y", "@acme/unpinned-pkg"]
+            }
+        }
+    });
+    fs::write(
+        dir.path().join(".mcp.json"),
+        serde_json::to_string(&mcp_doc).unwrap(),
+    )
+    .unwrap();
+
+    let rep = run_scan_report(&ScanArgs {
+        paths: vec![dir.path().to_path_buf()],
+        no_pii: true,
+        ..Default::default()
+    });
+    let term_out = render_scan_terminal(&rep);
+    assert!(
+        !term_out.contains('\x1b') && !term_out.contains('\x07') && !term_out.contains('\u{202E}'),
+        "raw terminal escape or BiDi control leaked into scan terminal output: {term_out:?}"
+    );
+    assert!(
+        term_out.contains("\\x1b") && term_out.contains("\\u{202e}"),
+        "expected visible escaped sequences in terminal output: {term_out}"
+    );
+    assert!(
+        term_out.contains("# leaktap:ignore"),
+        "Next steps should explain inline/fingerprint suppression: {term_out}"
+    );
+
+    let mut app = DashboardApp::new(&UiArgs {
+        paths: vec![dir.path().to_path_buf()],
+        once: true,
+        no_config: true,
+        ..Default::default()
+    });
+    app.tab = ActiveTab::Mcp;
+    let tui_snap = render_snapshot_text(&mut app, 120, 28).unwrap();
+    assert!(
+        !tui_snap.contains('\x1b') && !tui_snap.contains('\x07') && !tui_snap.contains('\u{202E}'),
+        "raw terminal escape or BiDi control leaked into TUI buffer: {tui_snap:?}"
+    );
+}
+
+#[test]
+fn v042_authenticated_local_api_tap_and_connect_proxy_reject_unauthenticated_and_cross_origin() {
+    use leaktap::api_tap::{start_local_api_tap_authenticated, TapCallback};
+    use leaktap::header_audit::HeaderAuditor;
+    use leaktap::proxy_tap::start_connect_observer_tap;
+    use leaktap::rules::RuleEngine;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    let mock_up = TcpListener::bind("127.0.0.1:0").unwrap();
+    mock_up.set_nonblocking(true).unwrap();
+    let up_port = mock_up.local_addr().unwrap().port();
+    let up_hits = Arc::new(AtomicUsize::new(0));
+    let up_hits_c = Arc::clone(&up_hits);
+
+    let srv = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && up_hits_c.load(Ordering::SeqCst) < 2 {
+            if let Ok((mut s, _)) = mock_up.accept() {
+                let _ = s.set_nonblocking(false);
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                up_hits_c.fetch_add(1, Ordering::SeqCst);
+                loop {
+                    line.clear();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{{\"ok\":true}}"
+                );
+                let _ = s.flush();
+            } else {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    });
+
+    let events: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_c = Arc::clone(&events);
+    let cb: TapCallback = Arc::new(move |stream, kind, rule_id, _sev, detail| {
+        events_c
+            .lock()
+            .unwrap()
+            .push((format!("{stream}:{kind}"), rule_id.to_string(), detail));
+    });
+
+    let tap = start_local_api_tap_authenticated(
+        format!("http://127.0.0.1:{up_port}"),
+        format!("http://127.0.0.1:{up_port}"),
+        format!("http://127.0.0.1:{up_port}"),
+        true,
+        format!("http://127.0.0.1:{up_port}"),
+        true,
+        false,
+        false,
+        Arc::new(RuleEngine::new(false)),
+        Arc::new(HeaderAuditor::new()),
+        Arc::clone(&cb),
+    )
+    .unwrap();
+
+    let send_http = |port: u16, raw_req: &str| -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        s.write_all(raw_req.as_bytes()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+
+    // 1. Unauthenticated path (missing `/_lt_<hex>`) MUST return 403 Forbidden
+    let r_unauth = send_http(
+        tap.port,
+        "POST /_anthropic/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    );
+    assert!(
+        r_unauth.starts_with("HTTP/1.1 403")
+            && r_unauth.contains("leaktap_unauthorized_local_client"),
+        "unprefixed request must be rejected with 403, got: {r_unauth}"
+    );
+
+    // Extract `/_lt_<hex>/_anthropic` path from `tap.anthropic_base_url`
+    let auth_path = tap
+        .anthropic_base_url
+        .split_once(&format!("127.0.0.1:{}", tap.port))
+        .unwrap()
+        .1;
+    assert!(
+        auth_path.starts_with("/_lt_") && auth_path.ends_with("/_anthropic"),
+        "unexpected capabilities path: {auth_path}"
+    );
+
+    // 2. Browser cross-origin `Origin:` header MUST return 403 even with valid path
+    let r_csrf = send_http(
+        tap.port,
+        &format!(
+            "POST {auth_path}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        ),
+    );
+    assert!(
+        r_csrf.starts_with("HTTP/1.1 403") && r_csrf.contains("leaktap_cross_origin_rejected"),
+        "cross-origin browser request must be rejected with 403, got: {r_csrf}"
+    );
+    assert_eq!(up_hits.load(Ordering::SeqCst), 0);
+
+    // 3. Valid local CLI request succeeds with 200 OK
+    let r_ok = send_http(
+        tap.port,
+        &format!(
+            "POST {auth_path}/v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        ),
+    );
+    assert!(
+        r_ok.starts_with("HTTP/1.1 200"),
+        "authenticated CLI request should succeed, got: {r_ok}"
+    );
+    assert_eq!(up_hits.load(Ordering::SeqCst), 1);
+
+    // 4. ConnectObserverTap rejects browser Origin header with 403 and observes loopback CONNECT
+    let proxy = start_connect_observer_tap(Arc::clone(&cb))
+        .unwrap()
+        .expect("connect observer proxy");
+    let p_csrf = send_http(
+        proxy.port,
+        &format!(
+            "CONNECT 127.0.0.1:{up_port} HTTP/1.1\r\nHost: 127.0.0.1:{up_port}\r\nOrigin: https://evil.example\r\n\r\n"
+        ),
+    );
+    assert!(
+        p_csrf.starts_with("HTTP/1.1 403"),
+        "CONNECT with browser Origin header must be rejected with 403, got: {p_csrf}"
+    );
+
+    let mut tun = TcpStream::connect(("127.0.0.1", proxy.port)).unwrap();
+    tun.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    write!(
+        tun,
+        "CONNECT 127.0.0.1:{up_port} HTTP/1.1\r\nHost: 127.0.0.1:{up_port}\r\n\r\n"
+    )
+    .unwrap();
+    let mut tun_reader = BufReader::new(tun.try_clone().unwrap());
+    let mut status_line = String::new();
+    tun_reader.read_line(&mut status_line).unwrap();
+    assert!(
+        status_line.starts_with("HTTP/1.1 200"),
+        "expected CONNECT 200 tunnel, got: {status_line}"
+    );
+    loop {
+        let mut h = String::new();
+        if tun_reader.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" || h == "\n" {
+            break;
+        }
+    }
+    write!(
+        tun,
+        "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut tun_resp = String::new();
+    let _ = tun_reader.read_to_string(&mut tun_resp);
+    assert!(tun_resp.contains("200 OK"));
+    let _ = srv.join();
+
+    let recorded = events.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .any(|(_, rid, det)| rid == "http-connect"
+                && det.contains(&format!("127.0.0.1:{up_port}"))),
+        "expected http-connect event recorded for loopback CONNECT target: {recorded:?}"
+    );
+}
+
+#[test]
+fn v042_private_state_dirs_client_specific_remediation_and_openssh_alg_suppression() {
+    let ws = TempDir::new().expect("ws");
+
+    // 1. Claude Desktop config remediation must NOT falsely claim `${VAR}` interpolation works there
+    let claude_desk_dir = ws.path().join("Claude");
+    fs::create_dir_all(&claude_desk_dir).unwrap();
+    let stripe_tok = format!("sk_live_{}", "9f8a7B6c5D4e3F2g1H0jKlMnOp4c21");
+    fs::write(
+        claude_desk_dir.join("claude_desktop_config.json"),
+        serde_json::json!({
+            "mcpServers": {
+                "billing": {
+                    "command": "npx",
+                    "args": ["-y", "@acme/billing@1.2.3"],
+                    "env": { "STRIPE_KEY": stripe_tok }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // 2. Codex `.codex/config.toml` `http_headers` remediation must recommend `bearer_token_env_var` / `env_http_headers`
+    let codex_dir = ws.path().join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[mcp_servers.remote_codex]\nurl = \"https://mcp.acme.example/sse\"\n[mcp_servers.remote_codex.http_headers]\nAuthorization = \"Bearer {stripe_tok}\"\n"
+        ),
+    )
+    .unwrap();
+
+    // 3. OpenSSH `@openssh.com` / `@libssh.org` algorithm identifiers must NOT trigger `pii-email`
+    fs::write(
+        ws.path().join("ssh_algs.txt"),
+        "Supported key types: sk-ssh-ed25519@openssh.com, ssh-ed25519-cert-v01@openssh.com, zlib@openssh.com, curve25519-sha256@libssh.org\n",
+    )
+    .unwrap();
+
+    let rep = run_scan_report(&ScanArgs {
+        paths: vec![
+            claude_desk_dir.join("claude_desktop_config.json"),
+            codex_dir.join("config.toml"),
+            ws.path().join("ssh_algs.txt"),
+        ],
+        no_pii: false,
+        ..Default::default()
+    });
+
+    assert!(
+        rep.transcripts.pii_findings.is_empty(),
+        "OpenSSH/libssh RFC algorithm names must produce 0 pii-email findings, got: {:?}",
+        rep.transcripts.pii_findings
+    );
+
+    let desk_hit = rep
+        .mcp_findings
+        .iter()
+        .find(|f| f.server_name == "billing" && f.rule_id == "mcp-hardcoded-secret")
+        .expect("expected mcp-hardcoded-secret on claude_desktop_config.json");
+    assert!(
+        desk_hit.message.contains("does not expand `${VAR}`"),
+        "Claude Desktop remediation should warn that claude_desktop_config.json does not expand ${{VAR}}: {}",
+        desk_hit.message
+    );
+
+    let codex_hit = rep
+        .mcp_findings
+        .iter()
+        .find(|f| f.server_name == "remote_codex" && f.rule_id == "mcp-hardcoded-secret")
+        .expect("expected mcp-hardcoded-secret on .codex/config.toml");
+    assert!(
+        codex_hit.message.contains("env_http_headers")
+            && codex_hit.message.contains("bearer_token_env_var"),
+        "Codex config.toml remediation should recommend bearer_token_env_var / env_http_headers: {}",
+        codex_hit.message
+    );
+
+    // 4. On Unix, verify `~/.leaktap` (`0700`), `live.jsonl` (`0600`), pin parent dir (`0700`), and `--allow-env` scrub hint
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let fake_home = TempDir::new().unwrap();
+        let pins_path = fake_home.path().join(".local/share/leaktap/pins.json");
+        let bin = env!("CARGO_BIN_EXE_leaktap");
+        let mcp_py = r#"import sys, json
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "tools/list":
+        sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object"}}]}})+"\n")
+        sys.stdout.flush()
+        break
+"#;
+        let out = Command::new(bin)
+            .env("HOME", fake_home.path())
+            .env(
+                "AWS_SECRET_ACCESS_KEY",
+                concat!("wJalrXUtnFEMI/", "K7MDENG/bPxRfiCY1234567890"),
+            )
+            .args([
+                "--no-config",
+                "--mcp-pins-file",
+                pins_path.to_str().unwrap(),
+                "tap",
+                "--scrub-env",
+                "--no-net-watch",
+                "--",
+                "python3",
+                "-c",
+                mcp_py,
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(mut sin) = child.stdin.take() {
+                    let _ = writeln!(
+                        sin,
+                        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}}"
+                    );
+                }
+                child.wait_with_output()
+            })
+            .expect("run leaktap tap for state dir permission check");
+        assert!(out.status.success());
+
+        let stderr_str = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr_str.contains("--allow-env <VAR> or --no-scrub-env"),
+            "scrubbed env log should mention --allow-env / --no-scrub-env: {stderr_str}"
+        );
+
+        let leaktap_dir_mode = fs::metadata(fake_home.path().join(".leaktap"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let live_log_mode = fs::metadata(fake_home.path().join(".leaktap/live.jsonl"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let pins_dir_mode = fs::metadata(pins_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let pins_file_mode = fs::metadata(&pins_path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(leaktap_dir_mode, 0o700, "~/.leaktap must be 0700");
+        assert_eq!(live_log_mode, 0o600, "live.jsonl must be 0600");
+        assert_eq!(pins_dir_mode, 0o700, "pins parent dir must be 0700");
+        assert_eq!(pins_file_mode, 0o600, "pins.json must be 0600");
+    }
 }

@@ -1,6 +1,6 @@
 {
   "snapshot_date": "2026-11-17",
-  "leaktap_version": "0.4.1",
+  "leaktap_version": "0.4.2",
   "summary": {
     "audited_count": 20,
     "combined_stars": 629809,
@@ -24,7 +24,7 @@
       "language": "TypeScript",
       "commit": "e1dc4b18dbb9",
       "static_scan": {
-        "scan_elapsed_ms": 448,
+        "scan_elapsed_ms": 429,
         "mcp_configs_scanned": 154,
         "findings": [
           {
@@ -100,7 +100,7 @@
       "language": "TypeScript",
       "commit": "a8de90a340f4",
       "static_scan": {
-        "scan_elapsed_ms": 273,
+        "scan_elapsed_ms": 264,
         "mcp_configs_scanned": 169,
         "findings": [
           {
@@ -117,7 +117,7 @@
             "file": "packages/admin-mcp/README.md",
             "line": 36,
             "server_name": "context7-admin",
-            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -133,7 +133,7 @@
             "file": "packages/mcp/README.md",
             "line": 694,
             "server_name": "context7",
-            "message": "Setup config stores plain-text credential in `http_headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `http_headers.Authorization` instead of `bearer_token_env_var` / `env_http_headers` or environment variable reference"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -165,7 +165,7 @@
             "file": "packages/mcp/README.md",
             "line": 1535,
             "server_name": "context7",
-            "message": "Setup config stores plain-text credential in `env.CONTEXT7_API_KEY` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.CONTEXT7_API_KEY` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -212,7 +212,7 @@
       "language": "TypeScript",
       "commit": "045fb8c37d38",
       "static_scan": {
-        "scan_elapsed_ms": 251,
+        "scan_elapsed_ms": 241,
         "mcp_configs_scanned": 208,
         "findings": [
           {
@@ -264,7 +264,7 @@
       "language": "C",
       "commit": "cdfdf26483fa",
       "static_scan": {
-        "scan_elapsed_ms": 4237,
+        "scan_elapsed_ms": 4319,
         "mcp_configs_scanned": 494,
         "findings": [
           {
@@ -340,7 +340,7 @@
       "language": "TypeScript",
       "commit": "a62ea28698af",
       "static_scan": {
-        "scan_elapsed_ms": 135,
+        "scan_elapsed_ms": 127,
         "mcp_configs_scanned": 12,
         "findings": [
           {
@@ -484,7 +484,7 @@
       "language": "Go",
       "commit": "67d4dc489700",
       "static_scan": {
-        "scan_elapsed_ms": 413,
+        "scan_elapsed_ms": 433,
         "mcp_configs_scanned": 220,
         "findings": [
           {
@@ -501,7 +501,7 @@
             "file": "README.md",
             "line": 434,
             "server_name": "github",
-            "message": "Setup config stores plain-text credential in `env.GITHUB_PERSONAL_ACCESS_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.GITHUB_PERSONAL_ACCESS_TOKEN` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -509,7 +509,7 @@
             "file": "docs/installation-guides/install-antigravity.md",
             "line": 41,
             "server_name": "github",
-            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -517,7 +517,7 @@
             "file": "docs/installation-guides/install-opencode.md",
             "line": 99,
             "server_name": "github",
-            "message": "Setup config stores plain-text credential in `environment.GITHUB_PERSONAL_ACCESS_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `environment.GITHUB_PERSONAL_ACCESS_TOKEN` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           }
         ]
       },
@@ -554,7 +554,7 @@
       "language": "TypeScript",
       "commit": "3cbdaeeb2ce6",
       "static_scan": {
-        "scan_elapsed_ms": 3645,
+        "scan_elapsed_ms": 3703,
         "mcp_configs_scanned": 285,
         "findings": [
           {
@@ -598,7 +598,7 @@
       "language": "Python",
       "commit": "bbdda4b9e4b4",
       "static_scan": {
-        "scan_elapsed_ms": 502,
+        "scan_elapsed_ms": 498,
         "mcp_configs_scanned": 130,
         "findings": [
           {
@@ -666,7 +666,7 @@
       "language": "Python",
       "commit": "0cef825f802d",
       "static_scan": {
-        "scan_elapsed_ms": 355,
+        "scan_elapsed_ms": 361,
         "mcp_configs_scanned": 233,
         "findings": [
           {
@@ -710,7 +710,7 @@
       "language": "TypeScript",
       "commit": "ccede0be774f",
       "static_scan": {
-        "scan_elapsed_ms": 6749,
+        "scan_elapsed_ms": 6593,
         "mcp_configs_scanned": 463,
         "findings": [
           {
@@ -727,7 +727,7 @@
             "file": "docs/CLAUDE_CODE_SETUP.md",
             "line": 80,
             "server_name": "n8n-mcp",
-            "message": "Setup config stores plain-text credential in `env.N8N_API_KEY` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.N8N_API_KEY` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-unpinned-package",
@@ -751,7 +751,7 @@
             "file": "docs/HTTP_DEPLOYMENT.md",
             "line": 385,
             "server_name": "n8n-local-http",
-            "message": "Setup config stores plain-text credential in `env.AUTH_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.AUTH_TOKEN` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -759,7 +759,7 @@
             "file": "docs/OFFICIAL_MCP_SETUP.md",
             "line": 115,
             "server_name": "n8n-mcp",
-            "message": "Setup config stores plain-text credential in `env.N8N_MCP_ACCESS_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.N8N_MCP_ACCESS_TOKEN` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-plaintext-secret-template",
@@ -767,7 +767,7 @@
             "file": "docs/README_CLAUDE_SETUP.md",
             "line": 88,
             "server_name": "n8n-remote",
-            "message": "Setup config stores plain-text credential in `env.MCP_AUTH_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.MCP_AUTH_TOKEN` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-server-telemetry",
@@ -810,7 +810,7 @@
       "language": "Go",
       "commit": "bb6fa2e20871",
       "static_scan": {
-        "scan_elapsed_ms": 301,
+        "scan_elapsed_ms": 314,
         "mcp_configs_scanned": 59,
         "findings": [
           {
@@ -819,7 +819,7 @@
             "file": "README.md",
             "line": 493,
             "server_name": "xiaohongshu-mcp",
-            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `headers.Authorization` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "plugin-skill-network",
@@ -857,7 +857,7 @@
       "language": "Go",
       "commit": "2253fe76f09d",
       "static_scan": {
-        "scan_elapsed_ms": 765,
+        "scan_elapsed_ms": 812,
         "mcp_configs_scanned": 564,
         "findings": [
           {
@@ -898,7 +898,7 @@
       "language": "TypeScript",
       "commit": "97365c13fb88",
       "static_scan": {
-        "scan_elapsed_ms": 336,
+        "scan_elapsed_ms": 349,
         "mcp_configs_scanned": 212,
         "findings": [
           {
@@ -915,7 +915,7 @@
             "file": "README.md",
             "line": 162,
             "server_name": "actors-mcp-server",
-            "message": "Setup config stores plain-text credential in `env.APIFY_TOKEN` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `env.APIFY_TOKEN` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           },
           {
             "rule_id": "mcp-server-telemetry",
@@ -962,7 +962,7 @@
       "language": "TypeScript",
       "commit": "c083d65c7e00",
       "static_scan": {
-        "scan_elapsed_ms": 148,
+        "scan_elapsed_ms": 165,
         "mcp_configs_scanned": 65,
         "findings": [
           {
@@ -1018,7 +1018,7 @@
       "language": "Python",
       "commit": "5914ce5bd9d1",
       "static_scan": {
-        "scan_elapsed_ms": 690,
+        "scan_elapsed_ms": 712,
         "mcp_configs_scanned": 570,
         "findings": [
           {
@@ -1059,7 +1059,7 @@
             "file": "Server/README.md",
             "line": 229,
             "server_name": "UnityMCP",
-            "message": "Setup config stores plain-text credential in `headers.X-API-Key` instead of `${ENV_VAR}` or `${input:...}` secret interpolation"
+            "message": "Setup config stores plain-text credential in `headers.X-API-Key` instead of `${ENV_VAR}` / `${input:...}` secret interpolation or OS keychain"
           }
         ]
       },
@@ -1097,7 +1097,7 @@
       "language": "Python",
       "commit": "d689933ff579",
       "static_scan": {
-        "scan_elapsed_ms": 146,
+        "scan_elapsed_ms": 148,
         "mcp_configs_scanned": 2,
         "findings": []
       },
@@ -1132,7 +1132,7 @@
       "language": "Python",
       "commit": "13e480cb1198",
       "static_scan": {
-        "scan_elapsed_ms": 224,
+        "scan_elapsed_ms": 222,
         "mcp_configs_scanned": 100,
         "findings": [
           {
@@ -1177,7 +1177,7 @@
       "language": "TypeScript",
       "commit": "f48e71751e00",
       "static_scan": {
-        "scan_elapsed_ms": 401,
+        "scan_elapsed_ms": 413,
         "mcp_configs_scanned": 445,
         "findings": [
           {

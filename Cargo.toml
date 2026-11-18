@@ -1,6 +1,6 @@
 [package]
 name = "leaktap"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Offline secret, MCP & plugin auditor, terminal UI, and cooperative user-space DLP wrapper for AI coding CLIs."

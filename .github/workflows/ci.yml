@@ -42,3 +42,6 @@ jobs:
       - name: Run unit and integration tests
         shell: bash
         run: cargo test --locked --all-targets
+      - name: Dogfood repository self-scan (0 secrets, MCP risks, or PII)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --locked -- scan . --no-inline-ignore --ci --fail-on medium

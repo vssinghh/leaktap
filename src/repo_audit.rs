@@ -900,6 +900,19 @@ fn inspect_documented_secret_templates(
             let dedup = format!("mcp-plaintext-secret-template:{field}.{key}");
             if seen_dedup_keys.insert(dedup) {
                 let line = find_line_number(padded_raw, key).max(server_line);
+                let msg = if field == "http_headers" {
+                    format!(
+                        "Setup config stores plain-text credential in `{field}.{key}` instead of `bearer_token_env_var` / `env_http_headers` or environment variable reference"
+                    )
+                } else if padded_raw.contains("claude_desktop_config.json") {
+                    format!(
+                        "Setup config stores plain-text credential in `{field}.{key}` on disk (prefer OS keychain, `.mcpb` secret prompt, or `${{ENV_VAR}}` in clients that support interpolation)"
+                    )
+                } else {
+                    format!(
+                        "Setup config stores plain-text credential in `{field}.{key}` instead of `${{ENV_VAR}}` / `${{input:...}}` secret interpolation or OS keychain"
+                    )
+                };
                 out.push(McpFinding {
                     rule_id: "mcp-plaintext-secret-template",
                     server_name: server_name.to_string(),
@@ -911,9 +924,7 @@ fn inspect_documented_secret_templates(
                         "mcp-plaintext-secret-template",
                         &format!("{display}:{server_name}:{field}.{key}"),
                     ),
-                    message: format!(
-                        "Setup config stores plain-text credential in `{field}.{key}` instead of `${{ENV_VAR}}` or `${{input:...}}` secret interpolation"
-                    ),
+                    message: msg,
                 });
             }
         }

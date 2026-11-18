@@ -67,6 +67,48 @@ impl Style {
     }
 }
 
+/// Escapes terminal control characters (C0 `0x00..=0x1f` including `ESC`/`\x1b` and `BEL`/`\x07`,
+/// `DEL` `0x7f`, C1 `0x80..=0x9f`) and Unicode bidirectional override characters so untrusted
+/// repo filenames, `.mcp.json` fields, or live MCP responses cannot inject ANSI/OSC-52 sequences
+/// or spoof terminal output.
+pub fn sanitize_terminal_text(input: &str) -> String {
+    fn is_unsafe_term_char(c: char) -> bool {
+        let u = c as u32;
+        u <= 0x1f
+            || u == 0x7f
+            || (0x80..=0x9f).contains(&u)
+            || matches!(
+                c,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }
+
+    if !input.chars().any(is_unsafe_term_char) {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len() + 8);
+    for c in input.chars() {
+        if is_unsafe_term_char(c) {
+            let u = c as u32;
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ if u <= 0xff => out.push_str(&format!("\\x{u:02x}")),
+                _ => out.push_str(&format!("\\u{{{u:04x}}}")),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn render_scan_terminal(report: &FullScanReport) -> String {
     let st = Style::detect();
     let mut out = String::new();
@@ -99,7 +141,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
     let roots_label = if report.roots.is_empty() {
         "workspace MCP & instruction configs".to_string()
     } else {
-        report.roots.join(", ")
+        sanitize_terminal_text(&report.roots.join(", "))
     };
 
     out.push_str(&format!(
@@ -133,10 +175,10 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
                 "├─"
             };
             let sev_str = f.severity.as_str();
-            let rule_label = match f.secret_key.as_deref() {
+            let rule_label = sanitize_terminal_text(&match f.secret_key.as_deref() {
                 Some(key) if !key.is_empty() => format!("{} ({key})", f.rule_name),
                 _ => f.rule_name.clone(),
-            };
+            });
             let ver_tag = match f.verified {
                 Some(true) => format!(" {}", st.red("[VERIFIED ACTIVE]")),
                 Some(false) => format!(" {}", st.dim("[unverified/inactive]")),
@@ -152,11 +194,13 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             } else {
                 format!(" [{sev_str}] [fp:{}]", f.fingerprint)
             };
+            let clean_masked = sanitize_terminal_text(&f.masked);
+            let clean_file = sanitize_terminal_text(&f.first_file);
             out.push_str(&format!(
                 "  {branch} {:<20} {:<22} {}:{}{}{}\n",
                 rule_label,
-                st.yellow(&f.masked),
-                f.first_file,
+                st.yellow(&clean_masked),
+                clean_file,
                 f.first_line,
                 st.dim(&meta_note),
                 ver_tag
@@ -189,14 +233,17 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             let is_last = idx + 1 == report.mcp_findings.len();
             let branch = if is_last { "└─" } else { "├─" };
             let cont = if is_last { "   " } else { "│  " };
+            let clean_cfg = sanitize_terminal_text(&m.config_file);
             let loc_str = if m.line > 0 {
-                format!("{}:{}", m.config_file, m.line)
+                format!("{clean_cfg}:{}", m.line)
             } else {
-                m.config_file.clone()
+                clean_cfg
             };
+            let clean_srv = sanitize_terminal_text(&m.server_name);
+            let clean_msg = sanitize_terminal_text(&m.message);
             out.push_str(&format!(
                 "  {branch} {} {}\n",
-                st.bold(&m.server_name),
+                st.bold(&clean_srv),
                 st.dim(&format!(
                     "({loc_str}) [{} · {}] [fp:{}]",
                     m.severity.as_str(),
@@ -204,7 +251,7 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
                     m.fingerprint
                 ))
             ));
-            out.push_str(&format!("  {cont}  {}\n", m.message));
+            out.push_str(&format!("  {cont}  {clean_msg}\n"));
         }
         out.push('\n');
     }
@@ -293,6 +340,9 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
             ));
         }
         out.push_str(
+            "  • Suppress a test/fixture hit:   add `# leaktap:ignore` on the line or `fingerprints = [\"<fp>\"]` in `~/.config/leaktap/config.toml`\n",
+        );
+        out.push_str(
             "  • Start a watched CLI session:   leaktap --block-secrets claude   (or `--redact-secrets`)\n",
         );
         if report
@@ -326,7 +376,7 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
                 } else {
                     "├─"
                 };
-                out.push_str(&format!("  {branch} {file}\n"));
+                out.push_str(&format!("  {branch} {}\n", sanitize_terminal_text(file)));
             }
             out.push_str(
                 "Close the IDE/CLI so the SQLite database is unlocked and re-run `leaktap clean --apply`, or clear chat history inside the app. Also rotate exposed credentials at the provider immediately.\n",
@@ -372,31 +422,43 @@ pub fn render_clean_terminal(summary: &CleanSummary) -> String {
         let bak_note = item
             .backup_file
             .as_ref()
-            .map(|b| format!(" (0600 backup: {b})"))
+            .map(|b| format!(" (0600 backup: {})", sanitize_terminal_text(b)))
             .unwrap_or_default();
         out.push_str(&format!(
             "  {branch} {} — {} secret(s){}\n",
-            item.display_file,
+            sanitize_terminal_text(&item.display_file),
             item.secrets_redacted,
             st.dim(&bak_note)
         ));
     }
 
     if summary.uncleaned_sqlite_secrets > 0 {
+        let joined_uncleaned = summary
+            .uncleaned_sqlite_files
+            .iter()
+            .map(|s| sanitize_terminal_text(s))
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!(
             "\n{} {} secret(s) still remain inside {} binary SQLite/WAL file(s) ({}) — close the IDE/CLI or clear session history inside the app to purge remaining binary DB pages.\n",
             st.yellow("! Warning:"),
             summary.uncleaned_sqlite_secrets,
             summary.uncleaned_sqlite_files.len(),
-            summary.uncleaned_sqlite_files.join(", ")
+            joined_uncleaned
         ));
     } else if !summary.skipped_binary_files.is_empty() {
+        let joined_skipped = summary
+            .skipped_binary_files
+            .iter()
+            .map(|s| sanitize_terminal_text(s))
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!(
             "\n{}\n",
             st.dim(&format!(
                 "Note: skipped {} binary/SQLite file(s) ({}) with 0 uncleaned secrets.",
                 summary.skipped_binary_files.len(),
-                summary.skipped_binary_files.join(", ")
+                joined_skipped
             ))
         ));
     }
@@ -424,11 +486,13 @@ pub fn render_rules_terminal(engine: &RuleEngine) -> String {
         st.bold("Detection Rules (Transcripts, SQLite State & Live Wiretap)")
     ));
     for r in engine.rules() {
+        let clean_id = sanitize_terminal_text(&r.id);
+        let clean_desc = sanitize_terminal_text(&r.description);
         out.push_str(&format!(
             "  {:<9} {:<27} {}\n",
             r.severity.as_str(),
-            r.id,
-            st.dim(&r.description)
+            clean_id,
+            st.dim(&clean_desc)
         ));
     }
     out.push_str(&format!(

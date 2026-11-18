@@ -702,6 +702,7 @@ fn draw_top_tabs(f: &mut Frame, app: &DashboardApp, area: Rect) {
 }
 
 fn draw_secrets_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let header = Row::new(vec!["Severity", "Type", "Masked Value", "Hits", "Location"]).style(
         Style::default()
             .fg(Color::Cyan)
@@ -715,10 +716,15 @@ fn draw_secrets_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
         .map(|item| {
             Row::new(vec![
                 Cell::from(item.severity.as_str()).style(severity_style(item.severity)),
-                Cell::from(item.rule_name.clone()),
-                Cell::from(item.masked.clone()).style(Style::default().fg(Color::Yellow)),
+                Cell::from(sanitize_terminal_text(&item.rule_name)),
+                Cell::from(sanitize_terminal_text(&item.masked))
+                    .style(Style::default().fg(Color::Yellow)),
                 Cell::from(format!("{}x", item.occurrences)),
-                Cell::from(format!("{}:{}", item.first_file, item.first_line)),
+                Cell::from(format!(
+                    "{}:{}",
+                    sanitize_terminal_text(&item.first_file),
+                    item.first_line
+                )),
             ])
         })
         .collect();
@@ -750,15 +756,24 @@ fn draw_secrets_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
 }
 
 fn draw_secret_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let text = if let Some(item) = app.selected_secret_finding() {
         vec![
             Line::from(vec![
                 Span::styled("Rule: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{} ({})  ", item.rule_name, item.rule_id)),
+                Span::raw(format!(
+                    "{} ({})  ",
+                    sanitize_terminal_text(&item.rule_name),
+                    sanitize_terminal_text(&item.rule_id)
+                )),
                 Span::styled("FP: ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(format!("{}  ", item.fingerprint)),
                 Span::styled("First seen: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{}:{}", item.first_file, item.first_line)),
+                Span::raw(format!(
+                    "{}:{}",
+                    sanitize_terminal_text(&item.first_file),
+                    item.first_line
+                )),
             ]),
             Line::from(format!(
                 "Appears {} time(s) across {} file(s). Press [c] then [y] to scrub ONLY this secret across session file(s).",
@@ -778,6 +793,7 @@ fn draw_secret_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
 }
 
 fn draw_mcp_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let header = Row::new(vec!["Severity", "Target", "File", "Issue"]).style(
         Style::default()
             .fg(Color::Cyan)
@@ -789,16 +805,17 @@ fn draw_mcp_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
         .into_iter()
         .filter_map(|i| app.report.mcp_findings.get(i))
         .map(|m| {
+            let clean_cfg = sanitize_terminal_text(&m.config_file);
             let loc = if m.line > 0 {
-                format!("{}:{}", m.config_file, m.line)
+                format!("{clean_cfg}:{}", m.line)
             } else {
-                m.config_file.clone()
+                clean_cfg
             };
             Row::new(vec![
                 Cell::from(m.severity.as_str()).style(severity_style(m.severity)),
-                Cell::from(m.server_name.clone()),
+                Cell::from(sanitize_terminal_text(&m.server_name)),
                 Cell::from(loc),
-                Cell::from(m.message.clone()),
+                Cell::from(sanitize_terminal_text(&m.message)),
             ])
         })
         .collect();
@@ -829,6 +846,7 @@ fn draw_mcp_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
 }
 
 fn draw_mcp_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let indices = app.filtered_mcp_indices();
     let selected_item = app
         .mcp_state
@@ -837,17 +855,21 @@ fn draw_mcp_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
         .and_then(|&orig| app.report.mcp_findings.get(orig));
 
     let text = if let Some(m) = selected_item {
+        let clean_cfg = sanitize_terminal_text(&m.config_file);
         let loc = if m.line > 0 {
-            format!("{}:{}", m.config_file, m.line)
+            format!("{clean_cfg}:{}", m.line)
         } else {
-            m.config_file.clone()
+            clean_cfg
         };
         vec![
             Line::from(format!(
                 "`{}` in {} ({} · fp:{})",
-                m.server_name, loc, m.rule_id, m.fingerprint
+                sanitize_terminal_text(&m.server_name),
+                loc,
+                m.rule_id,
+                m.fingerprint
             )),
-            Line::from(m.message.clone()),
+            Line::from(sanitize_terminal_text(&m.message)),
         ]
     } else if !app.filter_query.trim().is_empty() {
         vec![Line::from(
@@ -866,6 +888,7 @@ fn draw_mcp_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
 }
 
 fn draw_live_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let header = Row::new(vec!["Severity", "Stream", "Kind", "Detail"]).style(
         Style::default()
             .fg(Color::Cyan)
@@ -883,10 +906,10 @@ fn draw_live_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
                 _ => Style::default().fg(Color::Cyan),
             };
             Row::new(vec![
-                Cell::from(ev.severity.clone()).style(sev_style),
-                Cell::from(ev.stream.clone()),
-                Cell::from(ev.kind.clone()),
-                Cell::from(ev.detail.clone()),
+                Cell::from(sanitize_terminal_text(&ev.severity)).style(sev_style),
+                Cell::from(sanitize_terminal_text(&ev.stream)),
+                Cell::from(sanitize_terminal_text(&ev.kind)),
+                Cell::from(sanitize_terminal_text(&ev.detail)),
             ])
         })
         .collect();
@@ -894,7 +917,7 @@ fn draw_live_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
     let log_label = app
         .live_log_path
         .as_deref()
-        .map(crate::discovery::shorten_home)
+        .map(|p| sanitize_terminal_text(&crate::discovery::shorten_home(p)))
         .unwrap_or_else(|| "~/.leaktap/live.jsonl".to_string());
 
     let table = Table::new(
@@ -923,6 +946,7 @@ fn draw_live_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
 }
 
 fn draw_live_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let indices = app.filtered_live_indices();
     let selected_ev = app
         .live_state
@@ -934,9 +958,11 @@ fn draw_live_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
         vec![
             Line::from(format!(
                 "[{}] stream=`{}` rule=`{}`",
-                ev.severity, ev.stream, ev.rule_id
+                sanitize_terminal_text(&ev.severity),
+                sanitize_terminal_text(&ev.stream),
+                sanitize_terminal_text(&ev.rule_id)
             )),
-            Line::from(ev.detail.clone()),
+            Line::from(sanitize_terminal_text(&ev.detail)),
         ]
     } else if !app.filter_query.trim().is_empty() {
         vec![Line::from(
@@ -958,6 +984,7 @@ fn draw_live_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
 }
 
 fn draw_pii_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let header = Row::new(vec!["Severity", "Type", "Masked Value", "Hits", "Location"]).style(
         Style::default()
             .fg(Color::Cyan)
@@ -971,10 +998,15 @@ fn draw_pii_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
         .map(|item| {
             Row::new(vec![
                 Cell::from(item.severity.as_str()).style(severity_style(item.severity)),
-                Cell::from(item.rule_name.clone()),
-                Cell::from(item.masked.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(sanitize_terminal_text(&item.rule_name)),
+                Cell::from(sanitize_terminal_text(&item.masked))
+                    .style(Style::default().fg(Color::Cyan)),
                 Cell::from(format!("{}x", item.occurrences)),
-                Cell::from(format!("{}:{}", item.first_file, item.first_line)),
+                Cell::from(format!(
+                    "{}:{}",
+                    sanitize_terminal_text(&item.first_file),
+                    item.first_line
+                )),
             ])
         })
         .collect();
@@ -1006,6 +1038,7 @@ fn draw_pii_table(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
 }
 
 fn draw_pii_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
+    use crate::report::terminal::sanitize_terminal_text;
     let indices = app.filtered_pii_indices();
     let selected_item = app
         .pii_state
@@ -1017,9 +1050,17 @@ fn draw_pii_detail(f: &mut Frame, app: &DashboardApp, area: Rect) {
         vec![
             Line::from(vec![
                 Span::styled("Rule: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{} ({})  ", item.rule_name, item.rule_id)),
+                Span::raw(format!(
+                    "{} ({})  ",
+                    sanitize_terminal_text(&item.rule_name),
+                    sanitize_terminal_text(&item.rule_id)
+                )),
                 Span::styled("First seen: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{}:{}", item.first_file, item.first_line)),
+                Span::raw(format!(
+                    "{}:{}",
+                    sanitize_terminal_text(&item.first_file),
+                    item.first_line
+                )),
             ]),
             Line::from(format!(
                 "Appears {} time(s) across {} file(s). (`leaktap clean` leaves emails and hostnames untouched; pass `--no-pii` during `scan` to hide.)",

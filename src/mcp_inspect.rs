@@ -1650,7 +1650,7 @@ fn check_and_update_pins(
 
 fn write_pin_store_private(path: &Path, store: &McpPinStore) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::tap::create_private_dir_all(parent)?;
     }
     let serialized = serde_json::to_vec_pretty(store).map_err(std::io::Error::other)?;
     #[cfg(unix)]

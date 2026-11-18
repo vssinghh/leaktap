@@ -331,7 +331,7 @@ def run_layer2_stdio_tap(
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "leaktap-audit", "version": "0.4.1"},
+                    "clientInfo": {"name": "leaktap-audit", "version": "0.4.2"},
                 },
             }
             assert proc.stdin is not None
@@ -571,7 +571,7 @@ def main() -> int:
     detected_ver = (
         ver_proc.stdout.strip().split()[-1]
         if ver_proc.returncode == 0 and ver_proc.stdout.strip()
-        else "0.4.1"
+        else "0.4.2"
     )
 
     existing_live: dict[str, dict] = {}

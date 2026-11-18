@@ -415,6 +415,41 @@ fn emit_proxy_observation(
     }
 }
 
+fn peer_matches_current_euid(client: &TcpStream) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let (Ok(peer), Ok(local)) = (client.peer_addr(), client.local_addr()) else {
+            return true;
+        };
+        if let (std::net::SocketAddr::V4(p4), std::net::SocketAddr::V4(l4)) = (peer, local) {
+            let peer_ip = u32::from_be_bytes(p4.ip().octets());
+            let local_ip = u32::from_be_bytes(l4.ip().octets());
+            let want_local = format!("{peer_ip:08X}:{:04X}", p4.port());
+            let want_rem = format!("{local_ip:08X}:{:04X}", l4.port());
+            let my_uid = unsafe { libc::geteuid() };
+            if let Ok(tcp_table) = std::fs::read_to_string("/proc/net/tcp") {
+                for line in tcp_table.lines().skip(1) {
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    if cols.len() >= 8
+                        && cols[1].eq_ignore_ascii_case(&want_local)
+                        && cols[2].eq_ignore_ascii_case(&want_rem)
+                    {
+                        if let Ok(sock_uid) = cols[7].parse::<u32>() {
+                            return sock_uid == my_uid;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = client;
+        true
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_proxy_client(
     mut client: TcpStream,
@@ -427,6 +462,14 @@ fn handle_proxy_client(
 ) -> io::Result<()> {
     let _ = client.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = client.set_write_timeout(Some(Duration::from_secs(30)));
+
+    if !peer_matches_current_euid(&client) {
+        let _ = write!(
+            client,
+            "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+        return Ok(());
+    }
 
     let mut reader = BufReader::new(client.try_clone()?);
     let req_line = match read_bounded(&mut reader, MAX_LINE_BYTES)? {
@@ -441,6 +484,7 @@ fn handle_proxy_client(
     };
 
     let mut headers: Vec<(String, String)> = Vec::new();
+    let mut is_browser_cross_origin = false;
     for _ in 0..MAX_HEADERS {
         match read_bounded(&mut reader, MAX_LINE_BYTES)? {
             LineOutcome::Eof | LineOutcome::TooLong => return Ok(()),
@@ -449,10 +493,27 @@ fn handle_proxy_client(
                     break;
                 }
                 if let Some((k, v)) = l.split_once(':') {
-                    headers.push((k.trim().to_string(), v.trim().to_string()));
+                    let key = k.trim();
+                    let val = v.trim();
+                    if key.eq_ignore_ascii_case("origin")
+                        || (key.eq_ignore_ascii_case("sec-fetch-site")
+                            && (val.eq_ignore_ascii_case("cross-site")
+                                || val.eq_ignore_ascii_case("same-site")))
+                    {
+                        is_browser_cross_origin = true;
+                    }
+                    headers.push((key.to_string(), val.to_string()));
                 }
             }
         }
+    }
+
+    if is_browser_cross_origin {
+        let _ = write!(
+            client,
+            "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        );
+        return Ok(());
     }
 
     if method.eq_ignore_ascii_case("CONNECT") {

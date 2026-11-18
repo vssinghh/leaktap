@@ -1851,7 +1851,32 @@ fn try_scrub_sqlite_db_pure_rust(
 }
 
 fn find_python_for_sqlite() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    let macos_has_clt = std::process::Command::new("xcode-select")
+        .arg("-p")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+
     ["python3", "python"].into_iter().find(|&cand| {
+        #[cfg(target_os = "macos")]
+        if !macos_has_clt {
+            // Avoid invoking Apple's `/usr/bin/python3` shim when Xcode Command Line Tools are not
+            // installed, which otherwise triggers a modal macOS GUI installer dialog.
+            let resolves_only_to_apple_stub = std::env::var_os("PATH")
+                .map(|paths| {
+                    std::env::split_paths(&paths)
+                        .map(|dir| dir.join(cand))
+                        .find(|p| p.is_file())
+                        .is_none_or(|first| first == std::path::Path::new("/usr/bin").join(cand))
+                })
+                .unwrap_or(true);
+            if resolves_only_to_apple_stub {
+                return false;
+            }
+        }
         std::process::Command::new(cand)
             .args(["-c", "import sqlite3"])
             .stdin(std::process::Stdio::null())
