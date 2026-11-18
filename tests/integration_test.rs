@@ -6383,15 +6383,21 @@ print("SQLITE_OK")
     {
         let mut cli = TcpStream::connect(&addr).unwrap();
         let bad_gz = b"\x1f\x8b\x08\x00corrupt_gzip_payload";
-        write!(
-            cli,
+        let mut req2 = format!(
             "POST /_anthropic/v1/messages HTTP/1.1\r\nHost: {addr}\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             bad_gz.len()
         )
-        .unwrap();
-        cli.write_all(bad_gz).unwrap();
+        .into_bytes();
+        req2.extend_from_slice(bad_gz);
+        cli.write_all(&req2).unwrap();
+        cli.flush().unwrap();
+        let _ = cli.shutdown(std::net::Shutdown::Write);
         let mut resp_s = String::new();
-        cli.read_to_string(&mut resp_s).unwrap();
+        match cli.read_to_string(&mut resp_s) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset && !resp_s.is_empty() => {}
+            Err(e) => panic!("reading corrupt gzip HTTP 400 response failed: {e}"),
+        }
         assert!(
             resp_s.starts_with("HTTP/1.1 400") && resp_s.contains("leaktap_uninspectable_payload"),
             "corrupt compressed body under --redact-secrets must fail closed: {resp_s}"

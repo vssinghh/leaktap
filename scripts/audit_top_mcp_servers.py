@@ -80,6 +80,13 @@ EXCLUDED_REPOS = {
     "budtmo/docker-android",
     "open-metadata/OpenMetadata",
     "liketrek/TREK",
+    "xerj-org/xerj",
+    "yusufkaraaslan/Skill_Seekers",
+    "tonhowtf/omniget",
+    "OpenByteInc/QuantDinger",
+    "ccfos/nightingale",
+    "JoeanAmier/XHS-Downloader",
+    "Graphify-Labs/graphify",
 }
 
 EXCLUDED_NAME_SUBSTRINGS = (
@@ -116,13 +123,19 @@ def resolve_leaktap_bin(explicit: str | None) -> str:
 def discover_top_mcp_repos(limit: int) -> list[dict]:
     """Discover top-starred standalone MCP server repositories on GitHub via `gh search repos`."""
     seen: dict[str, dict] = {}
-    for query in ("mcp in:name", "topic:mcp-server"):
+    search_arg_sets = (
+        ["mcp in:name"],
+        ["--topic", "mcp-server"],
+        ["--owner", "modelcontextprotocol"],
+        ["--topic", "mcp", "--topic", "tree-sitter"],
+    )
+    for query_args in search_arg_sets:
         res = subprocess.run(
             [
                 "gh",
                 "search",
                 "repos",
-                query,
+                *query_args,
                 "--sort",
                 "stars",
                 "--limit",
