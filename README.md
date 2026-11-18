@@ -32,17 +32,6 @@ gh attestation verify ~/.local/bin/leaktap --repo vssinghh/leaktap
 
 Prebuilt binaries, `.sha256` checksums, and build attestations for macOS, Linux, and Windows are on [GitHub Releases](https://github.com/vssinghh/leaktap/releases).
 
-## The Problem
-
-1. **Debugging leaves plain-text secrets on disk and in prompts.** When `claude`, `codex`, `cursor`, `gemini`, or `agy` debugs a project, it reads `.env` files, cloud credentials, private keys, and config files. Those values get sent in API prompts and saved in plain text inside local chat logs and SQLite databases (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini`), where they stay long after the session ends.
-2. **MCP servers, plugins, and repo configs run with your user permissions.** MCP (Model Context Protocol) tool servers and plugins start as local child processes with access to your environment variables, files, and internet connection. A cloned repo or third-party server can also trigger shell hooks (`.claude/settings.json`, `hooks.json`, IDE tasks), pull unpinned `npx` or `uvx` code on startup, send default-on telemetry, or hide prompt-override instructions inside `CLAUDE.md`, `SKILL.md`, or tool descriptions.
-3. **Standard tools leave a gap:**
-   - Git secret scanners (`gitleaks`, `trufflehog`) check repo commits, not `~/.claude` logs, SQLite `-wal` files, or MCP configs.
-   - File sandboxes (`bubblewrap`, `sandbox-exec`) can block `~/.ssh`, but the CLI still needs to read your workspace `.env` and reach its API over the internet.
-   - HTTPS inspection proxies (`mitmproxy`) can read traffic, but require installing a custom root TLS certificate that trusts a local key for all HTTPS connections.
-
-`leaktap` fills that gap as a single Rust binary with no root certificates or `sudo`. Offline, it scans local AI logs, SQLite databases, MCP configs, and plugins in ~150ms and scrubs leaked keys in place. Live, it wraps CLI or MCP sessions to strip unrelated shell secrets, check outgoing API requests over `localhost`, and log outbound network connections.
-
 ## Usage
 
 ### Scan logs, databases, MCP configs, and plugins
