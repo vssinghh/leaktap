@@ -102,7 +102,16 @@ fn write_json_error_response(
         payload.len(),
         payload
     )?;
-    client.flush()
+    client.flush()?;
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let _ = client.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut drain = [0u8; 1024];
+    for _ in 0..4 {
+        if client.read(&mut drain).unwrap_or(0) == 0 {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub struct LocalApiTap {
@@ -149,13 +158,18 @@ struct UpstreamTargets {
 
 fn generate_session_prefix() -> String {
     let mut bytes = [0u8; 16];
-    let mut filled = false;
-    #[cfg(unix)]
-    {
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            filled = f.read_exact(&mut bytes).is_ok();
+    let filled = {
+        #[cfg(unix)]
+        {
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut bytes))
+                .is_ok()
         }
-    }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
     if !filled {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};

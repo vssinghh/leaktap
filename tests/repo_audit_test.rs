@@ -872,6 +872,8 @@ fn v042_authenticated_local_api_tap_and_connect_proxy_reject_unauthenticated_and
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         s.write_all(raw_req.as_bytes()).unwrap();
+        let _ = s.flush();
+        let _ = s.shutdown(std::net::Shutdown::Write);
         let mut out = String::new();
         let _ = s.read_to_string(&mut out);
         out
