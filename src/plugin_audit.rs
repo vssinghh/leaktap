@@ -4800,7 +4800,39 @@ fn is_benign_ignore_or_filter_context(folded: &str, match_byte_idx: usize, needl
         .iter()
         .filter(|&&p| window_lower.contains(p))
         .count();
-    peer_hits >= 2 || (peer_hits >= 1 && cur_lower.contains(".git"))
+    if peer_hits >= 2 || (peer_hits >= 1 && cur_lower.contains(".git")) {
+        return true;
+    }
+
+    if matches!(needle, "'.npmrc'" | "\".npmrc\"") {
+        const CONFIG_DOTFILE_PEERS: &[&str] = &[
+            "\".eslintrc\"",
+            "'.eslintrc'",
+            "\".prettierrc\"",
+            "'.prettierrc'",
+            "\".editorconfig\"",
+            "'.editorconfig'",
+            "\".gitignore\"",
+            "'.gitignore'",
+            "\".nvmrc\"",
+            "'.nvmrc'",
+            "\".babelrc\"",
+            "'.babelrc'",
+            "\".stylelintrc\"",
+            "'.stylelintrc'",
+            "\".browserslistrc\"",
+            "'.browserslistrc'",
+        ];
+        let cfg_peers = CONFIG_DOTFILE_PEERS
+            .iter()
+            .filter(|&&p| window_lower.contains(p))
+            .count();
+        if cfg_peers >= 2 {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn resolve_url_identifiers(code: &str) -> Vec<(String, String)> {

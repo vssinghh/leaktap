@@ -24,6 +24,8 @@ In Layer 2, **18 of the 20 servers (`90%`)** completed a live `stdio` `initializ
 | **Layer 2 (`tap`)** | **Non-API outbound HTTPS calls on startup** (`mcp-live-telemetry`, `http-connect`) | **5 / 20** | **25%** | Sent telemetry, checked for updates, or downloaded a `140` to `190 MB` browser archive during startup before any tool was called (excludes expected primary API calls like `github-mcp-server` calling `api.github.com`). |
 | **Layer 2 (`tap`)** | **Poisoned live tool descriptions** (`mcp-tool-poisoning`) | **0 / 20** | **0%** | Zero hidden prompt-injection instructions or stealth credential-stealing directives across all **470** live tools (`18 / 20` servers). |
 
+> **Check your own setup:** [`leaktap`](https://github.com/vssinghh/leaktap) is an open-source MIT Rust binary that scans your local `~/.claude`, `~/.codex`, `~/.cursor`, `~/.gemini`, and `.mcp.json` configs offline, scrubs leaked secrets in place, and wiretaps live CLI or MCP sessions. Install with `brew install vssinghh/tap/leaktap` (or download a verified binary from [GitHub Releases](https://github.com/vssinghh/leaktap/releases)) and run `leaktap`.
+
 ---
 
 ## Key Findings Across Both Layers

@@ -13,13 +13,19 @@ Live session wrapping works with **Claude Code** (`claude`), **Codex CLI** (`cod
 
 ## Install
 
-Build from a tagged release with `cargo`:
+Install with Homebrew on macOS or Linux:
+
+```bash
+brew install vssinghh/tap/leaktap
+```
+
+Or build from a tagged release with `cargo`:
 
 ```bash
 cargo install --git https://github.com/vssinghh/leaktap --tag v0.4.2 --locked
 ```
 
-Download a prebuilt binary on macOS or Linux (read the script before running it):
+Or download a prebuilt binary on macOS or Linux (read the script before running it):
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/vssinghh/leaktap/v0.4.2/install.sh
@@ -190,7 +196,7 @@ leaktap rules --format json
 
 ## Privacy
 
-- `leaktap scan` and `leaktap clean` make no network requests by default. Live checks only run when `--verify` or `--inspect-mcp` is passed, and the `npx` wrapper skips runtime downloads unless `LEAKTAP_ALLOW_DOWNLOAD=1` is set.
+- `leaktap scan` and `leaktap clean` make no network requests by default. Live checks only run when `--verify` or `--inspect-mcp` is passed.
 - No telemetry, analytics, or accounts.
 - Matched secrets are masked (`sk_live_9f...4c21`) in terminal, UI, JSON, SARIF, and `~/.leaktap/live.jsonl` output.
 
