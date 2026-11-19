@@ -251,7 +251,9 @@ pub fn render_scan_terminal(report: &FullScanReport) -> String {
                     m.fingerprint
                 ))
             ));
-            out.push_str(&format!("  {cont}  {clean_msg}\n"));
+            for line in wrap_terminal_lines(&clean_msg, 100) {
+                out.push_str(&format!("  {cont}  {line}\n"));
+            }
         }
         out.push('\n');
     }
@@ -545,4 +547,30 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn wrap_terminal_lines(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_chars = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
+        if current.is_empty() {
+            current.push_str(word);
+            current_chars = word_chars;
+        } else if current_chars + 1 + word_chars <= max_width {
+            current.push(' ');
+            current.push_str(word);
+            current_chars += 1 + word_chars;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+            current_chars = word_chars;
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }

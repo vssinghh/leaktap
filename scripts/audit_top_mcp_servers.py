@@ -489,6 +489,19 @@ def compute_summary(servers: list[dict]) -> dict:
     secret_cfg = count_rule("mcp-cli-arg-secret", "mcp-plaintext-secret-template")
     cli_arg_secret = count_rule("mcp-cli-arg-secret")
     telemetry_any = count_rule("mcp-server-telemetry", "mcp-undisclosed-telemetry")
+    telemetry_combined = sum(
+        1
+        for s in servers
+        if any(
+            f["rule_id"] in ("mcp-server-telemetry", "mcp-undisclosed-telemetry")
+            for f in s["static_scan"]["findings"]
+        )
+        or bool(s.get("live_tap", {}).get("live_telemetry"))
+        or any(
+            "oraios-software.de" in h
+            for h in s.get("live_tap", {}).get("live_connect_hosts", [])
+        )
+    )
     telemetry_undisclosed = count_rule("mcp-undisclosed-telemetry")
     pipe_to_shell = count_rule("mcp-remote-code-exec")
 
@@ -519,6 +532,7 @@ def compute_summary(servers: list[dict]) -> dict:
         "secret_in_config_or_cli_arg_count": secret_cfg,
         "cli_arg_secret_count": cli_arg_secret,
         "default_on_telemetry_count": telemetry_any,
+        "default_on_telemetry_combined_count": telemetry_combined,
         "undisclosed_telemetry_count": telemetry_undisclosed,
         "pipe_to_shell_installer_count": pipe_to_shell,
         "live_tap_handshake_completed_count": live_handshakes,
